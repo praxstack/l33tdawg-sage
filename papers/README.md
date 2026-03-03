@@ -39,8 +39,8 @@ DOIs will be updated here after Zenodo upload.
 ## SHA-256 Checksums
 
 ```
-03718b72ce2a1db47befeffa6108a64ac65f9166b3a93cc01dc88258baada234  Paper1 - Agent Memory Infrastructure - Byzantine-Resilient Institutional Memory for Multi-Agent Systems.pdf
-93a1a21090def7448a572eb87acf41a4a81f6501186d62320edeba02ace44213  Paper2 - Consensus-Validated Memory Improves Agent Performance on Complex Tasks.pdf
+c10859717df7cde0d986f43526931df0ac6667964d0347195d9388b8e9fcbc72  Paper1 - Agent Memory Infrastructure - Byzantine-Resilient Institutional Memory for Multi-Agent Systems.pdf
+277c4a3ad290c4d645da5e00a9596bf9bc3ec34f67ffa747580dadfa8b592796  Paper2 - Consensus-Validated Memory Improves Agent Performance on Complex Tasks.pdf
 e8f16b4dcf9868467de17b9ea9f983e2a3128fed55d33d32bfa24133f9de2e6d  Paper3 - Institutional Memory as Organizational Knowledge - AI Agents That Learn Their Jobs from Experience Not Instructions.pdf
 ```
 
