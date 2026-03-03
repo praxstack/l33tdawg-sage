@@ -832,7 +832,7 @@ sage/
 ├── sdk/python/                       # Python SDK (sync + async clients)
 │   ├── src/sage_sdk/                 # Client, auth, models, exceptions
 │   ├── tests/                        # 21 pytest tests (mocked httpx via respx)
-│   └── examples/                     # 4 runnable examples
+│   └── examples/                     # 8 runnable examples
 ├── deploy/
 │   ├── docker-compose.yml            # 11 containers (core network)
 │   ├── docker-compose.monitoring.yml # Prometheus + Grafana
@@ -845,9 +845,7 @@ sage/
 │   ├── integration/                  # Memory lifecycle, consensus, PoE tests
 │   ├── byzantine/                    # BFT fault tolerance tests
 │   └── benchmark/                    # k6 load tests
-├── integrations/
-│   └── levelup/                      # Level Up CTF proof-of-concept integration
-├── papers/                           # Research papers (PDFs)
+├── papers/                           # Research papers (PDFs, CC BY 4.0)
 ├── .github/workflows/ci.yml          # CI: lint, test, build, docker, sdk-test
 ├── Makefile                          # 18 build/test/deploy targets
 ├── go.mod                            # Go 1.22, CometBFT v0.38.15
