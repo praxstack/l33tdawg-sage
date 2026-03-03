@@ -18,7 +18,8 @@ linters:
 
 linters-settings:
   govet:
-    shadow: true
+    enable:
+      - shadow
   errcheck:
     check-type-assertions: true
   gosec:
