@@ -44,7 +44,7 @@ func (h *HealthChecker) HealthHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(httpStatus)
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":  status,
 		"version": "1.0.0",
 	})
@@ -65,7 +65,7 @@ func (h *HealthChecker) ReadinessHandler(w http.ResponseWriter, r *http.Request)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(httpStatus)
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":   status,
 		"postgres": pgOK,
 		"cometbft": cmtOK,

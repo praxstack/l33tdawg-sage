@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -65,8 +66,8 @@ func cmdKeygen() {
 
 	// Save seed to file
 	filename := fmt.Sprintf("sage-agent-%s.key", agentID[:8])
-	if err := os.WriteFile(filename, priv.Seed(), 0600); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not save key file: %v\n", err)
+	if writeErr := os.WriteFile(filename, priv.Seed(), 0600); writeErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not save key file: %v\n", writeErr)
 	} else {
 		fmt.Printf("Seed saved to:          %s\n", filename)
 	}
@@ -84,7 +85,12 @@ func cmdStatus() {
 
 	for i, url := range urls {
 		fmt.Printf("==> Node %d (%s):\n", i, url)
-		resp, err := client.Get(url)
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+		if err != nil {
+			fmt.Printf("  Error: %v\n", err)
+			continue
+		}
+		resp, err := client.Do(req)
 		if err != nil {
 			fmt.Printf("  Error: %v\n", err)
 			continue
@@ -94,7 +100,7 @@ func cmdStatus() {
 		resp.Body.Close()
 
 		var result map[string]interface{}
-		if err := json.Unmarshal(body, &result); err == nil {
+		if unmarshalErr := json.Unmarshal(body, &result); unmarshalErr == nil {
 			formatted, _ := json.MarshalIndent(result, "  ", "  ")
 			fmt.Printf("  %s\n", formatted)
 		} else {
@@ -104,7 +110,12 @@ func cmdStatus() {
 }
 
 func cmdHealth(apiURL string) {
-	resp, err := http.Get(apiURL + "/health")
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, apiURL+"/health", nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -114,7 +125,7 @@ func cmdHealth(apiURL string) {
 	body, _ := io.ReadAll(resp.Body)
 
 	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err == nil {
+	if unmarshalErr := json.Unmarshal(body, &result); unmarshalErr == nil {
 		formatted, _ := json.MarshalIndent(result, "", "  ")
 		fmt.Println(string(formatted))
 	} else {

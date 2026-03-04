@@ -23,17 +23,22 @@ const stateEpochKey = "epoch"
 
 // SaveState persists the app state to BadgerDB.
 func SaveState(bs *store.BadgerStore, state *AppState) error {
+	var err error
+
 	heightBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(heightBytes, uint64(state.Height))
-	if err := bs.SetState(stateHeightKey, heightBytes); err != nil {
+	binary.BigEndian.PutUint64(heightBytes, uint64(state.Height)) // #nosec G115 -- height is always non-negative
+	err = bs.SetState(stateHeightKey, heightBytes)
+	if err != nil {
 		return fmt.Errorf("save height: %w", err)
 	}
-	if err := bs.SetState(stateAppHashKey, state.AppHash); err != nil {
+	err = bs.SetState(stateAppHashKey, state.AppHash)
+	if err != nil {
 		return fmt.Errorf("save app hash: %w", err)
 	}
 	epochBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(epochBytes, uint64(state.EpochNum))
-	if err := bs.SetState(stateEpochKey, epochBytes); err != nil {
+	binary.BigEndian.PutUint64(epochBytes, uint64(state.EpochNum)) // #nosec G115 -- epoch is always non-negative
+	err = bs.SetState(stateEpochKey, epochBytes)
+	if err != nil {
 		return fmt.Errorf("save epoch: %w", err)
 	}
 	return nil
@@ -47,18 +52,18 @@ func LoadState(bs *store.BadgerStore) (*AppState, error) {
 	if err != nil {
 		return state, nil // Fresh start
 	}
-	if heightBytes != nil && len(heightBytes) == 8 {
-		state.Height = int64(binary.BigEndian.Uint64(heightBytes))
+	if len(heightBytes) == 8 {
+		state.Height = int64(binary.BigEndian.Uint64(heightBytes)) // #nosec G115 -- safe uint64 to int64
 	}
 
-	appHash, err := bs.GetState(stateAppHashKey)
-	if err == nil && appHash != nil {
+	appHash, appHashErr := bs.GetState(stateAppHashKey)
+	if appHashErr == nil && appHash != nil {
 		state.AppHash = appHash
 	}
 
-	epochBytes, err := bs.GetState(stateEpochKey)
-	if err == nil && epochBytes != nil && len(epochBytes) == 8 {
-		state.EpochNum = int64(binary.BigEndian.Uint64(epochBytes))
+	epochBytes, epochErr := bs.GetState(stateEpochKey)
+	if epochErr == nil && epochBytes != nil && len(epochBytes) == 8 {
+		state.EpochNum = int64(binary.BigEndian.Uint64(epochBytes)) // #nosec G115 -- safe uint64 to int64
 	}
 
 	return state, nil
@@ -84,7 +89,7 @@ func computeBlockHash(memoryIDs []string, height int64) []byte {
 	}
 
 	heightBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(heightBytes, uint64(height))
+	binary.BigEndian.PutUint64(heightBytes, uint64(height)) // #nosec G115 -- height is always non-negative
 	h.Write(heightBytes)
 
 	return h.Sum(nil)

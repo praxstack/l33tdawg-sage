@@ -39,7 +39,8 @@ func (s *Server) handleDeptRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req DeptRegisterReq
-	if err := decodeJSON(r, &req); err != nil {
+	err := decodeJSON(r, &req)
+	if err != nil {
 		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
 		return
 	}
@@ -54,7 +55,7 @@ func (s *Server) handleDeptRegister(w http.ResponseWriter, r *http.Request) {
 
 	deptTx := &tx.ParsedTx{
 		Type:      tx.TxTypeDeptRegister,
-		Nonce:     uint64(time.Now().UnixNano()),
+		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
 		Timestamp: time.Now(),
 		DeptRegister: &tx.DeptRegister{
 			OrgID:       orgID,
@@ -67,7 +68,8 @@ func (s *Server) handleDeptRegister(w http.ResponseWriter, r *http.Request) {
 
 	embedAgentAuth(r.Context(), deptTx)
 
-	if err := tx.SignTx(deptTx, s.signingKey); err != nil {
+	err = tx.SignTx(deptTx, s.signingKey)
+	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to sign dept register tx")
 		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
 		return
@@ -151,7 +153,8 @@ func (s *Server) handleDeptAddMember(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req DeptAddMemberReq
-	if err := decodeJSON(r, &req); err != nil {
+	err := decodeJSON(r, &req)
+	if err != nil {
 		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
 		return
 	}
@@ -168,20 +171,21 @@ func (s *Server) handleDeptAddMember(w http.ResponseWriter, r *http.Request) {
 
 	addTx := &tx.ParsedTx{
 		Type:      tx.TxTypeDeptAddMember,
-		Nonce:     uint64(time.Now().UnixNano()),
+		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
 		Timestamp: time.Now(),
 		DeptAddMember: &tx.DeptAddMember{
 			OrgID:     orgID,
 			DeptID:    deptID,
 			AgentID:   req.AgentID,
-			Clearance: tx.ClearanceLevel(req.Clearance),
+			Clearance: tx.ClearanceLevel(req.Clearance), // #nosec G115 -- validated small int
 			Role:      req.Role,
 		},
 	}
 
 	embedAgentAuth(r.Context(), addTx)
 
-	if err := tx.SignTx(addTx, s.signingKey); err != nil {
+	err = tx.SignTx(addTx, s.signingKey)
+	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to sign dept add member tx")
 		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
 		return
@@ -217,7 +221,7 @@ func (s *Server) handleDeptRemoveMember(w http.ResponseWriter, r *http.Request) 
 
 	removeTx := &tx.ParsedTx{
 		Type:      tx.TxTypeDeptRemoveMember,
-		Nonce:     uint64(time.Now().UnixNano()),
+		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
 		Timestamp: time.Now(),
 		DeptRemoveMember: &tx.DeptRemoveMember{
 			OrgID:   orgID,
@@ -228,7 +232,8 @@ func (s *Server) handleDeptRemoveMember(w http.ResponseWriter, r *http.Request) 
 
 	embedAgentAuth(r.Context(), removeTx)
 
-	if err := tx.SignTx(removeTx, s.signingKey); err != nil {
+	err := tx.SignTx(removeTx, s.signingKey)
+	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to sign dept remove member tx")
 		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
 		return

@@ -111,7 +111,7 @@ func NewSageApp(badgerPath string, postgresURL string, logger zerolog.Logger) (*
 	ctx := context.Background()
 	ps, err := store.NewPostgresStore(ctx, postgresURL)
 	if err != nil {
-		bs.CloseBadger()
+		_ = bs.CloseBadger()
 		return nil, fmt.Errorf("connect postgres: %w", err)
 	}
 
@@ -141,8 +141,8 @@ func NewSageApp(badgerPath string, postgresURL string, logger zerolog.Logger) (*
 	} else if len(persistedVals) > 0 {
 		for id, power := range persistedVals {
 			info := &validator.ValidatorInfo{ID: id, Power: power}
-			if err := app.validators.AddValidator(info); err != nil {
-				logger.Warn().Err(err).Str("validator", id).Msg("failed to restore validator")
+			if addErr := app.validators.AddValidator(info); addErr != nil {
+				logger.Warn().Err(addErr).Str("validator", id).Msg("failed to restore validator")
 			}
 		}
 		logger.Info().Int("validators", app.validators.Size()).Msg("validators restored from state")
@@ -245,8 +245,8 @@ func (app *SageApp) FinalizeBlock(_ context.Context, req *abcitypes.RequestFinal
 
 		if result.Code == 0 {
 			agentID := auth.PublicKeyToAgentID(parsedTx.PublicKey)
-			if err := app.badgerStore.SetNonce(agentID, parsedTx.Nonce); err != nil {
-				app.logger.Error().Err(err).Msg("failed to update nonce")
+			if nonceErr := app.badgerStore.SetNonce(agentID, parsedTx.Nonce); nonceErr != nil {
+				app.logger.Error().Err(nonceErr).Msg("failed to update nonce")
 			}
 
 			if parsedTx.Type == tx.TxTypeMemorySubmit && parsedTx.MemorySubmit != nil {
@@ -382,8 +382,8 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 		contentHash = ch[:]
 	}
 
-	if err := app.badgerStore.SetMemoryHash(memoryID, contentHash, string(memory.StatusProposed)); err != nil {
-		return &abcitypes.ExecTxResult{Code: 12, Log: fmt.Sprintf("badger write error: %v", err)}
+	if setErr := app.badgerStore.SetMemoryHash(memoryID, contentHash, string(memory.StatusProposed)); setErr != nil {
+		return &abcitypes.ExecTxResult{Code: 12, Log: fmt.Sprintf("badger write error: %v", setErr)}
 	}
 
 	memType := txMemoryTypeToString(submit.MemoryType)
@@ -407,8 +407,8 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 	if classification == 0 {
 		classification = uint8(tx.ClearanceInternal) // Default to INTERNAL
 	}
-	if err := app.badgerStore.SetMemoryClassification(memoryID, classification); err != nil {
-		app.logger.Error().Err(err).Str("memory_id", memoryID).Msg("failed to set memory classification")
+	if classErr := app.badgerStore.SetMemoryClassification(memoryID, classification); classErr != nil {
+		app.logger.Error().Err(classErr).Str("memory_id", memoryID).Msg("failed to set memory classification")
 	}
 
 	app.pendingWrites = append(app.pendingWrites, pendingWrite{
@@ -451,7 +451,8 @@ func (app *SageApp) processMemoryVote(parsedTx *tx.ParsedTx, height int64, block
 
 	// Increment on-chain validator vote stats for PoE scoring
 	accepted := decision == "accept"
-	if err := app.badgerStore.IncrementVoteStats(validatorID, accepted, uint64(height)); err != nil {
+	uHeight := uint64(height) // #nosec G115 -- height is always non-negative
+	if err := app.badgerStore.IncrementVoteStats(validatorID, accepted, uHeight); err != nil {
 		app.logger.Error().Err(err).Str("validator", validatorID).Msg("failed to increment vote stats")
 	}
 
@@ -593,8 +594,8 @@ func (app *SageApp) processAccessRequest(parsedTx *tx.ParsedTx, height int64, bl
 	requestID := hex.EncodeToString(h[:16])
 
 	// Store in BadgerDB
-	if err := app.badgerStore.SetAccessRequest(requestID, agentID, req.TargetDomain, "pending", height); err != nil {
-		return &abcitypes.ExecTxResult{Code: 32, Log: fmt.Sprintf("badger write error: %v", err)}
+	if setErr := app.badgerStore.SetAccessRequest(requestID, agentID, req.TargetDomain, "pending", height); setErr != nil {
+		return &abcitypes.ExecTxResult{Code: 32, Log: fmt.Sprintf("badger write error: %v", setErr)}
 	}
 
 	// Buffer PostgreSQL write
@@ -643,14 +644,14 @@ func (app *SageApp) processAccessGrant(parsedTx *tx.ParsedTx, height int64, bloc
 	}
 
 	// Write grant to BadgerDB
-	if err := app.badgerStore.SetAccessGrant(grant.Domain, grant.GranteeID, grant.Level, grant.ExpiresAt, granterID); err != nil {
-		return &abcitypes.ExecTxResult{Code: 36, Log: fmt.Sprintf("badger write error: %v", err)}
+	if setErr := app.badgerStore.SetAccessGrant(grant.Domain, grant.GranteeID, grant.Level, grant.ExpiresAt, granterID); setErr != nil {
+		return &abcitypes.ExecTxResult{Code: 36, Log: fmt.Sprintf("badger write error: %v", setErr)}
 	}
 
 	// Update access request status if request_id provided
 	if grant.RequestID != "" {
-		if err := app.badgerStore.UpdateAccessRequestStatus(grant.RequestID, "granted"); err != nil {
-			app.logger.Warn().Err(err).Str("request_id", grant.RequestID).Msg("failed to update access request status")
+		if updateErr := app.badgerStore.UpdateAccessRequestStatus(grant.RequestID, "granted"); updateErr != nil {
+			app.logger.Warn().Err(updateErr).Str("request_id", grant.RequestID).Msg("failed to update access request status")
 		}
 		app.pendingWrites = append(app.pendingWrites, pendingWrite{
 			writeType: "access_request_status",
@@ -708,8 +709,8 @@ func (app *SageApp) processAccessRevoke(parsedTx *tx.ParsedTx, height int64, blo
 	}
 
 	// Delete grant from BadgerDB
-	if err := app.badgerStore.DeleteAccessGrant(revoke.Domain, revoke.GranteeID); err != nil {
-		return &abcitypes.ExecTxResult{Code: 39, Log: fmt.Sprintf("badger write error: %v", err)}
+	if delErr := app.badgerStore.DeleteAccessGrant(revoke.Domain, revoke.GranteeID); delErr != nil {
+		return &abcitypes.ExecTxResult{Code: 39, Log: fmt.Sprintf("badger write error: %v", delErr)}
 	}
 
 	// Buffer PostgreSQL write
@@ -766,14 +767,14 @@ func (app *SageApp) processAccessQuery(parsedTx *tx.ParsedTx, height int64, bloc
 	}
 
 	// Return content hashes (not full content)
-	var memoryIDs []string
+	memoryIDs := make([]string, 0, len(records))
 	for _, r := range records {
 		memoryIDs = append(memoryIDs, r.MemoryID)
 	}
 
 	// Write audit log
-	if err := app.badgerStore.AppendAccessLog(height, agentID, query.Domain, "query"); err != nil {
-		app.logger.Error().Err(err).Msg("failed to write access log")
+	if logErr := app.badgerStore.AppendAccessLog(height, agentID, query.Domain, "query"); logErr != nil {
+		app.logger.Error().Err(logErr).Msg("failed to write access log")
 	}
 
 	// Buffer audit log to PostgreSQL
@@ -818,15 +819,15 @@ func (app *SageApp) processDomainRegister(parsedTx *tx.ParsedTx, height int64, b
 
 	// If parent domain specified, verify registrant owns parent
 	if reg.ParentDomain != "" {
-		isOwner, err := app.badgerStore.IsDomainOwnerOrAncestor(reg.ParentDomain, ownerID)
-		if err != nil || !isOwner {
+		isOwner, parentErr := app.badgerStore.IsDomainOwnerOrAncestor(reg.ParentDomain, ownerID)
+		if parentErr != nil || !isOwner {
 			return &abcitypes.ExecTxResult{Code: 45, Log: fmt.Sprintf("access denied: %s does not own parent domain %s", ownerID[:16], reg.ParentDomain)}
 		}
 	}
 
 	// Write to BadgerDB
-	if err := app.badgerStore.RegisterDomain(reg.DomainName, ownerID, reg.ParentDomain, height); err != nil {
-		return &abcitypes.ExecTxResult{Code: 46, Log: fmt.Sprintf("badger write error: %v", err)}
+	if regErr := app.badgerStore.RegisterDomain(reg.DomainName, ownerID, reg.ParentDomain, height); regErr != nil {
+		return &abcitypes.ExecTxResult{Code: 46, Log: fmt.Sprintf("badger write error: %v", regErr)}
 	}
 
 	// Buffer PostgreSQL write
@@ -893,13 +894,13 @@ func (app *SageApp) processOrgRegister(parsedTx *tx.ParsedTx, height int64, bloc
 	}
 
 	// Register org on-chain
-	if err := app.badgerStore.RegisterOrg(orgID, reg.Name, reg.Description, adminID, height); err != nil {
-		return &abcitypes.ExecTxResult{Code: 52, Log: fmt.Sprintf("badger write error: %v", err)}
+	if regErr := app.badgerStore.RegisterOrg(orgID, reg.Name, reg.Description, adminID, height); regErr != nil {
+		return &abcitypes.ExecTxResult{Code: 52, Log: fmt.Sprintf("badger write error: %v", regErr)}
 	}
 
 	// Auto-add admin as member with TOP_SECRET clearance
-	if err := app.badgerStore.AddOrgMember(orgID, adminID, uint8(tx.ClearanceTopSecret), "admin", height); err != nil {
-		app.logger.Error().Err(err).Msg("failed to add admin as org member")
+	if addErr := app.badgerStore.AddOrgMember(orgID, adminID, uint8(tx.ClearanceTopSecret), "admin", height); addErr != nil {
+		app.logger.Error().Err(addErr).Msg("failed to add admin as org member")
 	}
 
 	// Buffer PostgreSQL writes
@@ -944,8 +945,8 @@ func (app *SageApp) processOrgAddMember(parsedTx *tx.ParsedTx, height int64, blo
 	}
 
 	// Add member on-chain
-	if err := app.badgerStore.AddOrgMember(add.OrgID, add.AgentID, uint8(add.Clearance), add.Role, height); err != nil {
-		return &abcitypes.ExecTxResult{Code: 55, Log: fmt.Sprintf("badger write error: %v", err)}
+	if addErr := app.badgerStore.AddOrgMember(add.OrgID, add.AgentID, uint8(add.Clearance), add.Role, height); addErr != nil {
+		return &abcitypes.ExecTxResult{Code: 55, Log: fmt.Sprintf("badger write error: %v", addErr)}
 	}
 
 	// Buffer PostgreSQL write
@@ -978,8 +979,8 @@ func (app *SageApp) processOrgRemoveMember(parsedTx *tx.ParsedTx, height int64, 
 	}
 
 	// Remove member on-chain
-	if err := app.badgerStore.RemoveOrgMember(rem.OrgID, rem.AgentID); err != nil {
-		return &abcitypes.ExecTxResult{Code: 57, Log: fmt.Sprintf("badger write error: %v", err)}
+	if remErr := app.badgerStore.RemoveOrgMember(rem.OrgID, rem.AgentID); remErr != nil {
+		return &abcitypes.ExecTxResult{Code: 57, Log: fmt.Sprintf("badger write error: %v", remErr)}
 	}
 
 	// Buffer PostgreSQL write
@@ -1016,8 +1017,8 @@ func (app *SageApp) processOrgSetClearance(parsedTx *tx.ParsedTx, height int64, 
 	}
 
 	// Update clearance on-chain
-	if err := app.badgerStore.SetMemberClearance(sc.OrgID, sc.AgentID, uint8(sc.Clearance)); err != nil {
-		return &abcitypes.ExecTxResult{Code: 59, Log: fmt.Sprintf("badger write error: %v", err)}
+	if setErr := app.badgerStore.SetMemberClearance(sc.OrgID, sc.AgentID, uint8(sc.Clearance)); setErr != nil {
+		return &abcitypes.ExecTxResult{Code: 59, Log: fmt.Sprintf("badger write error: %v", setErr)}
 	}
 
 	// Buffer PostgreSQL write
@@ -1062,9 +1063,9 @@ func (app *SageApp) processFederationPropose(parsedTx *tx.ParsedTx, height int64
 	fedID := hex.EncodeToString(h[:16])
 
 	// Store federation as proposed (pass AllowedDepts via variadic arg)
-	if err := app.badgerStore.SetFederation(fedID, prop.ProposerOrgID, prop.TargetOrgID,
-		prop.AllowedDomains, uint8(prop.MaxClearance), prop.ExpiresAt, prop.RequiresApproval, "proposed", prop.AllowedDepts); err != nil {
-		return &abcitypes.ExecTxResult{Code: 62, Log: fmt.Sprintf("badger write error: %v", err)}
+	if setErr := app.badgerStore.SetFederation(fedID, prop.ProposerOrgID, prop.TargetOrgID,
+		prop.AllowedDomains, uint8(prop.MaxClearance), prop.ExpiresAt, prop.RequiresApproval, "proposed", prop.AllowedDepts); setErr != nil {
+		return &abcitypes.ExecTxResult{Code: 62, Log: fmt.Sprintf("badger write error: %v", setErr)}
 	}
 
 	// Buffer PostgreSQL write
@@ -1125,8 +1126,8 @@ func (app *SageApp) processFederationApprove(parsedTx *tx.ParsedTx, height int64
 	}
 
 	// Update federation status to "active"
-	if err := app.badgerStore.UpdateFederationStatus(approve.FederationID, "active"); err != nil {
-		return &abcitypes.ExecTxResult{Code: 64, Log: fmt.Sprintf("badger write error: %v", err)}
+	if updateErr := app.badgerStore.UpdateFederationStatus(approve.FederationID, "active"); updateErr != nil {
+		return &abcitypes.ExecTxResult{Code: 64, Log: fmt.Sprintf("badger write error: %v", updateErr)}
 	}
 
 	// Buffer PostgreSQL write
@@ -1178,8 +1179,8 @@ func (app *SageApp) processFederationRevoke(parsedTx *tx.ParsedTx, height int64,
 	}
 
 	// Update federation status to "revoked"
-	if err := app.badgerStore.UpdateFederationStatus(revoke.FederationID, "revoked"); err != nil {
-		return &abcitypes.ExecTxResult{Code: 66, Log: fmt.Sprintf("badger write error: %v", err)}
+	if updateErr := app.badgerStore.UpdateFederationStatus(revoke.FederationID, "revoked"); updateErr != nil {
+		return &abcitypes.ExecTxResult{Code: 66, Log: fmt.Sprintf("badger write error: %v", updateErr)}
 	}
 
 	// Buffer PostgreSQL write
@@ -1232,8 +1233,8 @@ func (app *SageApp) processDeptRegister(parsedTx *tx.ParsedTx, height int64, blo
 	}
 
 	// Register department on-chain
-	if err := app.badgerStore.RegisterDept(reg.OrgID, deptID, reg.DeptName, reg.Description, reg.ParentDept, height); err != nil {
-		return &abcitypes.ExecTxResult{Code: 73, Log: fmt.Sprintf("badger write error: %v", err)}
+	if regErr := app.badgerStore.RegisterDept(reg.OrgID, deptID, reg.DeptName, reg.Description, reg.ParentDept, height); regErr != nil {
+		return &abcitypes.ExecTxResult{Code: 73, Log: fmt.Sprintf("badger write error: %v", regErr)}
 	}
 
 	// Buffer PostgreSQL write
@@ -1278,8 +1279,8 @@ func (app *SageApp) processDeptAddMember(parsedTx *tx.ParsedTx, height int64, bl
 	}
 
 	// Add member to department on-chain
-	if err := app.badgerStore.AddDeptMember(add.OrgID, add.DeptID, add.AgentID, uint8(add.Clearance), add.Role, height); err != nil {
-		return &abcitypes.ExecTxResult{Code: 77, Log: fmt.Sprintf("badger write error: %v", err)}
+	if addErr := app.badgerStore.AddDeptMember(add.OrgID, add.DeptID, add.AgentID, uint8(add.Clearance), add.Role, height); addErr != nil {
+		return &abcitypes.ExecTxResult{Code: 77, Log: fmt.Sprintf("badger write error: %v", addErr)}
 	}
 
 	// Buffer PostgreSQL write
@@ -1313,8 +1314,8 @@ func (app *SageApp) processDeptRemoveMember(parsedTx *tx.ParsedTx, height int64,
 	}
 
 	// Remove member from department on-chain
-	if err := app.badgerStore.RemoveDeptMember(rem.OrgID, rem.DeptID, rem.AgentID); err != nil {
-		return &abcitypes.ExecTxResult{Code: 79, Log: fmt.Sprintf("badger write error: %v", err)}
+	if remErr := app.badgerStore.RemoveDeptMember(rem.OrgID, rem.DeptID, rem.AgentID); remErr != nil {
+		return &abcitypes.ExecTxResult{Code: 79, Log: fmt.Sprintf("badger write error: %v", remErr)}
 	}
 
 	// Buffer PostgreSQL write
@@ -1373,7 +1374,7 @@ func (app *SageApp) processEpoch(height int64, blockTime time.Time) {
 		var recencyScore float64
 		if stats != nil && stats.LastBlockHeight > 0 {
 			// Approximate: each block ~3s, so blocks_ago * 3s = seconds since last active
-			blocksSinceLast := height - int64(stats.LastBlockHeight)
+			blocksSinceLast := height - int64(stats.LastBlockHeight) // #nosec G115 -- block height fits in int64
 			if blocksSinceLast < 0 {
 				blocksSinceLast = 0
 			}
@@ -1435,7 +1436,7 @@ func (app *SageApp) processEpoch(height int64, blockTime time.Time) {
 		var voteCount int64
 		var weightedSum, weightDenom float64
 		if stats != nil {
-			voteCount = int64(stats.TotalVotes)
+			voteCount = int64(stats.TotalVotes) // #nosec G115 -- vote count fits in int64
 			weightedSum = float64(stats.AcceptVotes)
 			weightDenom = float64(stats.TotalVotes)
 		}

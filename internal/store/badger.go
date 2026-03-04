@@ -55,7 +55,7 @@ func (s *BadgerStore) SetMemoryHash(memoryID string, contentHash []byte, status 
 	return s.db.Update(func(txn *badger.Txn) error {
 		// Encode: contentHash length (4 bytes) + contentHash + status bytes
 		val := make([]byte, 4+len(contentHash)+len(status))
-		binary.BigEndian.PutUint32(val[:4], uint32(len(contentHash)))
+		binary.BigEndian.PutUint32(val[:4], uint32(len(contentHash))) // #nosec G115 -- content hash length fits in uint32
 		copy(val[4:4+len(contentHash)], contentHash)
 		copy(val[4+len(contentHash):], status)
 		return txn.Set(memoryKey(memoryID), val)
@@ -65,7 +65,8 @@ func (s *BadgerStore) SetMemoryHash(memoryID string, contentHash []byte, status 
 // GetMemoryHash retrieves a memory's on-chain hash and status.
 func (s *BadgerStore) GetMemoryHash(memoryID string) (contentHash []byte, status string, err error) {
 	err = s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(memoryKey(memoryID))
+		var item *badger.Item
+		item, err = txn.Get(memoryKey(memoryID))
 		if err != nil {
 			return err
 		}
@@ -74,7 +75,7 @@ func (s *BadgerStore) GetMemoryHash(memoryID string) (contentHash []byte, status
 				return fmt.Errorf("invalid memory hash entry")
 			}
 			hashLen := binary.BigEndian.Uint32(val[:4])
-			if int(4+hashLen) > len(val) {
+			if int(4+hashLen) > len(val) { // #nosec G115 -- hashLen from 4-byte prefix, always fits in int
 				return fmt.Errorf("invalid memory hash entry")
 			}
 			contentHash = make([]byte, hashLen)
@@ -102,9 +103,9 @@ func (s *BadgerStore) SetNonce(agentID string, nonce uint64) error {
 func (s *BadgerStore) GetNonce(agentID string) (uint64, error) {
 	var nonce uint64
 	err := s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(nonceKey(agentID))
-		if err != nil {
-			return err
+		item, getErr := txn.Get(nonceKey(agentID))
+		if getErr != nil {
+			return getErr
 		}
 		return item.Value(func(val []byte) error {
 			if len(val) != 8 {
@@ -131,9 +132,9 @@ func (s *BadgerStore) SetState(key string, value []byte) error {
 func (s *BadgerStore) GetState(key string) ([]byte, error) {
 	var val []byte
 	err := s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(stateKey(key))
-		if err != nil {
-			return err
+		item, getErr := txn.Get(stateKey(key))
+		if getErr != nil {
+			return getErr
 		}
 		return item.Value(func(v []byte) error {
 			val = make([]byte, len(v))
@@ -169,14 +170,14 @@ func (s *BadgerStore) ComputeAppHash() ([]byte, error) {
 			item := it.Item()
 			k := make([]byte, len(item.Key()))
 			copy(k, item.Key())
-			err := item.Value(func(v []byte) error {
+			valErr := item.Value(func(v []byte) error {
 				val := make([]byte, len(v))
 				copy(val, v)
 				entries = append(entries, kv{key: k, val: val})
 				return nil
 			})
-			if err != nil {
-				return err
+			if valErr != nil {
+				return valErr
 			}
 		}
 
@@ -239,21 +240,21 @@ func (s *BadgerStore) IncrementVoteStats(validatorID string, accepted bool, bloc
 		stats := &ValidatorStats{}
 
 		// Try to read existing stats
-		item, err := txn.Get(validatorStatsKey(validatorID))
-		if err == nil {
-			err = item.Value(func(val []byte) error {
-				existing, err := decodeValidatorStats(val)
-				if err != nil {
-					return err
+		item, getErr := txn.Get(validatorStatsKey(validatorID))
+		if getErr == nil {
+			valErr := item.Value(func(val []byte) error {
+				existing, decErr := decodeValidatorStats(val)
+				if decErr != nil {
+					return decErr
 				}
 				stats = existing
 				return nil
 			})
-			if err != nil {
-				return err
+			if valErr != nil {
+				return valErr
 			}
-		} else if err != badger.ErrKeyNotFound {
-			return err
+		} else if getErr != badger.ErrKeyNotFound {
+			return getErr
 		}
 
 		stats.TotalVotes++
@@ -270,16 +271,16 @@ func (s *BadgerStore) IncrementVoteStats(validatorID string, accepted bool, bloc
 func (s *BadgerStore) GetValidatorStats(validatorID string) (*ValidatorStats, error) {
 	var stats *ValidatorStats
 	err := s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(validatorStatsKey(validatorID))
-		if err != nil {
-			return err
+		item, getErr := txn.Get(validatorStatsKey(validatorID))
+		if getErr != nil {
+			return getErr
 		}
 		return item.Value(func(val []byte) error {
-			s, err := decodeValidatorStats(val)
-			if err != nil {
-				return err
+			decoded, decErr := decodeValidatorStats(val)
+			if decErr != nil {
+				return decErr
 			}
-			stats = s
+			stats = decoded
 			return nil
 		})
 	})
@@ -309,16 +310,16 @@ func (s *BadgerStore) GetAllValidatorStats() (map[string]*ValidatorStats, error)
 			key := string(item.Key())
 			validatorID := key[len("vstats:"):]
 
-			err := item.Value(func(val []byte) error {
-				stats, err := decodeValidatorStats(val)
-				if err != nil {
-					return err
+			valErr := item.Value(func(val []byte) error {
+				decoded, decErr := decodeValidatorStats(val)
+				if decErr != nil {
+					return decErr
 				}
-				result[validatorID] = stats
+				result[validatorID] = decoded
 				return nil
 			})
-			if err != nil {
-				return err
+			if valErr != nil {
+				return valErr
 			}
 		}
 		return nil
@@ -335,7 +336,7 @@ func (s *BadgerStore) SaveValidators(validators map[string]int64) error {
 		for id, power := range validators {
 			key := []byte("validator:" + id)
 			val := make([]byte, 8)
-			binary.BigEndian.PutUint64(val, uint64(power))
+			binary.BigEndian.PutUint64(val, uint64(power)) // #nosec G115 -- validator power is always non-negative
 			if err := txn.Set(key, val); err != nil {
 				return err
 			}
@@ -361,16 +362,16 @@ func (s *BadgerStore) LoadValidators() (map[string]int64, error) {
 			key := string(item.Key())
 			validatorID := key[len("validator:"):]
 
-			err := item.Value(func(val []byte) error {
+			valErr := item.Value(func(val []byte) error {
 				if len(val) != 8 {
 					return fmt.Errorf("invalid validator power: expected 8 bytes")
 				}
-				power := int64(binary.BigEndian.Uint64(val))
+				power := int64(binary.BigEndian.Uint64(val)) // #nosec G115 -- validator power fits in int64
 				result[validatorID] = power
 				return nil
 			})
-			if err != nil {
-				return err
+			if valErr != nil {
+				return valErr
 			}
 		}
 		return nil
@@ -410,7 +411,7 @@ func accessLogKey(height int64, seq int) []byte {
 
 // encodeString writes a length-prefixed string to buf at offset, returns new offset.
 func encodeString(buf []byte, offset int, s string) int {
-	binary.BigEndian.PutUint32(buf[offset:offset+4], uint32(len(s)))
+	binary.BigEndian.PutUint32(buf[offset:offset+4], uint32(len(s))) // #nosec G115 -- string length fits in uint32
 	copy(buf[offset+4:offset+4+len(s)], s)
 	return offset + 4 + len(s)
 }
@@ -420,7 +421,7 @@ func decodeString(buf []byte, offset int) (string, int, error) {
 	if offset+4 > len(buf) {
 		return "", 0, fmt.Errorf("buffer too short for string length at offset %d", offset)
 	}
-	sLen := int(binary.BigEndian.Uint32(buf[offset : offset+4]))
+	sLen := int(binary.BigEndian.Uint32(buf[offset : offset+4])) // #nosec G115 -- string length from 4-byte prefix, always fits in int
 	if offset+4+sLen > len(buf) {
 		return "", 0, fmt.Errorf("buffer too short for string data at offset %d", offset)
 	}
@@ -434,7 +435,7 @@ func (s *BadgerStore) SetAccessGrant(domain, agentID string, level uint8, expire
 	return s.db.Update(func(txn *badger.Txn) error {
 		val := make([]byte, 1+8+4+len(granterID))
 		val[0] = level
-		binary.BigEndian.PutUint64(val[1:9], uint64(expiresAt))
+		binary.BigEndian.PutUint64(val[1:9], uint64(expiresAt)) // #nosec G115 -- expiry timestamp is always non-negative
 		encodeString(val, 9, granterID)
 		return txn.Set(grantKey(domain, agentID), val)
 	})
@@ -443,7 +444,8 @@ func (s *BadgerStore) SetAccessGrant(domain, agentID string, level uint8, expire
 // GetAccessGrant retrieves an access grant from BadgerDB.
 func (s *BadgerStore) GetAccessGrant(domain, agentID string) (level uint8, expiresAt int64, granterID string, err error) {
 	err = s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(grantKey(domain, agentID))
+		var item *badger.Item
+		item, err = txn.Get(grantKey(domain, agentID))
 		if err != nil {
 			return err
 		}
@@ -452,7 +454,7 @@ func (s *BadgerStore) GetAccessGrant(domain, agentID string) (level uint8, expir
 				return fmt.Errorf("invalid grant entry")
 			}
 			level = val[0]
-			expiresAt = int64(binary.BigEndian.Uint64(val[1:9]))
+			expiresAt = int64(binary.BigEndian.Uint64(val[1:9])) // #nosec G115 -- expiry timestamp fits in int64
 			var decErr error
 			granterID, _, decErr = decodeString(val, 9)
 			return decErr
@@ -476,16 +478,16 @@ func (s *BadgerStore) DeleteAccessGrant(domain, agentID string) error {
 func (s *BadgerStore) HasAccess(domain, agentID string, requiredLevel uint8, blockTime time.Time) (bool, error) {
 	var has bool
 	err := s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(grantKey(domain, agentID))
-		if err != nil {
-			return err
+		item, getErr := txn.Get(grantKey(domain, agentID))
+		if getErr != nil {
+			return getErr
 		}
 		return item.Value(func(val []byte) error {
 			if len(val) < 9 {
 				return fmt.Errorf("invalid grant entry")
 			}
 			level := val[0]
-			expiresAt := int64(binary.BigEndian.Uint64(val[1:9]))
+			expiresAt := int64(binary.BigEndian.Uint64(val[1:9])) // #nosec G115 -- expiry timestamp fits in int64
 
 			if level < requiredLevel {
 				has = false
@@ -515,7 +517,7 @@ func (s *BadgerStore) RegisterDomain(name, ownerID, parentDomain string, height 
 		val := make([]byte, 4+len(ownerID)+4+len(parentDomain)+8)
 		offset := encodeString(val, 0, ownerID)
 		offset = encodeString(val, offset, parentDomain)
-		binary.BigEndian.PutUint64(val[offset:offset+8], uint64(height))
+		binary.BigEndian.PutUint64(val[offset:offset+8], uint64(height)) // #nosec G115 -- block height is always non-negative
 		return txn.Set(domainKey(name), val)
 	})
 }
@@ -524,9 +526,9 @@ func (s *BadgerStore) RegisterDomain(name, ownerID, parentDomain string, height 
 func (s *BadgerStore) GetDomainOwner(name string) (string, error) {
 	var ownerID string
 	err := s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(domainKey(name))
-		if err != nil {
-			return err
+		item, getErr := txn.Get(domainKey(name))
+		if getErr != nil {
+			return getErr
 		}
 		return item.Value(func(val []byte) error {
 			var decErr error
@@ -566,7 +568,7 @@ func (s *BadgerStore) SetAccessRequest(requestID string, requesterID, targetDoma
 		offset := encodeString(val, 0, requesterID)
 		offset = encodeString(val, offset, targetDomain)
 		offset = encodeString(val, offset, status)
-		binary.BigEndian.PutUint64(val[offset:offset+8], uint64(createdHeight))
+		binary.BigEndian.PutUint64(val[offset:offset+8], uint64(createdHeight)) // #nosec G115 -- block height is always non-negative
 		return txn.Set(accessReqKey(requestID), val)
 	})
 }
@@ -574,7 +576,8 @@ func (s *BadgerStore) SetAccessRequest(requestID string, requesterID, targetDoma
 // GetAccessRequest retrieves an access request from BadgerDB.
 func (s *BadgerStore) GetAccessRequest(requestID string) (requesterID, targetDomain, status string, err error) {
 	err = s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(accessReqKey(requestID))
+		var item *badger.Item
+		item, err = txn.Get(accessReqKey(requestID))
 		if err != nil {
 			return err
 		}
@@ -627,7 +630,7 @@ func (s *BadgerStore) UpdateAccessRequestStatus(requestID, status string) error 
 			if offset+8 > len(val) {
 				return fmt.Errorf("invalid access request entry")
 			}
-			createdHeight = int64(binary.BigEndian.Uint64(val[offset : offset+8]))
+			createdHeight = int64(binary.BigEndian.Uint64(val[offset : offset+8])) // #nosec G115 -- block height fits in int64
 			return nil
 		})
 		if err != nil {
@@ -639,7 +642,7 @@ func (s *BadgerStore) UpdateAccessRequestStatus(requestID, status string) error 
 		offset := encodeString(newVal, 0, requesterID)
 		offset = encodeString(newVal, offset, targetDomain)
 		offset = encodeString(newVal, offset, status)
-		binary.BigEndian.PutUint64(newVal[offset:offset+8], uint64(createdHeight))
+		binary.BigEndian.PutUint64(newVal[offset:offset+8], uint64(createdHeight)) // #nosec G115 -- block height is always non-negative
 		return txn.Set(accessReqKey(requestID), newVal)
 	})
 }
@@ -679,7 +682,7 @@ func (s *BadgerStore) RegisterOrg(orgID, name, description, adminAgent string, h
 		offset := encodeString(val, 0, name)
 		offset = encodeString(val, offset, description)
 		offset = encodeString(val, offset, adminAgent)
-		binary.BigEndian.PutUint64(val[offset:offset+8], uint64(height))
+		binary.BigEndian.PutUint64(val[offset:offset+8], uint64(height)) // #nosec G115 -- block height is always non-negative
 		return txn.Set(orgKey(orgID), val)
 	})
 }
@@ -687,7 +690,8 @@ func (s *BadgerStore) RegisterOrg(orgID, name, description, adminAgent string, h
 // GetOrg retrieves an organization's name and admin agent from BadgerDB.
 func (s *BadgerStore) GetOrg(orgID string) (name, adminAgent string, err error) {
 	err = s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(orgKey(orgID))
+		var item *badger.Item
+		item, err = txn.Get(orgKey(orgID))
 		if err != nil {
 			return err
 		}
@@ -721,7 +725,7 @@ func (s *BadgerStore) AddOrgMember(orgID, agentID string, clearance uint8, role 
 		val := make([]byte, 1+4+len(role)+8)
 		val[0] = clearance
 		encodeString(val, 1, role)
-		binary.BigEndian.PutUint64(val[1+4+len(role):], uint64(height))
+		binary.BigEndian.PutUint64(val[1+4+len(role):], uint64(height)) // #nosec G115 -- block height is always non-negative
 		if err := txn.Set(orgMemberKey(orgID, agentID), val); err != nil {
 			return err
 		}
@@ -743,7 +747,8 @@ func (s *BadgerStore) RemoveOrgMember(orgID, agentID string) error {
 // GetMemberClearance retrieves a member's clearance level and role.
 func (s *BadgerStore) GetMemberClearance(orgID, agentID string) (clearance uint8, role string, err error) {
 	err = s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(orgMemberKey(orgID, agentID))
+		var item *badger.Item
+		item, err = txn.Get(orgMemberKey(orgID, agentID))
 		if err != nil {
 			return err
 		}
@@ -785,7 +790,7 @@ func (s *BadgerStore) SetMemberClearance(orgID, agentID string, clearance uint8)
 			if offset+8 > len(val) {
 				return fmt.Errorf("invalid member entry: missing height")
 			}
-			height = int64(binary.BigEndian.Uint64(val[offset : offset+8]))
+			height = int64(binary.BigEndian.Uint64(val[offset : offset+8])) // #nosec G115 -- block height fits in int64
 			return nil
 		})
 		if err != nil {
@@ -795,7 +800,7 @@ func (s *BadgerStore) SetMemberClearance(orgID, agentID string, clearance uint8)
 		newVal := make([]byte, 1+4+len(role)+8)
 		newVal[0] = clearance
 		encodeString(newVal, 1, role)
-		binary.BigEndian.PutUint64(newVal[1+4+len(role):], uint64(height))
+		binary.BigEndian.PutUint64(newVal[1+4+len(role):], uint64(height)) // #nosec G115 -- block height is always non-negative
 		return txn.Set(orgMemberKey(orgID, agentID), newVal)
 	})
 }
@@ -803,7 +808,8 @@ func (s *BadgerStore) SetMemberClearance(orgID, agentID string, clearance uint8)
 // GetAgentOrg retrieves the organization an agent belongs to (reverse lookup).
 func (s *BadgerStore) GetAgentOrg(agentID string) (orgID string, err error) {
 	err = s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(agentOrgKey(agentID))
+		var item *badger.Item
+		item, err = txn.Get(agentOrgKey(agentID))
 		if err != nil {
 			return err
 		}
@@ -843,7 +849,7 @@ func (s *BadgerStore) SetFederation(fedID string, proposerOrg, targetOrg string,
 		offset = encodeString(val, offset, targetOrg)
 		val[offset] = maxClearance
 		offset++
-		binary.BigEndian.PutUint64(val[offset:offset+8], uint64(expiresAt))
+		binary.BigEndian.PutUint64(val[offset:offset+8], uint64(expiresAt)) // #nosec G115 -- expiry timestamp is always non-negative
 		offset += 8
 		if requiresApproval {
 			val[offset] = 1
@@ -852,12 +858,12 @@ func (s *BadgerStore) SetFederation(fedID string, proposerOrg, targetOrg string,
 		}
 		offset++
 		offset = encodeString(val, offset, status)
-		binary.BigEndian.PutUint32(val[offset:offset+4], uint32(len(allowedDomains)))
+		binary.BigEndian.PutUint32(val[offset:offset+4], uint32(len(allowedDomains))) // #nosec G115 -- slice length fits in uint32
 		offset += 4
 		for _, d := range allowedDomains {
 			offset = encodeString(val, offset, d)
 		}
-		binary.BigEndian.PutUint32(val[offset:offset+4], uint32(len(depts)))
+		binary.BigEndian.PutUint32(val[offset:offset+4], uint32(len(depts))) // #nosec G115 -- slice length fits in uint32
 		offset += 4
 		for _, d := range depts {
 			offset = encodeString(val, offset, d)
@@ -869,7 +875,8 @@ func (s *BadgerStore) SetFederation(fedID string, proposerOrg, targetOrg string,
 // GetFederation retrieves a federation entry from BadgerDB.
 func (s *BadgerStore) GetFederation(fedID string) (proposerOrg, targetOrg string, maxClearance uint8, expiresAt int64, status string, err error) {
 	err = s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(federationKey(fedID))
+		var item *badger.Item
+		item, err = txn.Get(federationKey(fedID))
 		if err != nil {
 			return err
 		}
@@ -892,7 +899,7 @@ func (s *BadgerStore) GetFederation(fedID string) (proposerOrg, targetOrg string
 			if offset+8 > len(val) {
 				return fmt.Errorf("invalid federation entry: missing expiresAt")
 			}
-			expiresAt = int64(binary.BigEndian.Uint64(val[offset : offset+8]))
+			expiresAt = int64(binary.BigEndian.Uint64(val[offset : offset+8])) // #nosec G115 -- expiry timestamp fits in int64
 			offset += 8
 			// skip requiresApproval (1 byte)
 			offset++
@@ -934,7 +941,7 @@ func (s *BadgerStore) UpdateFederationStatus(fedID, status string) error {
 			}
 			maxClearance = val[offset]
 			offset++
-			expiresAt = int64(binary.BigEndian.Uint64(val[offset : offset+8]))
+			expiresAt = int64(binary.BigEndian.Uint64(val[offset : offset+8])) // #nosec G115 -- expiry timestamp fits in int64
 			offset += 8
 			requiresApproval = val[offset] == 1
 			offset++
@@ -945,7 +952,7 @@ func (s *BadgerStore) UpdateFederationStatus(fedID, status string) error {
 			}
 			// Read allowed domains
 			if offset+4 <= len(val) {
-				count := int(binary.BigEndian.Uint32(val[offset : offset+4]))
+				count := int(binary.BigEndian.Uint32(val[offset : offset+4])) // #nosec G115 -- array count fits in int
 				offset += 4
 				for i := 0; i < count; i++ {
 					var d string
@@ -958,7 +965,7 @@ func (s *BadgerStore) UpdateFederationStatus(fedID, status string) error {
 			}
 			// Read allowed depts (backward compat)
 			if offset+4 <= len(val) {
-				count := int(binary.BigEndian.Uint32(val[offset : offset+4]))
+				count := int(binary.BigEndian.Uint32(val[offset : offset+4])) // #nosec G115 -- array count fits in int
 				offset += 4
 				for i := 0; i < count; i++ {
 					var d string
@@ -989,7 +996,7 @@ func (s *BadgerStore) UpdateFederationStatus(fedID, status string) error {
 		offset = encodeString(newVal, offset, targetOrg)
 		newVal[offset] = maxClearance
 		offset++
-		binary.BigEndian.PutUint64(newVal[offset:offset+8], uint64(expiresAt))
+		binary.BigEndian.PutUint64(newVal[offset:offset+8], uint64(expiresAt)) // #nosec G115 -- expiry timestamp is always non-negative
 		offset += 8
 		if requiresApproval {
 			newVal[offset] = 1
@@ -998,12 +1005,12 @@ func (s *BadgerStore) UpdateFederationStatus(fedID, status string) error {
 		}
 		offset++
 		offset = encodeString(newVal, offset, status)
-		binary.BigEndian.PutUint32(newVal[offset:offset+4], uint32(len(allowedDomains)))
+		binary.BigEndian.PutUint32(newVal[offset:offset+4], uint32(len(allowedDomains))) // #nosec G115 -- slice length fits in uint32
 		offset += 4
 		for _, d := range allowedDomains {
 			offset = encodeString(newVal, offset, d)
 		}
-		binary.BigEndian.PutUint32(newVal[offset:offset+4], uint32(len(allowedDepts)))
+		binary.BigEndian.PutUint32(newVal[offset:offset+4], uint32(len(allowedDepts))) // #nosec G115 -- slice length fits in uint32
 		offset += 4
 		for _, d := range allowedDepts {
 			offset = encodeString(newVal, offset, d)
@@ -1084,9 +1091,9 @@ func (s *BadgerStore) SetMemoryClassification(memoryID string, classification ui
 func (s *BadgerStore) GetMemoryClassification(memoryID string) (uint8, error) {
 	var classification uint8
 	err := s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(memClassKey(memoryID))
-		if err != nil {
-			return err
+		item, getErr := txn.Get(memClassKey(memoryID))
+		if getErr != nil {
+			return getErr
 		}
 		return item.Value(func(val []byte) error {
 			if len(val) != 1 {
@@ -1128,7 +1135,7 @@ func (s *BadgerStore) RegisterDept(orgID, deptID, name, description, parentDept 
 		offset := encodeString(val, 0, name)
 		offset = encodeString(val, offset, description)
 		offset = encodeString(val, offset, parentDept)
-		binary.BigEndian.PutUint64(val[offset:offset+8], uint64(height))
+		binary.BigEndian.PutUint64(val[offset:offset+8], uint64(height)) // #nosec G115 -- block height is always non-negative
 		return txn.Set(deptKey(orgID, deptID), val)
 	})
 }
@@ -1136,7 +1143,8 @@ func (s *BadgerStore) RegisterDept(orgID, deptID, name, description, parentDept 
 // GetDept retrieves a department's name and description from BadgerDB.
 func (s *BadgerStore) GetDept(orgID, deptID string) (name, description string, err error) {
 	err = s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(deptKey(orgID, deptID))
+		var item *badger.Item
+		item, err = txn.Get(deptKey(orgID, deptID))
 		if err != nil {
 			return err
 		}
@@ -1191,7 +1199,7 @@ func (s *BadgerStore) AddDeptMember(orgID, deptID, agentID string, clearance uin
 		val := make([]byte, 1+4+len(role)+8)
 		val[0] = clearance
 		encodeString(val, 1, role)
-		binary.BigEndian.PutUint64(val[1+4+len(role):], uint64(height))
+		binary.BigEndian.PutUint64(val[1+4+len(role):], uint64(height)) // #nosec G115 -- block height is always non-negative
 		if err := txn.Set(deptMemberKey(orgID, deptID, agentID), val); err != nil {
 			return err
 		}
@@ -1213,7 +1221,8 @@ func (s *BadgerStore) RemoveDeptMember(orgID, deptID, agentID string) error {
 // GetDeptMemberClearance retrieves a department member's clearance level and role.
 func (s *BadgerStore) GetDeptMemberClearance(orgID, deptID, agentID string) (clearance uint8, role string, err error) {
 	err = s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(deptMemberKey(orgID, deptID, agentID))
+		var item *badger.Item
+		item, err = txn.Get(deptMemberKey(orgID, deptID, agentID))
 		if err != nil {
 			return err
 		}
@@ -1255,7 +1264,7 @@ func (s *BadgerStore) SetDeptMemberClearance(orgID, deptID, agentID string, clea
 			if offset+8 > len(val) {
 				return fmt.Errorf("invalid dept member entry: missing height")
 			}
-			height = int64(binary.BigEndian.Uint64(val[offset : offset+8]))
+			height = int64(binary.BigEndian.Uint64(val[offset : offset+8])) // #nosec G115 -- block height fits in int64
 			return nil
 		})
 		if err != nil {
@@ -1265,7 +1274,7 @@ func (s *BadgerStore) SetDeptMemberClearance(orgID, deptID, agentID string, clea
 		newVal := make([]byte, 1+4+len(role)+8)
 		newVal[0] = clearance
 		encodeString(newVal, 1, role)
-		binary.BigEndian.PutUint64(newVal[1+4+len(role):], uint64(height))
+		binary.BigEndian.PutUint64(newVal[1+4+len(role):], uint64(height)) // #nosec G115 -- block height is always non-negative
 		return txn.Set(deptMemberKey(orgID, deptID, agentID), newVal)
 	})
 }
@@ -1274,7 +1283,8 @@ func (s *BadgerStore) SetDeptMemberClearance(orgID, deptID, agentID string, clea
 // Returns orgID and deptID by splitting the stored value on ":".
 func (s *BadgerStore) GetAgentDept(agentID string) (orgID, deptID string, err error) {
 	err = s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(agentDeptKey(agentID))
+		var item *badger.Item
+		item, err = txn.Get(agentDeptKey(agentID))
 		if err != nil {
 			return err
 		}
@@ -1298,9 +1308,9 @@ func (s *BadgerStore) GetAgentDept(agentID string) (orgID, deptID string, err er
 func (s *BadgerStore) GetFederationAllowedDepts(fedID string) ([]string, error) {
 	var allowedDepts []string
 	err := s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(federationKey(fedID))
-		if err != nil {
-			return err
+		item, getErr := txn.Get(federationKey(fedID))
+		if getErr != nil {
+			return getErr
 		}
 		return item.Value(func(val []byte) error {
 			var offset int
@@ -1326,7 +1336,7 @@ func (s *BadgerStore) GetFederationAllowedDepts(fedID string) ([]string, error) 
 			if offset+4 > len(val) {
 				return nil // No domains or depts
 			}
-			domainCount := int(binary.BigEndian.Uint32(val[offset : offset+4]))
+			domainCount := int(binary.BigEndian.Uint32(val[offset : offset+4])) // #nosec G115 -- array count fits in int
 			offset += 4
 			for i := 0; i < domainCount; i++ {
 				_, offset, decErr = decodeString(val, offset)
@@ -1338,7 +1348,7 @@ func (s *BadgerStore) GetFederationAllowedDepts(fedID string) ([]string, error) 
 			if offset+4 > len(val) {
 				return nil // No dept data
 			}
-			deptCount := int(binary.BigEndian.Uint32(val[offset : offset+4]))
+			deptCount := int(binary.BigEndian.Uint32(val[offset : offset+4])) // #nosec G115 -- array count fits in int
 			offset += 4
 			for i := 0; i < deptCount; i++ {
 				var d string

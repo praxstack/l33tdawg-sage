@@ -62,7 +62,7 @@ func VerifyRequest(publicKey ed25519.PublicKey, body []byte, timestamp int64, si
 func buildRequestMessage(body []byte, timestamp int64) []byte {
 	bodyHash := sha256.Sum256(body)
 	tsBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(tsBytes, uint64(timestamp))
+	binary.BigEndian.PutUint64(tsBytes, uint64(timestamp)) // #nosec G115 -- timestamp from trusted int64
 	message := make([]byte, 0, len(bodyHash)+8)
 	message = append(message, bodyHash[:]...)
 	message = append(message, tsBytes...)
@@ -100,7 +100,7 @@ func VerifyAgentProof(agentPubKey, agentSig, bodyHash []byte, agentTimestamp int
 
 	// Reconstruct the signed message: bodyHash + bigEndian(timestamp)
 	tsBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(tsBytes, uint64(agentTimestamp))
+	binary.BigEndian.PutUint64(tsBytes, uint64(agentTimestamp)) // #nosec G115 -- timestamp from trusted int64
 	message := make([]byte, 0, 40)
 	message = append(message, bodyHash...)
 	message = append(message, tsBytes...)

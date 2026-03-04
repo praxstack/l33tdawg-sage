@@ -167,11 +167,11 @@ func (s *PostgresStore) QuerySimilar(ctx context.Context, embedding []float32, o
 		var parentHash *string
 		var distance float64
 
-		err := rows.Scan(&r.MemoryID, &r.SubmittingAgent, &r.Content, &r.ContentHash,
+		scanErr := rows.Scan(&r.MemoryID, &r.SubmittingAgent, &r.Content, &r.ContentHash,
 			&emb, &mt, &r.DomainTag, &r.ConfidenceScore,
 			&st, &parentHash, &r.CreatedAt, &r.CommittedAt, &r.DeprecatedAt, &distance)
-		if err != nil {
-			return nil, fmt.Errorf("scan row: %w", err)
+		if scanErr != nil {
+			return nil, fmt.Errorf("scan row: %w", scanErr)
 		}
 
 		r.MemoryType = memory.MemoryType(mt)
@@ -230,9 +230,9 @@ func (s *PostgresStore) GetVotes(ctx context.Context, memoryID string) ([]*Valid
 	var votes []*ValidationVote
 	for rows.Next() {
 		v := &ValidationVote{}
-		if err := rows.Scan(&v.ID, &v.MemoryID, &v.ValidatorID, &v.Decision, &v.Rationale,
-			&v.WeightAtVote, &v.BlockHeight, &v.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scan vote: %w", err)
+		if scanErr := rows.Scan(&v.ID, &v.MemoryID, &v.ValidatorID, &v.Decision, &v.Rationale,
+			&v.WeightAtVote, &v.BlockHeight, &v.CreatedAt); scanErr != nil {
+			return nil, fmt.Errorf("scan vote: %w", scanErr)
 		}
 		votes = append(votes, v)
 	}
@@ -262,8 +262,8 @@ func (s *PostgresStore) GetCorroborations(ctx context.Context, memoryID string) 
 	var corrs []*Corroboration
 	for rows.Next() {
 		c := &Corroboration{}
-		if err := rows.Scan(&c.ID, &c.MemoryID, &c.AgentID, &c.Evidence, &c.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scan corroboration: %w", err)
+		if scanErr := rows.Scan(&c.ID, &c.MemoryID, &c.AgentID, &c.Evidence, &c.CreatedAt); scanErr != nil {
+			return nil, fmt.Errorf("scan corroboration: %w", scanErr)
 		}
 		corrs = append(corrs, c)
 	}
@@ -288,9 +288,9 @@ func (s *PostgresStore) GetPendingByDomain(ctx context.Context, domainTag string
 	for rows.Next() {
 		var r memory.MemoryRecord
 		var mt, st string
-		if err := rows.Scan(&r.MemoryID, &r.SubmittingAgent, &r.Content, &r.ContentHash,
-			&mt, &r.DomainTag, &r.ConfidenceScore, &st, &r.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scan pending: %w", err)
+		if scanErr := rows.Scan(&r.MemoryID, &r.SubmittingAgent, &r.Content, &r.ContentHash,
+			&mt, &r.DomainTag, &r.ConfidenceScore, &st, &r.CreatedAt); scanErr != nil {
+			return nil, fmt.Errorf("scan pending: %w", scanErr)
 		}
 		r.MemoryType = memory.MemoryType(mt)
 		r.Status = memory.MemoryStatus(st)
@@ -349,9 +349,9 @@ func (s *PostgresStore) GetAllScores(ctx context.Context) ([]*ValidatorScore, er
 	var scores []*ValidatorScore
 	for rows.Next() {
 		vs := &ValidatorScore{}
-		if err := rows.Scan(&vs.ValidatorID, &vs.WeightedSum, &vs.WeightDenom, &vs.VoteCount,
-			&vs.ExpertiseVec, &vs.LastActiveTS, &vs.CurrentWeight, &vs.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("scan validator score: %w", err)
+		if scanErr := rows.Scan(&vs.ValidatorID, &vs.WeightedSum, &vs.WeightDenom, &vs.VoteCount,
+			&vs.ExpertiseVec, &vs.LastActiveTS, &vs.CurrentWeight, &vs.UpdatedAt); scanErr != nil {
+			return nil, fmt.Errorf("scan validator score: %w", scanErr)
 		}
 		scores = append(scores, vs)
 	}
@@ -402,8 +402,8 @@ func (s *PostgresStore) GetActiveGrants(ctx context.Context, agentID string) ([]
 	var grants []*AccessGrantEntry
 	for rows.Next() {
 		g := &AccessGrantEntry{}
-		if err := rows.Scan(&g.Domain, &g.GranteeID, &g.GranterID, &g.Level, &g.ExpiresAt, &g.CreatedHeight, &g.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scan grant: %w", err)
+		if scanErr := rows.Scan(&g.Domain, &g.GranteeID, &g.GranterID, &g.Level, &g.ExpiresAt, &g.CreatedHeight, &g.CreatedAt); scanErr != nil {
+			return nil, fmt.Errorf("scan grant: %w", scanErr)
 		}
 		grants = append(grants, g)
 	}
@@ -583,10 +583,10 @@ func (s *PostgresStore) GetOrgMembers(ctx context.Context, orgID string) ([]*Org
 	for rows.Next() {
 		m := &OrgMemberEntry{}
 		var clearance int16
-		if err := rows.Scan(&m.OrgID, &m.AgentID, &clearance, &m.Role, &m.CreatedHeight, &m.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scan org member: %w", err)
+		if scanErr := rows.Scan(&m.OrgID, &m.AgentID, &clearance, &m.Role, &m.CreatedHeight, &m.CreatedAt); scanErr != nil {
+			return nil, fmt.Errorf("scan org member: %w", scanErr)
 		}
-		m.Clearance = ClearanceLevel(clearance)
+		m.Clearance = ClearanceLevel(clearance) // #nosec G115 -- clearance is 0-4
 		members = append(members, m)
 	}
 	return members, nil
@@ -627,7 +627,7 @@ func (s *PostgresStore) GetFederation(ctx context.Context, federationID string) 
 		}
 		return nil, fmt.Errorf("get federation: %w", err)
 	}
-	f.MaxClearance = ClearanceLevel(maxClearance)
+	f.MaxClearance = ClearanceLevel(maxClearance) // #nosec G115 -- clearance is 0-4
 	return f, nil
 }
 
@@ -673,12 +673,12 @@ func (s *PostgresStore) GetActiveFederations(ctx context.Context, orgID string) 
 	for rows.Next() {
 		f := &FederationEntry{}
 		var maxClearance int16
-		if err := rows.Scan(&f.FederationID, &f.ProposerOrgID, &f.TargetOrgID, &f.AllowedDomains, &f.AllowedDepts,
+		if scanErr := rows.Scan(&f.FederationID, &f.ProposerOrgID, &f.TargetOrgID, &f.AllowedDomains, &f.AllowedDepts,
 			&maxClearance, &f.ExpiresAt, &f.RequiresApproval, &f.Status, &f.CreatedHeight,
-			&f.ApprovedHeight, &f.CreatedAt, &f.RevokedAt); err != nil {
-			return nil, fmt.Errorf("scan federation: %w", err)
+			&f.ApprovedHeight, &f.CreatedAt, &f.RevokedAt); scanErr != nil {
+			return nil, fmt.Errorf("scan federation: %w", scanErr)
 		}
-		f.MaxClearance = ClearanceLevel(maxClearance)
+		f.MaxClearance = ClearanceLevel(maxClearance) // #nosec G115 -- clearance is 0-4
 		feds = append(feds, f)
 	}
 	return feds, nil
@@ -737,8 +737,8 @@ func (s *PostgresStore) GetOrgDepts(ctx context.Context, orgID string) ([]*DeptE
 	for rows.Next() {
 		d := &DeptEntry{}
 		var description, parentDept *string
-		if err := rows.Scan(&d.DeptID, &d.OrgID, &d.DeptName, &description, &parentDept, &d.CreatedHeight, &d.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scan dept: %w", err)
+		if scanErr := rows.Scan(&d.DeptID, &d.OrgID, &d.DeptName, &description, &parentDept, &d.CreatedHeight, &d.CreatedAt); scanErr != nil {
+			return nil, fmt.Errorf("scan dept: %w", scanErr)
 		}
 		if description != nil {
 			d.Description = *description
@@ -791,10 +791,10 @@ func (s *PostgresStore) GetDeptMembers(ctx context.Context, orgID, deptID string
 	for rows.Next() {
 		m := &DeptMemberEntry{}
 		var clearance int16
-		if err := rows.Scan(&m.OrgID, &m.DeptID, &m.AgentID, &clearance, &m.Role, &m.CreatedHeight, &m.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scan dept member: %w", err)
+		if scanErr := rows.Scan(&m.OrgID, &m.DeptID, &m.AgentID, &clearance, &m.Role, &m.CreatedHeight, &m.CreatedAt); scanErr != nil {
+			return nil, fmt.Errorf("scan dept member: %w", scanErr)
 		}
-		m.Clearance = ClearanceLevel(clearance)
+		m.Clearance = ClearanceLevel(clearance) // #nosec G115 -- clearance is 0-4
 		members = append(members, m)
 	}
 	return members, nil

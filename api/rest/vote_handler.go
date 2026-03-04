@@ -82,19 +82,21 @@ func (s *Server) handleVoteMemory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req VoteRequest
-	if err := decodeJSON(r, &req); err != nil {
+	var err error
+	if err = decodeJSON(r, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
 		return
 	}
 
-	decision, err := parseVoteDecision(req.Decision)
+	var decision tx.VoteDecision
+	decision, err = parseVoteDecision(req.Decision)
 	if err != nil {
 		writeProblem(w, http.StatusBadRequest, "Invalid decision", err.Error())
 		return
 	}
 
 	// Verify memory exists.
-	if _, err := s.store.GetMemory(r.Context(), memoryID); err != nil {
+	if _, err = s.store.GetMemory(r.Context(), memoryID); err != nil {
 		writeProblem(w, http.StatusNotFound, "Memory not found",
 			fmt.Sprintf("No memory found with ID %s.", memoryID))
 		return
@@ -103,7 +105,7 @@ func (s *Server) handleVoteMemory(w http.ResponseWriter, r *http.Request) {
 	// Build vote transaction.
 	voteTx := &tx.ParsedTx{
 		Type:      tx.TxTypeMemoryVote,
-		Nonce:     uint64(time.Now().UnixNano()),
+		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
 		Timestamp: time.Now(),
 		MemoryVote: &tx.MemoryVote{
 			MemoryID:  memoryID,
@@ -116,7 +118,7 @@ func (s *Server) handleVoteMemory(w http.ResponseWriter, r *http.Request) {
 	embedAgentAuth(r.Context(), voteTx)
 
 	// Sign the transaction with the node's signing key.
-	if err := tx.SignTx(voteTx, s.signingKey); err != nil {
+	if err = tx.SignTx(voteTx, s.signingKey); err != nil {
 		s.logger.Error().Err(err).Msg("failed to sign vote tx")
 		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
 		return
@@ -153,7 +155,8 @@ func (s *Server) handleChallengeMemory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req ChallengeRequest
-	if err := decodeJSON(r, &req); err != nil {
+	var err error
+	if err = decodeJSON(r, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
 		return
 	}
@@ -164,7 +167,7 @@ func (s *Server) handleChallengeMemory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Verify memory exists.
-	if _, err := s.store.GetMemory(r.Context(), memoryID); err != nil {
+	if _, err = s.store.GetMemory(r.Context(), memoryID); err != nil {
 		writeProblem(w, http.StatusNotFound, "Memory not found",
 			fmt.Sprintf("No memory found with ID %s.", memoryID))
 		return
@@ -172,7 +175,7 @@ func (s *Server) handleChallengeMemory(w http.ResponseWriter, r *http.Request) {
 
 	challengeTx := &tx.ParsedTx{
 		Type:      tx.TxTypeMemoryChallenge,
-		Nonce:     uint64(time.Now().UnixNano()),
+		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
 		Timestamp: time.Now(),
 		MemoryChallenge: &tx.MemoryChallenge{
 			MemoryID: memoryID,
@@ -185,7 +188,7 @@ func (s *Server) handleChallengeMemory(w http.ResponseWriter, r *http.Request) {
 	embedAgentAuth(r.Context(), challengeTx)
 
 	// Sign the transaction with the node's signing key.
-	if err := tx.SignTx(challengeTx, s.signingKey); err != nil {
+	if err = tx.SignTx(challengeTx, s.signingKey); err != nil {
 		s.logger.Error().Err(err).Msg("failed to sign challenge tx")
 		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
 		return
@@ -222,13 +225,14 @@ func (s *Server) handleCorroborateMemory(w http.ResponseWriter, r *http.Request)
 	}
 
 	var req CorroborateRequest
-	if err := decodeJSON(r, &req); err != nil {
+	var err error
+	if err = decodeJSON(r, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
 		return
 	}
 
 	// Verify memory exists.
-	if _, err := s.store.GetMemory(r.Context(), memoryID); err != nil {
+	if _, err = s.store.GetMemory(r.Context(), memoryID); err != nil {
 		writeProblem(w, http.StatusNotFound, "Memory not found",
 			fmt.Sprintf("No memory found with ID %s.", memoryID))
 		return
@@ -236,7 +240,7 @@ func (s *Server) handleCorroborateMemory(w http.ResponseWriter, r *http.Request)
 
 	corrTx := &tx.ParsedTx{
 		Type:      tx.TxTypeMemoryCorroborate,
-		Nonce:     uint64(time.Now().UnixNano()),
+		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
 		Timestamp: time.Now(),
 		MemoryCorroborate: &tx.MemoryCorroborate{
 			MemoryID: memoryID,
@@ -248,7 +252,7 @@ func (s *Server) handleCorroborateMemory(w http.ResponseWriter, r *http.Request)
 	embedAgentAuth(r.Context(), corrTx)
 
 	// Sign the transaction with the node's signing key.
-	if err := tx.SignTx(corrTx, s.signingKey); err != nil {
+	if err = tx.SignTx(corrTx, s.signingKey); err != nil {
 		s.logger.Error().Err(err).Msg("failed to sign corroborate tx")
 		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
 		return
@@ -309,7 +313,7 @@ func (s *Server) handleGetPending(w http.ResponseWriter, r *http.Request) {
 
 	limit := 20
 	if limitStr != "" {
-		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 && l <= 100 {
+		if l, parseErr := strconv.Atoi(limitStr); parseErr == nil && l > 0 && l <= 100 {
 			limit = l
 		}
 	}

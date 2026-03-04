@@ -1,6 +1,7 @@
 package rest
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -108,7 +109,8 @@ type cometBroadcastResponse struct {
 // handleSubmitMemory handles POST /v1/memory/submit.
 func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 	var req SubmitMemoryRequest
-	if err := decodeJSON(r, &req); err != nil {
+	var err error
+	if err = decodeJSON(r, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
 		return
 	}
@@ -157,7 +159,7 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 
 	submitTx := &tx.ParsedTx{
 		Type:  tx.TxTypeMemorySubmit,
-		Nonce: uint64(time.Now().UnixNano()),
+		Nonce: uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
 		Timestamp: time.Now(),
 		MemorySubmit: &tx.MemorySubmit{
 			MemoryID:        memoryID,
@@ -168,7 +170,7 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 			ConfidenceScore: req.ConfidenceScore,
 			Content:         req.Content,
 			ParentHash:      req.ParentHash,
-			Classification:  tx.ClearanceLevel(classification),
+			Classification:  tx.ClearanceLevel(classification), // #nosec G115 -- validated small int
 		},
 	}
 
@@ -176,7 +178,7 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 	embedAgentAuth(r.Context(), submitTx)
 
 	// Sign the transaction with the node's signing key.
-	if err := tx.SignTx(submitTx, s.signingKey); err != nil {
+	if err = tx.SignTx(submitTx, s.signingKey); err != nil {
 		s.logger.Error().Err(err).Msg("failed to sign submit tx")
 		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
 		return
@@ -213,7 +215,7 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:       time.Now(),
 	}
 
-	if err := s.store.InsertMemory(r.Context(), record); err != nil {
+	if err = s.store.InsertMemory(r.Context(), record); err != nil {
 		s.logger.Error().Err(err).Str("memory_id", memoryID).Msg("failed to insert memory")
 		writeProblem(w, http.StatusInternalServerError, "Storage error", "Failed to store memory.")
 		return
@@ -221,7 +223,7 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 
 	// Store knowledge triples if provided.
 	if len(req.KnowledgeTriples) > 0 {
-		if err := s.store.InsertTriples(r.Context(), memoryID, req.KnowledgeTriples); err != nil {
+		if err = s.store.InsertTriples(r.Context(), memoryID, req.KnowledgeTriples); err != nil {
 			s.logger.Error().Err(err).Str("memory_id", memoryID).Msg("failed to insert triples")
 			// Non-fatal: memory was stored, triples can be retried.
 		}
@@ -239,7 +241,8 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 // handleQueryMemory handles POST /v1/memory/query.
 func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 	var req QueryMemoryRequest
-	if err := decodeJSON(r, &req); err != nil {
+	var err error
+	if err = decodeJSON(r, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
 		return
 	}
@@ -254,8 +257,8 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 		domainOwner, domainErr := s.badgerStore.GetDomainOwner(req.DomainTag)
 		if domainErr == nil && domainOwner != "" {
 			agentID := middleware.ContextAgentID(r.Context())
-			hasAccess, err := s.badgerStore.HasAccessMultiOrg(req.DomainTag, agentID, 0, time.Now())
-			if err != nil || !hasAccess {
+			hasAccess, accessErr := s.badgerStore.HasAccessMultiOrg(req.DomainTag, agentID, 0, time.Now())
+			if accessErr != nil || !hasAccess {
 				writeProblem(w, http.StatusForbidden, "Access denied",
 					fmt.Sprintf("No read access to domain %s", req.DomainTag))
 				return
@@ -273,7 +276,8 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 		Cursor:        req.Cursor,
 	}
 
-	records, err := s.store.QuerySimilar(r.Context(), req.Embedding, opts)
+	var records []*memory.MemoryRecord
+	records, err = s.store.QuerySimilar(r.Context(), req.Embedding, opts)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to query memories")
 		writeProblem(w, http.StatusInternalServerError, "Query error", "Failed to query memories.")
@@ -354,8 +358,8 @@ func (s *Server) handleGetMemory(w http.ResponseWriter, r *http.Request) {
 			domainOwner, domainErr := s.badgerStore.GetDomainOwner(rec.DomainTag)
 			if domainErr == nil && domainOwner != "" {
 				classification, _ := s.badgerStore.GetMemoryClassification(memoryID)
-				hasAccess, err := s.badgerStore.HasAccessMultiOrg(rec.DomainTag, agentID, classification, time.Now())
-				if err != nil || !hasAccess {
+				hasAccess, accessErr := s.badgerStore.HasAccessMultiOrg(rec.DomainTag, agentID, classification, time.Now())
+				if accessErr != nil || !hasAccess {
 					writeProblem(w, http.StatusForbidden, "Access denied",
 						fmt.Sprintf("No read access to domain %s", rec.DomainTag))
 					return
@@ -394,14 +398,18 @@ func (s *Server) broadcastTx(txBytes []byte) (string, error) {
 	txHex := hex.EncodeToString(txBytes)
 	url := fmt.Sprintf("%s/broadcast_tx_sync?tx=0x%s", s.cometbftRPC, txHex)
 
-	resp, err := http.Get(url)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil) // #nosec G107 -- internal CometBFT RPC
+	if err != nil {
+		return "", fmt.Errorf("create broadcast request: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("broadcast tx: %w", err)
 	}
 	defer resp.Body.Close()
 
 	var result cometBroadcastResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err = json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return "", fmt.Errorf("decode broadcast response: %w", err)
 	}
 

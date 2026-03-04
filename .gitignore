@@ -111,7 +111,9 @@ integrations/levelup/evaluate_challenges.py
 integrations/levelup/README.md
 integrations/levelup/requirements.txt
 
+# Paper 4 agents (Level Up IP — proprietary multi-agent pipeline)
+integrations/levelup/paper4/
+
 # Tracked (open-source, generic stats engine):
 #   integrations/levelup/experiment_protocol.py
 #   integrations/levelup/.gitignore
-#   integrations/levelup/paper4/

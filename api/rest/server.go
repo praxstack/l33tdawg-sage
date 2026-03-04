@@ -100,7 +100,7 @@ func loadValidatorSigningKey(logger zerolog.Logger) ed25519.PrivateKey {
 			Value string `json:"value"`
 		} `json:"priv_key"`
 	}
-	if err := json.Unmarshal(data, &keyDoc); err != nil {
+	if err = json.Unmarshal(data, &keyDoc); err != nil {
 		logger.Error().Err(err).Msg("failed to parse validator key JSON — using random key")
 		_, sk, _ := ed25519.GenerateKey(nil)
 		return sk
@@ -114,7 +114,8 @@ func loadValidatorSigningKey(logger zerolog.Logger) ed25519.PrivateKey {
 	}
 
 	sk := ed25519.PrivateKey(keyBytes)
-	pubHex := fmt.Sprintf("%x", sk.Public().(ed25519.PublicKey))
+	pub, _ := sk.Public().(ed25519.PublicKey)
+	pubHex := fmt.Sprintf("%x", pub)
 	logger.Info().Str("validator_id", pubHex[:16]+"...").Msg("loaded CometBFT validator signing key")
 	return sk
 }

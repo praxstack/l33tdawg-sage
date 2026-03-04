@@ -54,7 +54,8 @@ type FederationRevokeReq struct {
 // handleOrgRegister handles POST /v1/org/register.
 func (s *Server) handleOrgRegister(w http.ResponseWriter, r *http.Request) {
 	var req OrgRegisterReq
-	if err := decodeJSON(r, &req); err != nil {
+	err := decodeJSON(r, &req)
+	if err != nil {
 		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
 		return
 	}
@@ -71,7 +72,7 @@ func (s *Server) handleOrgRegister(w http.ResponseWriter, r *http.Request) {
 
 	orgTx := &tx.ParsedTx{
 		Type:      tx.TxTypeOrgRegister,
-		Nonce:     uint64(time.Now().UnixNano()),
+		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
 		Timestamp: time.Now(),
 		OrgRegister: &tx.OrgRegister{
 			OrgID:       orgID,
@@ -83,7 +84,8 @@ func (s *Server) handleOrgRegister(w http.ResponseWriter, r *http.Request) {
 
 	embedAgentAuth(r.Context(), orgTx)
 
-	if err := tx.SignTx(orgTx, s.signingKey); err != nil {
+	err = tx.SignTx(orgTx, s.signingKey)
+	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to sign org register tx")
 		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
 		return
@@ -165,7 +167,8 @@ func (s *Server) handleOrgAddMember(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req OrgAddMemberReq
-	if err := decodeJSON(r, &req); err != nil {
+	err := decodeJSON(r, &req)
+	if err != nil {
 		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
 		return
 	}
@@ -182,19 +185,20 @@ func (s *Server) handleOrgAddMember(w http.ResponseWriter, r *http.Request) {
 
 	addTx := &tx.ParsedTx{
 		Type:      tx.TxTypeOrgAddMember,
-		Nonce:     uint64(time.Now().UnixNano()),
+		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
 		Timestamp: time.Now(),
 		OrgAddMember: &tx.OrgAddMember{
 			OrgID:     orgID,
 			AgentID:   req.AgentID,
-			Clearance: tx.ClearanceLevel(req.Clearance),
+			Clearance: tx.ClearanceLevel(req.Clearance), // #nosec G115 -- validated small int
 			Role:      req.Role,
 		},
 	}
 
 	embedAgentAuth(r.Context(), addTx)
 
-	if err := tx.SignTx(addTx, s.signingKey); err != nil {
+	err = tx.SignTx(addTx, s.signingKey)
+	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to sign org add member tx")
 		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
 		return
@@ -229,7 +233,7 @@ func (s *Server) handleOrgRemoveMember(w http.ResponseWriter, r *http.Request) {
 
 	removeTx := &tx.ParsedTx{
 		Type:      tx.TxTypeOrgRemoveMember,
-		Nonce:     uint64(time.Now().UnixNano()),
+		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
 		Timestamp: time.Now(),
 		OrgRemoveMember: &tx.OrgRemoveMember{
 			OrgID:   orgID,
@@ -239,7 +243,8 @@ func (s *Server) handleOrgRemoveMember(w http.ResponseWriter, r *http.Request) {
 
 	embedAgentAuth(r.Context(), removeTx)
 
-	if err := tx.SignTx(removeTx, s.signingKey); err != nil {
+	err := tx.SignTx(removeTx, s.signingKey)
+	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to sign org remove member tx")
 		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
 		return
@@ -272,7 +277,8 @@ func (s *Server) handleOrgSetClearance(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req OrgSetClearanceReq
-	if err := decodeJSON(r, &req); err != nil {
+	err := decodeJSON(r, &req)
+	if err != nil {
 		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
 		return
 	}
@@ -283,18 +289,19 @@ func (s *Server) handleOrgSetClearance(w http.ResponseWriter, r *http.Request) {
 
 	clearanceTx := &tx.ParsedTx{
 		Type:      tx.TxTypeOrgSetClearance,
-		Nonce:     uint64(time.Now().UnixNano()),
+		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
 		Timestamp: time.Now(),
 		OrgSetClearance: &tx.OrgSetClearance{
 			OrgID:     orgID,
 			AgentID:   req.AgentID,
-			Clearance: tx.ClearanceLevel(req.Clearance),
+			Clearance: tx.ClearanceLevel(req.Clearance), // #nosec G115 -- validated small int
 		},
 	}
 
 	embedAgentAuth(r.Context(), clearanceTx)
 
-	if err := tx.SignTx(clearanceTx, s.signingKey); err != nil {
+	err = tx.SignTx(clearanceTx, s.signingKey)
+	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to sign org set clearance tx")
 		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
 		return
@@ -323,7 +330,8 @@ func (s *Server) handleOrgSetClearance(w http.ResponseWriter, r *http.Request) {
 // handleFederationPropose handles POST /v1/federation/propose.
 func (s *Server) handleFederationPropose(w http.ResponseWriter, r *http.Request) {
 	var req FederationProposeReq
-	if err := decodeJSON(r, &req); err != nil {
+	err := decodeJSON(r, &req)
+	if err != nil {
 		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
 		return
 	}
@@ -352,14 +360,14 @@ func (s *Server) handleFederationPropose(w http.ResponseWriter, r *http.Request)
 
 	proposeTx := &tx.ParsedTx{
 		Type:      tx.TxTypeFederationPropose,
-		Nonce:     uint64(time.Now().UnixNano()),
+		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
 		Timestamp: time.Now(),
 		FederationPropose: &tx.FederationPropose{
 			ProposerOrgID:    proposerOrg,
 			TargetOrgID:      req.TargetOrgID,
 			AllowedDomains:   req.AllowedDomains,
 			AllowedDepts:     req.AllowedDepts,
-			MaxClearance:     tx.ClearanceLevel(req.MaxClearance),
+			MaxClearance:     tx.ClearanceLevel(req.MaxClearance), // #nosec G115 -- validated small int
 			ExpiresAt:        req.ExpiresAt,
 			RequiresApproval: req.RequiresApproval,
 		},
@@ -367,7 +375,8 @@ func (s *Server) handleFederationPropose(w http.ResponseWriter, r *http.Request)
 
 	embedAgentAuth(r.Context(), proposeTx)
 
-	if err := tx.SignTx(proposeTx, s.signingKey); err != nil {
+	err = tx.SignTx(proposeTx, s.signingKey)
+	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to sign federation propose tx")
 		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
 		return
@@ -416,7 +425,7 @@ func (s *Server) handleFederationApprove(w http.ResponseWriter, r *http.Request)
 
 	approveTx := &tx.ParsedTx{
 		Type:      tx.TxTypeFederationApprove,
-		Nonce:     uint64(time.Now().UnixNano()),
+		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
 		Timestamp: time.Now(),
 		FederationApprove: &tx.FederationApprove{
 			FederationID:  fedID,
@@ -426,7 +435,8 @@ func (s *Server) handleFederationApprove(w http.ResponseWriter, r *http.Request)
 
 	embedAgentAuth(r.Context(), approveTx)
 
-	if err := tx.SignTx(approveTx, s.signingKey); err != nil {
+	err = tx.SignTx(approveTx, s.signingKey)
+	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to sign federation approve tx")
 		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
 		return
@@ -479,7 +489,7 @@ func (s *Server) handleFederationRevoke(w http.ResponseWriter, r *http.Request) 
 
 	revokeTx := &tx.ParsedTx{
 		Type:      tx.TxTypeFederationRevoke,
-		Nonce:     uint64(time.Now().UnixNano()),
+		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
 		Timestamp: time.Now(),
 		FederationRevoke: &tx.FederationRevoke{
 			FederationID: fedID,
@@ -490,7 +500,8 @@ func (s *Server) handleFederationRevoke(w http.ResponseWriter, r *http.Request) 
 
 	embedAgentAuth(r.Context(), revokeTx)
 
-	if err := tx.SignTx(revokeTx, s.signingKey); err != nil {
+	err = tx.SignTx(revokeTx, s.signingKey)
+	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to sign federation revoke tx")
 		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
 		return

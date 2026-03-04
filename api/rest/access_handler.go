@@ -48,7 +48,8 @@ type DomainRegisterReq struct {
 // handleAccessRequest handles POST /v1/access/request.
 func (s *Server) handleAccessRequest(w http.ResponseWriter, r *http.Request) {
 	var req AccessRequestReq
-	if err := decodeJSON(r, &req); err != nil {
+	err := decodeJSON(r, &req)
+	if err != nil {
 		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
 		return
 	}
@@ -65,19 +66,20 @@ func (s *Server) handleAccessRequest(w http.ResponseWriter, r *http.Request) {
 
 	accessTx := &tx.ParsedTx{
 		Type:      tx.TxTypeAccessRequest,
-		Nonce:     uint64(time.Now().UnixNano()),
+		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
 		Timestamp: time.Now(),
 		AccessRequest: &tx.AccessRequest{
 			RequesterID:    agentID,
 			TargetDomain:   req.TargetDomain,
 			Justification:  req.Justification,
-			RequestedLevel: uint8(req.RequestedLevel),
+			RequestedLevel: uint8(req.RequestedLevel), // #nosec G115 -- validated small int
 		},
 	}
 
 	embedAgentAuth(r.Context(), accessTx)
 
-	if err := tx.SignTx(accessTx, s.signingKey); err != nil {
+	err = tx.SignTx(accessTx, s.signingKey)
+	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to sign access request tx")
 		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
 		return
@@ -106,7 +108,8 @@ func (s *Server) handleAccessRequest(w http.ResponseWriter, r *http.Request) {
 // handleAccessGrant handles POST /v1/access/grant.
 func (s *Server) handleAccessGrant(w http.ResponseWriter, r *http.Request) {
 	var req AccessGrantReq
-	if err := decodeJSON(r, &req); err != nil {
+	err := decodeJSON(r, &req)
+	if err != nil {
 		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
 		return
 	}
@@ -127,13 +130,13 @@ func (s *Server) handleAccessGrant(w http.ResponseWriter, r *http.Request) {
 
 	grantTx := &tx.ParsedTx{
 		Type:      tx.TxTypeAccessGrant,
-		Nonce:     uint64(time.Now().UnixNano()),
+		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
 		Timestamp: time.Now(),
 		AccessGrant: &tx.AccessGrant{
 			GranterID: agentID,
 			GranteeID: req.GranteeID,
 			Domain:    req.Domain,
-			Level:     uint8(req.Level),
+			Level:     uint8(req.Level), // #nosec G115 -- validated small int
 			ExpiresAt: req.ExpiresAt,
 			RequestID: req.RequestID,
 		},
@@ -141,7 +144,8 @@ func (s *Server) handleAccessGrant(w http.ResponseWriter, r *http.Request) {
 
 	embedAgentAuth(r.Context(), grantTx)
 
-	if err := tx.SignTx(grantTx, s.signingKey); err != nil {
+	err = tx.SignTx(grantTx, s.signingKey)
+	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to sign access grant tx")
 		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
 		return
@@ -170,7 +174,8 @@ func (s *Server) handleAccessGrant(w http.ResponseWriter, r *http.Request) {
 // handleAccessRevoke handles POST /v1/access/revoke.
 func (s *Server) handleAccessRevoke(w http.ResponseWriter, r *http.Request) {
 	var req AccessRevokeReq
-	if err := decodeJSON(r, &req); err != nil {
+	err := decodeJSON(r, &req)
+	if err != nil {
 		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
 		return
 	}
@@ -188,7 +193,7 @@ func (s *Server) handleAccessRevoke(w http.ResponseWriter, r *http.Request) {
 
 	revokeTx := &tx.ParsedTx{
 		Type:      tx.TxTypeAccessRevoke,
-		Nonce:     uint64(time.Now().UnixNano()),
+		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
 		Timestamp: time.Now(),
 		AccessRevoke: &tx.AccessRevoke{
 			RevokerID: agentID,
@@ -200,7 +205,8 @@ func (s *Server) handleAccessRevoke(w http.ResponseWriter, r *http.Request) {
 
 	embedAgentAuth(r.Context(), revokeTx)
 
-	if err := tx.SignTx(revokeTx, s.signingKey); err != nil {
+	err = tx.SignTx(revokeTx, s.signingKey)
+	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to sign access revoke tx")
 		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
 		return
@@ -252,7 +258,8 @@ func (s *Server) handleListGrants(w http.ResponseWriter, r *http.Request) {
 // handleDomainRegister handles POST /v1/domain/register.
 func (s *Server) handleDomainRegister(w http.ResponseWriter, r *http.Request) {
 	var req DomainRegisterReq
-	if err := decodeJSON(r, &req); err != nil {
+	err := decodeJSON(r, &req)
+	if err != nil {
 		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
 		return
 	}
@@ -266,7 +273,7 @@ func (s *Server) handleDomainRegister(w http.ResponseWriter, r *http.Request) {
 
 	domainTx := &tx.ParsedTx{
 		Type:      tx.TxTypeDomainRegister,
-		Nonce:     uint64(time.Now().UnixNano()),
+		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
 		Timestamp: time.Now(),
 		DomainRegister: &tx.DomainRegister{
 			DomainName:   req.Name,
@@ -278,7 +285,8 @@ func (s *Server) handleDomainRegister(w http.ResponseWriter, r *http.Request) {
 
 	embedAgentAuth(r.Context(), domainTx)
 
-	if err := tx.SignTx(domainTx, s.signingKey); err != nil {
+	err = tx.SignTx(domainTx, s.signingKey)
+	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to sign domain register tx")
 		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
 		return

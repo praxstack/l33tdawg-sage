@@ -62,7 +62,7 @@ func (m *mockMemoryStore) UpdateStatus(_ context.Context, memoryID string, statu
 }
 
 func (m *mockMemoryStore) QuerySimilar(_ context.Context, embedding []float32, opts store.QueryOptions) ([]*memory.MemoryRecord, error) {
-	var results []*memory.MemoryRecord
+	results := make([]*memory.MemoryRecord, 0, len(m.memories))
 	for _, rec := range m.memories {
 		results = append(results, rec)
 	}
@@ -124,7 +124,7 @@ func (m *mockScoreStore) UpdateScore(_ context.Context, score *store.ValidatorSc
 }
 
 func (m *mockScoreStore) GetAllScores(_ context.Context) ([]*store.ValidatorScore, error) {
-	var result []*store.ValidatorScore
+	result := make([]*store.ValidatorScore, 0, len(m.scores))
 	for _, s := range m.scores {
 		result = append(result, s)
 	}

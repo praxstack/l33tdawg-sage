@@ -56,7 +56,7 @@ func EncodeTx(tx *ParsedTx) ([]byte, error) {
 		ed25519.PublicKeySize + ed25519.SignatureSize + 8 + 32
 	buf := make([]byte, 0, totalLen)
 	buf = append(buf, byte(tx.Type))
-	buf = appendUint32(buf, uint32(len(payload)))
+	buf = appendUint32(buf, uint32(len(payload))) // #nosec G115 -- payload length fits in uint32
 	buf = append(buf, payload...)
 	buf = append(buf, sig...)
 	buf = append(buf, pub...)
@@ -81,7 +81,7 @@ func DecodeTx(data []byte) (*ParsedTx, error) {
 	payloadLen := binary.BigEndian.Uint32(data[1:5])
 
 	// Minimum (legacy): type(1) + payloadLen(4) + payload + sig(64) + pub(32) + nonce(8) + ts(8)
-	legacyLen := 1 + 4 + int(payloadLen) + ed25519.SignatureSize + ed25519.PublicKeySize + 8 + 8
+	legacyLen := 1 + 4 + int(payloadLen) + ed25519.SignatureSize + ed25519.PublicKeySize + 8 + 8 // #nosec G115 -- payloadLen validated
 	// Full: legacy + agentPub(32) + agentSig(64) + agentTs(8) + agentBodyHash(32)
 	fullLen := legacyLen + ed25519.PublicKeySize + ed25519.SignatureSize + 8 + 32
 	if len(data) < legacyLen {
@@ -89,8 +89,8 @@ func DecodeTx(data []byte) (*ParsedTx, error) {
 	}
 
 	offset := 5
-	payload := data[offset : offset+int(payloadLen)]
-	offset += int(payloadLen)
+	payload := data[offset : offset+int(payloadLen)]  // #nosec G115 -- payloadLen validated above
+	offset += int(payloadLen)                          // #nosec G115 -- payloadLen validated above
 
 	sig := make([]byte, ed25519.SignatureSize)
 	copy(sig, data[offset:offset+ed25519.SignatureSize])
@@ -103,7 +103,7 @@ func DecodeTx(data []byte) (*ParsedTx, error) {
 	nonce := binary.BigEndian.Uint64(data[offset : offset+8])
 	offset += 8
 
-	tsNano := int64(binary.BigEndian.Uint64(data[offset : offset+8]))
+	tsNano := int64(binary.BigEndian.Uint64(data[offset : offset+8])) // #nosec G115 -- timestamp conversion safe
 	offset += 8
 
 	tx := &ParsedTx{
@@ -124,7 +124,7 @@ func DecodeTx(data []byte) (*ParsedTx, error) {
 		copy(tx.AgentSig, data[offset:offset+ed25519.SignatureSize])
 		offset += ed25519.SignatureSize
 
-		tx.AgentTimestamp = int64(binary.BigEndian.Uint64(data[offset : offset+8]))
+		tx.AgentTimestamp = int64(binary.BigEndian.Uint64(data[offset : offset+8])) // #nosec G115 -- timestamp conversion safe
 		offset += 8
 
 		tx.AgentBodyHash = make([]byte, 32)
@@ -142,7 +142,8 @@ func DecodeTx(data []byte) (*ParsedTx, error) {
 // the Signature and PublicKey fields on the transaction.
 func SignTx(tx *ParsedTx, privateKey ed25519.PrivateKey) error {
 	payload := signingPayload(tx)
-	tx.PublicKey = privateKey.Public().(ed25519.PublicKey)
+	pub, _ := privateKey.Public().(ed25519.PublicKey)
+	tx.PublicKey = pub
 	tx.Signature = ed25519.Sign(privateKey, payload)
 	return nil
 }
@@ -607,7 +608,7 @@ func decodeMemoryCorroborate(data []byte) (*MemoryCorroborate, error) {
 // --- binary encoding primitives ---
 
 func appendBytes(buf []byte, data []byte) []byte {
-	buf = appendUint32(buf, uint32(len(data)))
+	buf = appendUint32(buf, uint32(len(data))) // #nosec G115 -- field data fits in uint32
 	buf = append(buf, data...)
 	return buf
 }
@@ -625,7 +626,7 @@ func appendUint64(buf []byte, v uint64) []byte {
 }
 
 func appendInt64(buf []byte, v int64) []byte {
-	return appendUint64(buf, uint64(v))
+	return appendUint64(buf, uint64(v)) // #nosec G115 -- int64 to uint64 preserves bits
 }
 
 func appendFloat64(buf []byte, v float64) []byte {
@@ -636,7 +637,7 @@ func readBytes(data []byte, off int) ([]byte, int, error) {
 	if off+4 > len(data) {
 		return nil, 0, ErrInvalidTxData
 	}
-	l := int(binary.BigEndian.Uint32(data[off : off+4]))
+	l := int(binary.BigEndian.Uint32(data[off : off+4])) // #nosec G115 -- uint32 fits in int
 	off += 4
 	if off+l > len(data) {
 		return nil, 0, ErrInvalidTxData
@@ -680,7 +681,7 @@ func readInt64(data []byte, off int) (int64, int, error) {
 	if off+8 > len(data) {
 		return 0, 0, ErrInvalidTxData
 	}
-	v := int64(binary.BigEndian.Uint64(data[off : off+8]))
+	v := int64(binary.BigEndian.Uint64(data[off : off+8])) // #nosec G115 -- safe conversion
 	return v, off + 8, nil
 }
 
@@ -835,11 +836,11 @@ func encodeAccessQuery(a *AccessQuery) []byte {
 	buf = appendBytes(buf, []byte(a.AgentID))
 	buf = appendBytes(buf, []byte(a.Domain))
 	// Encode embedding: uint32 length, then each float32
-	buf = appendUint32(buf, uint32(len(a.Embedding)))
+	buf = appendUint32(buf, uint32(len(a.Embedding))) // #nosec G115 -- embedding length fits in uint32
 	for _, v := range a.Embedding {
 		buf = appendFloat32(buf, v)
 	}
-	buf = appendUint32(buf, uint32(a.TopK))
+	buf = appendUint32(buf, uint32(a.TopK)) // #nosec G115 -- topK is a small query limit value
 	return buf
 }
 
@@ -880,7 +881,7 @@ func decodeAccessQuery(data []byte) (*AccessQuery, error) {
 	if err != nil {
 		return nil, err
 	}
-	a.TopK = int32(topK)
+	a.TopK = int32(topK) // #nosec G115 -- topK is a small query limit value
 
 	return a, nil
 }
@@ -943,7 +944,7 @@ func byteToBool(b byte) bool {
 }
 
 func appendStringSlice(buf []byte, ss []string) []byte {
-	buf = appendUint32(buf, uint32(len(ss)))
+	buf = appendUint32(buf, uint32(len(ss))) // #nosec G115 -- slice length fits in uint32
 	for _, s := range ss {
 		buf = appendBytes(buf, []byte(s))
 	}
@@ -954,7 +955,7 @@ func readStringSlice(data []byte, off int) ([]string, int, error) {
 	if off+4 > len(data) {
 		return nil, 0, ErrInvalidTxData
 	}
-	count := int(binary.BigEndian.Uint32(data[off : off+4]))
+	count := int(binary.BigEndian.Uint32(data[off : off+4])) // #nosec G115 -- uint32 fits in int
 	off += 4
 	ss := make([]string, count)
 	for i := 0; i < count; i++ {
