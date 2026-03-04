@@ -105,10 +105,13 @@ integrations/levelup/results/*.sql
 
 # SAGE bridge (Level Up IP — generic example lives in sdk/python/examples/sage_bridge_example.py)
 integrations/levelup/sage_bridge.py
+# Level Up-specific files (expose internal architecture)
+integrations/levelup/run_experiment.py
+integrations/levelup/evaluate_challenges.py
+integrations/levelup/README.md
+integrations/levelup/requirements.txt
 
-# Tracked (open-source, promised in papers):
+# Tracked (open-source, generic stats engine):
 #   integrations/levelup/experiment_protocol.py
-#   integrations/levelup/run_experiment.py
-#   integrations/levelup/evaluate_challenges.py
-#   integrations/levelup/README.md
+#   integrations/levelup/.gitignore
 #   integrations/levelup/paper4/
