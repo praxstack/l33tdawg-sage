@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+title: "(S)AGE: Sovereign Agent Governed Experience"
+message: "If you use this software, please cite it using the metadata from this file."
+type: software
+authors:
+  - family-names: Kannabhiran
+    given-names: Dhillon Andrew
+    email: dhillon@levelupctf.com
+    alias: l33tdawg
+repository-code: "https://github.com/l33tdawg/sage"
+url: "https://github.com/l33tdawg/sage"
+license: Apache-2.0
+version: "1.0.0"
+date-released: "2026-03-04"
+doi: "10.5281/zenodo.18855168"
+abstract: >-
+  A governed, verifiable, experience-weighted institutional memory layer
+  for multi-agent systems. BFT consensus via CometBFT, Proof of Experience
+  weighted validation, PostgreSQL + pgvector off-chain storage, and a
+  Python SDK for agent integration.
+keywords:
+  - multi-agent systems
+  - institutional memory
+  - consensus
+  - BFT
+  - proof of experience
