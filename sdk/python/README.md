@@ -468,6 +468,115 @@ results = orchestrator_client.query(
 # Returns EMPTY — orchestrator is in Engineering, not Security
 ```
 
+### Write-Side Domain Enforcement
+
+```
+                        ┌─────────────────────────────────────────────┐
+                        │           (S)AGE ABCI State Machine         │
+                        │                                             │
+  Agent A ──propose()──►│  processMemorySubmit()                      │
+  (dept: security)      │    ├─ Ed25519 signature ✓  (on-chain)       │
+                        │    ├─ Domain tag check  ?  (YOUR app)  ◄────┼─── You implement this
+                        │    └─ Store to BadgerDB + PostgreSQL        │
+                        │                                             │
+  Agent B ──query()────►│  processMemoryQuery()                       │
+  (dept: engineering)   │    ├─ Ed25519 signature ✓  (on-chain)       │
+                        │    ├─ Domain access gate ✓ (on-chain)  ◄────┼─── Already enforced
+                        │    └─ Return results (filtered by RBAC)     │
+                        └─────────────────────────────────────────────┘
+
+  Read-side:  ON-CHAIN — consensus-enforced, cannot be bypassed
+  Write-side: YOUR APP — implement in ABCI handler or application layer
+```
+
+Read-side access control is enforced on-chain by the ABCI state machine — agents can only query domains they have clearance for. **Write-side enforcement is your responsibility** when building your ABCI application.
+
+The base (S)AGE ABCI accepts any `domain_tag` on memory submissions. This is by design — your application defines what domain taxonomy rules to enforce. Without write-side checks, any agent can submit memories tagged to any domain, which **pollutes retrieval** for all downstream consumers.
+
+```
+WITHOUT write-side enforcement:
+
+  Telemetry Agent ──► domain: "security.analysis"  ──► "Status OK, 289s"
+  Telemetry Agent ──► domain: "security.analysis"  ──► "Status OK, 311s"
+  Telemetry Agent ──► domain: "security.analysis"  ──► "Status OK, 254s"
+  Analyst Agent   ──► domain: "security.analysis"  ──► "CVE-2026-1234 requires..."
+  Telemetry Agent ──► domain: "security.analysis"  ──► "Status OK, 304s"
+
+  Designer queries "security.analysis" (top_k=5) → gets 4 status lines + 1 analysis
+  Result: Designer has no useful knowledge. Performance regresses.
+
+WITH write-side enforcement:
+
+  Telemetry Agent ──► domain: "ops.telemetry"      ──► "Status OK, 289s"  (correct domain)
+  Analyst Agent   ──► domain: "security.analysis"   ──► "CVE-2026-1234 requires..."
+
+  Designer queries "security.analysis" (top_k=5) → gets 5 curated analyses
+  Result: Designer has full institutional knowledge. Performance improves.
+```
+
+**Why this matters:** In a production deployment with 10+ agents, a telemetry agent submitting one-line status updates to the same domain as curated analysis reports will drown out the signal. Semantic search returns the telemetry noise instead of the analysis. The knowledge base degrades silently — no errors, just wrong results.
+
+**Pattern 1: ABCI-level enforcement (recommended)**
+
+Add a domain-tag check in your `processMemorySubmit` handler:
+
+```go
+func (app *MyApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blockTime time.Time) *abcitypes.ExecTxResult {
+    submit := parsedTx.MemorySubmit
+    agentID := auth.PublicKeyToAgentID(parsedTx.PublicKey)
+
+    // Enforce write-side domain access
+    hasWriteAccess, err := app.badgerStore.HasAccessMultiOrg(
+        submit.DomainTag, agentID, 2, blockTime,  // level 2 = write
+    )
+    if err != nil || !hasWriteAccess {
+        return &abcitypes.ExecTxResult{
+            Code: 13,
+            Log:  fmt.Sprintf("agent %s has no write access to domain %s", agentID[:16], submit.DomainTag),
+        }
+    }
+
+    // ... proceed with memory creation
+}
+```
+
+**Pattern 2: Application-layer gatekeeper**
+
+If you prefer flexibility over strictness, enforce domain tagging in your orchestrator/CEO agent before submission reaches the chain:
+
+```python
+# CEO validates domain tag before forwarding to SAGE
+AGENT_DOMAIN_MAP = {
+    "designer":          ["design.generation", "design.patterns"],
+    "evaluator":         ["evaluation.calibration", "evaluation.hardening"],
+    "red_team_auditor":  ["red_team.verification"],
+    "solution_verifier": ["red_team.solver"],      # NOT red_team.verification!
+    "quality":           ["quality.scoring", "quality.testing"],
+}
+
+def validate_submission(agent_name: str, domain_tag: str) -> bool:
+    """Check if agent is allowed to write to this domain."""
+    allowed = AGENT_DOMAIN_MAP.get(agent_name, [])
+    return any(domain_tag.startswith(prefix) for prefix in allowed)
+```
+
+**Pattern 3: Domain prefix convention**
+
+Use a naming convention that maps departments to domain prefixes: `{dept}.{subdomain}.{category}`. Then validate that the submitting agent's department matches the domain prefix:
+
+```python
+# Agent in "red_team" dept can only write to "red_team.*" domains
+agent_dept = get_agent_department(agent_id)  # from on-chain RBAC
+domain_prefix = domain_tag.split(".")[0]
+if agent_dept != domain_prefix:
+    raise ValueError(f"Agent in {agent_dept} cannot write to {domain_tag}")
+```
+
+**Choose based on your threat model:**
+- Pattern 1 (ABCI): Strongest — consensus-enforced, cannot be bypassed
+- Pattern 2 (Gatekeeper): Flexible — easy to update rules without chain changes
+- Pattern 3 (Convention): Lightweight — works without modifying the ABCI app
+
 ### Setup Checklist
 
 Run through this before any agent submits its first memory:
@@ -480,9 +589,12 @@ Run through this before any agent submits its first memory:
 - [ ] Every agent has a unique Ed25519 keypair
 - [ ] Every agent added to the organization with correct clearance level
 - [ ] Every agent assigned to their department(s)
+- [ ] Write-side domain enforcement implemented (ABCI, gatekeeper, or convention)
+- [ ] Domain taxonomy reviewed — each agent type writes to a distinct domain prefix
 - [ ] Federation agreements established (if cross-org access needed)
 - [ ] Test: submit a memory from Agent A, verify Agent B in same dept can query it
 - [ ] Test: verify Agent C in a different dept CANNOT query it
+- [ ] Test: verify Agent A CANNOT write to Agent C's domain (write-side enforcement)
 
 ### Development Mode (No RBAC)
 
@@ -598,6 +710,8 @@ admin_client_a.revoke_federation(fed_id, reason="Partnership ended")
 - **Setup order matters.** Register org → departments → domains → agents BEFORE submitting memories.
 - **The org admin is permanent.** The keypair that registered the org has irrevocable admin authority.
 - **Unregistered domains are open.** Any agent can read/write — register all production domains.
+- **Read-side RBAC is on-chain. Write-side RBAC is your responsibility.** The base ABCI enforces query access but accepts any domain tag on submissions. Implement write-side checks in your ABCI app or application layer (see "Write-Side Domain Enforcement" above).
+- **Domain taxonomy determines retrieval quality.** Agents writing to the wrong domain silently degrades search results for all consumers. This is the most common source of knowledge base pollution.
 - **Memories are permanent.** On-chain data cannot be retroactively access-controlled.
 - **Department boundaries are enforced.** Agents in Dept A cannot see Dept B's memories.
 - **Federation is opt-in.** Both orgs must agree. Scoped by department and clearance cap.

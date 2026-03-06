@@ -278,9 +278,63 @@ def main() -> None:
         print(f"  Spokesperson -> public_advisories: {result5.memory_id[:16]}...")
     print()
 
-    # ── Verify the access structure ───────────────────────────────
+    # ── Demonstrate write-side domain enforcement ────────────────
+    #
+    # IMPORTANT: The base (S)AGE ABCI does NOT enforce write-side RBAC.
+    # Any agent can submit to any domain tag. YOU must enforce domain
+    # boundaries in your application layer or custom ABCI.
+    #
+    # Without write-side enforcement, an operator could accidentally
+    # submit telemetry data tagged as "classified_intel", polluting
+    # the retrieval results for the Senior Analyst's queries.
+    #
+    # Here's how to implement application-layer write-side checks:
 
-    print("[5/5] Verifying access grants...")
+    print("[5/7] Demonstrating write-side domain enforcement...")
+
+    # Define which agents can write to which domains
+    WRITE_PERMISSIONS = {
+        "director":       ["classified_intel", "operational_data", "public_advisories"],
+        "senior_analyst": ["classified_intel", "operational_data"],
+        "team_lead":      ["operational_data"],
+        "operator":       ["operational_data"],
+        "spokesperson":   ["public_advisories"],
+    }
+
+    def check_write_access(role: str, domain: str) -> bool:
+        """Application-layer write-side domain enforcement."""
+        allowed = WRITE_PERMISSIONS.get(role, [])
+        return domain in allowed
+
+    # Operator tries to submit to classified_intel — BLOCKED
+    if check_write_access("operator", "classified_intel"):
+        print("  ERROR: Operator should not have write access to classified_intel!")
+    else:
+        print("  Operator -> classified_intel: BLOCKED (not in write permissions)")
+
+    # Spokesperson tries to submit to operational_data — BLOCKED
+    if check_write_access("spokesperson", "operational_data"):
+        print("  ERROR: Spokesperson should not have write access to operational_data!")
+    else:
+        print("  Spokesperson -> operational_data: BLOCKED (not in write permissions)")
+
+    # Team Lead submits to operational_data — ALLOWED
+    if check_write_access("team_lead", "operational_data"):
+        print("  Team Lead -> operational_data: ALLOWED")
+    else:
+        print("  ERROR: Team Lead should have write access to operational_data!")
+
+    print()
+    print("  WHY THIS MATTERS:")
+    print("  Without write-side enforcement, agents can tag observations")
+    print("  into the wrong domain. This silently pollutes retrieval —")
+    print("  queries return noise instead of signal, and downstream")
+    print("  agents make worse decisions. Domain taxonomy is governance.")
+    print()
+
+    # ── Verify read-side access (on-chain enforcement) ─────────
+
+    print("[6/7] Verifying read-side access grants (on-chain)...")
 
     with SageClient(base_url=base_url, identity=director) as client:
 
@@ -301,6 +355,11 @@ def main() -> None:
             print(f"  {name:20s} -> {', '.join(domains) if domains else '(no grants)'}")
 
     print()
+
+    # ── Summary ────────────────────────────────────────────────
+
+    print("[7/7] Summary")
+    print()
     print("=" * 60)
     print("RBAC HIERARCHY SUMMARY")
     print("=" * 60)
@@ -318,6 +377,15 @@ def main() -> None:
     print()
     print("  Clearance 1 (Public / Read)")
     print("    -> Cross-domain read access for awareness")
+    print()
+    print("  ENFORCEMENT MODEL:")
+    print("    Read-side:  ON-CHAIN (ABCI state machine, consensus-enforced)")
+    print("    Write-side: APPLICATION (your ABCI app or gatekeeper layer)")
+    print()
+    print("  Both are critical. Read-side prevents unauthorized access.")
+    print("  Write-side prevents domain pollution. Without write-side")
+    print("  enforcement, agents can tag observations into wrong domains,")
+    print("  silently degrading retrieval quality for all consumers.")
     print()
     print("All access grants are on-chain, auditable, and replicated")
     print("across the BFT validator network.")

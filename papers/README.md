@@ -19,6 +19,11 @@ Presents empirical results from a controlled 50-vs-50 comparative study using th
 
 Frames (S)AGE through the lens of organizational knowledge management — agents that accumulate and share institutional knowledge through governed experience rather than prompt engineering. Explores the implications for multi-agent system design and sovereign AI infrastructure.
 
+### Paper 4: Longitudinal Learning in Governed Multi-Agent Systems
+**Full Title:** Longitudinal Learning in Governed Multi-Agent Systems: How Institutional Memory Improves Agent Performance Over Time
+
+Presents a longitudinal study measuring whether consensus-validated institutional memory produces measurable, cumulative improvement in AI agent performance across sequential task executions. Using a 4-node BFT-backed memory layer and an 11-agent organization with 3-line prompts and zero domain expertise, conducts three experiments: a difficulty sweep, 10 sequential runs with red team feedback, and a 20-run control arm. Demonstrates statistically significant learning trends (Spearman rho=0.716, p=0.020) in the SAGE arm with no learning in the control (rho=0.040, p=0.901).
+
 ## Priority & Provenance
 
 All papers are timestamped via:
@@ -28,13 +33,13 @@ All papers are timestamped via:
 
 ## Zenodo DOIs
 
-| Paper | DOI |
-|-------|-----|
-| Paper 1 | *Pending upload* |
-| Paper 2 | *Pending upload* |
-| Paper 3 | *Pending upload* |
-
-DOIs will be updated here after Zenodo upload.
+| Paper | DOI | Zenodo Record |
+|-------|-----|---------------|
+| Paper 1 | [10.5281/zenodo.18856658](https://doi.org/10.5281/zenodo.18856658) | [zenodo.org/records/18856658](https://zenodo.org/records/18856658) |
+| Paper 2 | [10.5281/zenodo.18856774](https://doi.org/10.5281/zenodo.18856774) | [zenodo.org/records/18856774](https://zenodo.org/records/18856774) |
+| Paper 3 | [10.5281/zenodo.18856845](https://doi.org/10.5281/zenodo.18856845) | [zenodo.org/records/18856845](https://zenodo.org/records/18856845) |
+| Paper 4 | [10.5281/zenodo.18888597](https://doi.org/10.5281/zenodo.18888597) | [zenodo.org/records/18888597](https://zenodo.org/records/18888597) |
+| Code (v1.0.1) | [10.5281/zenodo.18855836](https://doi.org/10.5281/zenodo.18855836) | [zenodo.org/records/18855836](https://zenodo.org/records/18855836) |
 
 ## SHA-256 Checksums
 
@@ -42,6 +47,7 @@ DOIs will be updated here after Zenodo upload.
 c10859717df7cde0d986f43526931df0ac6667964d0347195d9388b8e9fcbc72  Paper1 - Agent Memory Infrastructure - Byzantine-Resilient Institutional Memory for Multi-Agent Systems.pdf
 277c4a3ad290c4d645da5e00a9596bf9bc3ec34f67ffa747580dadfa8b592796  Paper2 - Consensus-Validated Memory Improves Agent Performance on Complex Tasks.pdf
 e8f16b4dcf9868467de17b9ea9f983e2a3128fed55d33d32bfa24133f9de2e6d  Paper3 - Institutional Memory as Organizational Knowledge - AI Agents That Learn Their Jobs from Experience Not Instructions.pdf
+b2c1e0e87f00da74832480130f432230f2cde42e55869b15c20cf8909c8bb767  Paper4 - Longitudinal Learning in Governed Multi-Agent Systems - How Institutional Memory Improves Agent Performance Over Time.pdf
 ```
 
 ## License
@@ -69,6 +75,13 @@ If you reference this work, please cite the relevant paper(s) using the Zenodo D
 
 @misc{sage2026institutional,
   title={Institutional Memory as Organizational Knowledge: AI Agents That Learn Their Jobs from Experience, Not Instructions},
+  author={Kannabhiran, Dhillon Andrew},
+  year={2026},
+  note={Available at: https://github.com/l33tdawg/sage}
+}
+
+@misc{sage2026longitudinal,
+  title={Longitudinal Learning in Governed Multi-Agent Systems: How Institutional Memory Improves Agent Performance Over Time},
   author={Kannabhiran, Dhillon Andrew},
   year={2026},
   note={Available at: https://github.com/l33tdawg/sage}

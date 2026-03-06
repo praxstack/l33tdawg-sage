@@ -138,8 +138,8 @@ services:
   # ─────────────────────────────────────────────
   ollama:
     image: ollama/ollama:latest
-    ports:
-      - "11434:11434"
+    # ports:  # Disabled — host Ollama runs natively on 11434, sage_bridge uses host directly
+    #   - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
     healthcheck:

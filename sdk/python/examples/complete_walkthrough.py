@@ -151,14 +151,17 @@ def main() -> None:
         # including unvalidated proposals.
 
         print("\n[query] Searching for similar memories...")
-        results = client.query(
-            query_text="How do SQL injection attacks work?",
-            domain="security",
+        # query() requires a pre-computed embedding vector (768-dim from
+        # nomic-embed-text). Use client.embed() to convert text to a vector.
+        query_embedding = client.embed("How do SQL injection attacks work?")
+        response = client.query(
+            embedding=query_embedding,
+            domain_tag="security",
             top_k=5,
             status_filter="committed",  # only consensus-validated
         )
-        print(f"  Found {len(results)} committed memories")
-        for r in results:
+        print(f"  Found {response.total_count} committed memories")
+        for r in response.results:
             print(f"    [{r.confidence_score:.2f}] {r.content[:60]}...")
 
         # ── corroborate: strengthen a memory ──────────────────────
@@ -180,7 +183,7 @@ def main() -> None:
         # be deprecated based on evidence.
 
         print("\n[challenge] Disputing the memory...")
-        client.dispute(
+        client.challenge(
             memory_id=memory_id,
             reason="Needs clarification: UNION injection also requires "
                    "compatible column types, not just count.",
@@ -580,7 +583,7 @@ def main() -> None:
         print("\n[get_profile] Alice's agent profile...")
         profile = client.get_profile()
         print(f"  agent_id: {profile.agent_id[:16]}...")
-        print(f"  weight:   {profile.weight}")
+        print(f"  weight:   {profile.poe_weight}")
         print(f"  votes:    {profile.vote_count}")
 
     print()
