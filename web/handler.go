@@ -51,7 +51,7 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 		}
 
 		// Try to serve the file directly
-		f, err := staticFS.(fs.ReadFileFS).ReadFile(strings.TrimPrefix(path, "/"))
+		f, err := staticFS.(fs.ReadFileFS).ReadFile(strings.TrimPrefix(path, "/")) //nolint:errcheck
 		if err != nil {
 			// Fallback to index.html for SPA routing
 			r.URL.Path = "/index.html"
@@ -72,7 +72,6 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 		}
 
 		w.Write(f) //nolint:errcheck
-		return
 	})
 
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
@@ -281,7 +280,8 @@ func (h *DashboardHandler) handleHealth(w http.ResponseWriter, r *http.Request) 
 
 	// Check Ollama
 	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get("http://localhost:11434/api/tags")
+	ollamaReq, _ := http.NewRequestWithContext(r.Context(), "GET", "http://localhost:11434/api/tags", nil)
+	resp, err := client.Do(ollamaReq)
 	if err != nil {
 		health["ollama"] = "offline"
 	} else {

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/binary"
@@ -148,8 +149,8 @@ type seedMemory struct {
 }
 
 func parseParagraphs(text, domain string) []seedMemory {
-	var memories []seedMemory
 	paragraphs := strings.Split(text, "\n\n")
+	memories := make([]seedMemory, 0, len(paragraphs))
 	for _, p := range paragraphs {
 		p = strings.TrimSpace(p)
 		if len(p) < 20 { // Skip very short paragraphs
@@ -245,7 +246,7 @@ func doSignedHTTP(method, url string, body []byte, agentID string, priv ed25519.
 	msg := append(h[:], tsBuf[:]...)
 	sig := ed25519.Sign(priv, msg)
 
-	req, err := http.NewRequest(method, url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(context.Background(), method, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}

@@ -966,7 +966,7 @@ func (s *PostgresStore) GetTimeline(ctx context.Context, from, to time.Time, dom
 		args = append(args, domain)
 	}
 
-	query += fmt.Sprintf(` GROUP BY period ORDER BY period`)
+	query += ` GROUP BY period ORDER BY period`
 
 	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {

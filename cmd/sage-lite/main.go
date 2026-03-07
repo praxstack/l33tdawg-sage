@@ -23,8 +23,14 @@ func main() {
 		err = runSeed()
 	case "status":
 		err = runStatus()
+	case "export":
+		err = runExport()
+	case "import":
+		err = runImport()
+	case "backup":
+		err = runBackup()
 	case "version":
-		fmt.Println("sage-lite v1.0.0")
+		fmt.Println("sage-lite v2.0.0")
 	case "help", "--help", "-h":
 		printUsage()
 	default:
@@ -49,6 +55,9 @@ Commands:
   mcp       Run as MCP server (stdio, for Claude Desktop / ChatGPT)
   setup     Run first-time setup wizard
   seed      Seed memories from a text/JSON file (bootstrap your AI's brain)
+  export    Export memories to a .vault file (optionally encrypted)
+  import    Import memories from a .vault file
+  backup    Create a timestamped backup of the memory database
   status    Show node status
   version   Print version
 

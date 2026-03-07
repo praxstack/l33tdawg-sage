@@ -60,8 +60,8 @@ func runServe() error {
 	}
 
 	// Initialize CometBFT config if needed
-	if err := initCometBFTConfig(cometHome); err != nil {
-		return fmt.Errorf("init CometBFT: %w", err)
+	if initErr := initCometBFTConfig(cometHome); initErr != nil {
+		return fmt.Errorf("init CometBFT: %w", initErr)
 	}
 
 	// Create SQLite store
@@ -372,8 +372,8 @@ func autoImport(cfg *Config, embedProvider embedding.Provider, logger zerolog.Lo
 	}
 
 	var memories []seedMemory
-	if err := json.Unmarshal(data, &memories); err != nil {
-		logger.Error().Err(err).Msg("failed to parse pending import")
+	if unmarshalErr := json.Unmarshal(data, &memories); unmarshalErr != nil {
+		logger.Error().Err(unmarshalErr).Msg("failed to parse pending import")
 		return
 	}
 
@@ -453,14 +453,16 @@ func runStatus() error {
 		baseURL = fmt.Sprintf("http://localhost%s", cfg.RESTAddr)
 	}
 
-	resp, err := http.Get(baseURL + "/health")
+	ctx := context.Background()
+	healthReq, _ := http.NewRequestWithContext(ctx, "GET", baseURL+"/health", nil)
+	resp, err := http.DefaultClient.Do(healthReq)
 	if err != nil {
 		return fmt.Errorf("SAGE is not running: %w", err)
 	}
 	defer resp.Body.Close()
 
 	var health map[string]any
-	json.NewDecoder(resp.Body).Decode(&health)
+	json.NewDecoder(resp.Body).Decode(&health) //nolint:errcheck
 
 	fmt.Println("SAGE Personal Status")
 	fmt.Println("====================")
@@ -469,7 +471,8 @@ func runStatus() error {
 	fmt.Printf("  Dashboard: %s/ui/\n", baseURL)
 
 	// Try to get stats
-	statsResp, err := http.Get(baseURL + "/v1/dashboard/stats")
+	statsReq, _ := http.NewRequestWithContext(ctx, "GET", baseURL+"/v1/dashboard/stats", nil)
+	statsResp, err := http.DefaultClient.Do(statsReq)
 	if err == nil {
 		defer statsResp.Body.Close()
 		var stats map[string]any

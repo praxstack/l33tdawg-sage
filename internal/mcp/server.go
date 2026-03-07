@@ -45,6 +45,10 @@ type Server struct {
 	agentID    string
 	httpClient *http.Client
 	tools      map[string]Tool
+
+	// Turn discipline tracking — nudge agents that forget to call sage_turn.
+	callsSinceTurn int
+	lastTurnTime   time.Time
 }
 
 // NewServer creates a new MCP server instance.
@@ -52,7 +56,7 @@ func NewServer(baseURL string, agentKey ed25519.PrivateKey) *Server {
 	if baseURL == "" {
 		baseURL = "http://localhost:8080"
 	}
-	pub := agentKey.Public().(ed25519.PublicKey)
+	pub, _ := agentKey.Public().(ed25519.PublicKey) //nolint:errcheck
 	s := &Server{
 		baseURL:    baseURL,
 		agentKey:   agentKey,
@@ -190,13 +194,29 @@ func (s *Server) handleToolsCall(ctx context.Context, req *jsonRPCRequest) *json
 		}
 	}
 
+	// Track turn discipline: reset counter on sage_turn, increment on everything else.
+	if params.Name == "sage_turn" {
+		s.callsSinceTurn = 0
+		s.lastTurnTime = time.Now()
+	} else if params.Name != "sage_inception" {
+		s.callsSinceTurn++
+	}
+
 	text, _ := json.MarshalIndent(result, "", "  ")
+	output := string(text)
+
+	// Nudge the agent if sage_turn hasn't been called recently.
+	// This is server-side enforcement — works across all providers (Claude, ChatGPT, etc).
+	if nudge := s.turnNudge(params.Name); nudge != "" {
+		output += "\n\n" + nudge
+	}
+
 	return &jsonRPCResponse{
 		JSONRPC: "2.0",
 		ID:      req.ID,
 		Result: map[string]any{
 			"content": []map[string]any{
-				{"type": "text", "text": string(text)},
+				{"type": "text", "text": output},
 			},
 		},
 	}
@@ -213,6 +233,37 @@ func (s *Server) writeError(id any, code int, message string) {
 		ID:      id,
 		Error:   &rpcError{Code: code, Message: message},
 	})
+}
+
+// turnNudge returns a reminder string if the agent hasn't called sage_turn recently.
+// Escalates from gentle to urgent based on how many calls have passed.
+func (s *Server) turnNudge(currentTool string) string {
+	// Don't nudge on sage_turn itself, inception, or reflect (they're memory operations).
+	switch currentTool {
+	case "sage_turn", "sage_inception", "sage_reflect":
+		return ""
+	}
+
+	switch {
+	case s.callsSinceTurn >= 5:
+		// Urgent — agent is clearly not calling sage_turn.
+		return "[SAGE] ⚠️ You have not called sage_turn in " +
+			fmt.Sprintf("%d", s.callsSinceTurn) +
+			" tool calls. Your experience this session is NOT being recorded. " +
+			"Call sage_turn now with the current topic and what's happened — " +
+			"otherwise this work is lost if the conversation ends."
+	case s.callsSinceTurn >= 3:
+		// Firm reminder.
+		return "[SAGE] Reminder: call sage_turn with the current topic + observation. " +
+			"You haven't logged a turn in " +
+			fmt.Sprintf("%d", s.callsSinceTurn) + " calls — your recent experience isn't being stored."
+	case s.callsSinceTurn == 2 && s.lastTurnTime.IsZero():
+		// First session, never called sage_turn — might not know about it yet.
+		return "[SAGE] Tip: call sage_turn every conversation turn to build persistent memory. " +
+			"It recalls relevant context AND stores what just happened, atomically."
+	}
+
+	return ""
 }
 
 // signedRequest makes an authenticated HTTP request to the SAGE REST API.

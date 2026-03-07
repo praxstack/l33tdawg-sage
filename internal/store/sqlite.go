@@ -541,7 +541,7 @@ func (s *SQLiteStore) InsertTriples(ctx context.Context, memoryID string, triple
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer tx.Rollback() //nolint:errcheck
 
 	stmt, err := tx.PrepareContext(ctx,
 		`INSERT INTO knowledge_triples (memory_id, subject, predicate, object) VALUES (?, ?, ?, ?)`)
@@ -795,8 +795,8 @@ func (s *SQLiteStore) GetTimeline(ctx context.Context, from, to time.Time, domai
 		format = "%Y-%m-%d"
 	}
 
-	query := fmt.Sprintf(`SELECT strftime('%s', created_at) AS period, COUNT(*)
-		FROM memories WHERE created_at >= ? AND created_at <= ?`, format)
+	query := fmt.Sprintf(`SELECT strftime('%s', created_at) AS period, COUNT(*) `+ //nolint:gosec // format is from a fixed switch, not user input
+		`FROM memories WHERE created_at >= ? AND created_at <= ?`, format)
 	args := []any{formatTime(from), formatTime(to)}
 
 	if domain != "" {

@@ -423,7 +423,8 @@ func handleCheckOllama(w http.ResponseWriter, r *http.Request) {
 
 	// Check if Ollama is running
 	client := &http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Get(baseURL + "/api/tags")
+	ollamaReq, _ := http.NewRequestWithContext(r.Context(), "GET", baseURL+"/api/tags", nil)
+	resp, err := client.Do(ollamaReq)
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]any{
 			"installed":     false,
@@ -475,7 +476,9 @@ func handlePullModel(w http.ResponseWriter, r *http.Request) {
 	})
 
 	client := &http.Client{Timeout: 10 * time.Minute}
-	resp, err := client.Post("http://localhost:11434/api/pull", "application/json", bytes.NewReader(pullReq))
+	pullHTTPReq, _ := http.NewRequestWithContext(r.Context(), "POST", "http://localhost:11434/api/pull", bytes.NewReader(pullReq))
+	pullHTTPReq.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(pullHTTPReq)
 	if err != nil {
 		fmt.Fprintf(w, "data: {\"error\":\"%s\"}\n\n", err.Error())
 		flusher.Flush()
