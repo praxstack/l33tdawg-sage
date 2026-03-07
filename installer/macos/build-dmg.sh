@@ -181,8 +181,8 @@ ln -s /Applications "$DMG_TEMP/Applications"
 
 # Create a README in the DMG
 cat > "$DMG_TEMP/README.txt" << README
-SAGE — Give Your AI a Memory
-=============================
+SAGE — Give Your AI a Persistent, Secure Memory
+=================================================
 
 Drag SAGE.app to Applications, then double-click to start.
 
