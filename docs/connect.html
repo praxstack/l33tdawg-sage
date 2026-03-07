@@ -3,6 +3,14 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- Google tag (gtag.js) -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-Y9LD21QVEQ"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+  gtag('config', 'G-Y9LD21QVEQ');
+</script>
 <title>Connect Your AI to SAGE</title>
 <meta name="description" content="Step-by-step guide to connect Claude, ChatGPT, or Claude Code to your SAGE memory node via MCP.">
 <style>
@@ -405,10 +413,17 @@ which sage-lite</code><button class="copy-btn" onclick="copyCode(this)">Copy</bu
 
   <!-- ChatGPT -->
   <div id="chatgpt" class="tab-content">
+    <!-- Native MCP (Paid plans) -->
+    <h3 style="color:var(--bright);margin-bottom:16px;font-size:1.1rem;">Option A: Native MCP (Paid plans)</h3>
+
+    <div class="info-box" style="margin-left:0;margin-bottom:24px;border-color:rgba(251,191,36,0.3);background:rgba(251,191,36,0.06);">
+      <strong style="color:var(--gold);">Requires ChatGPT Plus, Pro, Team, or Enterprise.</strong> Native MCP support via Developer Mode is not available on the free ChatGPT plan.
+    </div>
+
     <div class="step">
       <span class="step-num">1</span>
-      <h3>Open ChatGPT Desktop settings</h3>
-      <p>ChatGPT desktop app supports MCP servers. Go to <strong>Settings</strong> &rarr; <strong>Beta Features</strong> and enable <strong>MCP Servers</strong> if not already enabled.</p>
+      <h3>Enable Developer Mode</h3>
+      <p>Go to <strong>Settings</strong> &rarr; <strong>Beta Features</strong> &rarr; enable <strong>Developer Mode</strong>. Then in Settings &rarr; Developer, add an MCP server.</p>
     </div>
 
     <div class="step">
@@ -435,18 +450,43 @@ which sage-lite</code><button class="copy-btn" onclick="copyCode(this)">Copy</bu
 
     <div class="step">
       <span class="step-num">3</span>
-      <h3>Restart ChatGPT</h3>
-      <p>Quit and reopen the ChatGPT desktop app. SAGE tools should appear in the tools menu.</p>
+      <h3>Restart ChatGPT and initialize</h3>
+      <p>Quit and reopen the ChatGPT desktop app. SAGE tools should appear in the tools menu. Start a new conversation and say:</p>
+      <pre><code>Call sage_inception to initialize your memory. Then call sage_turn every time I send you a message so you build persistent memory across our conversations.</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+      <div class="info-box">
+        <strong>Tip:</strong> ChatGPT doesn't have a CLAUDE.md file to remind it. Add "Always call sage_turn at the start of each reply" to your <strong>Custom Instructions</strong> (Settings &rarr; Personalization) so it remembers automatically.
+      </div>
+    </div>
+
+    <!-- Chrome Extension (Free plans) -->
+    <h3 style="color:var(--bright);margin:40px 0 16px;font-size:1.1rem;">Option B: Chrome Extension (Free &amp; Paid plans)</h3>
+
+    <div class="info-box" style="margin-left:0;margin-bottom:24px;">
+      <strong>Works on all ChatGPT plans</strong> including free — no desktop app required. Uses a Chrome extension to bridge MCP tools to the <strong>ChatGPT website</strong> (<a href="https://chat.openai.com" style="color:var(--accent);">chat.openai.com</a>). Note: the extension can see your chat content.
     </div>
 
     <div class="step">
-      <span class="step-num">4</span>
-      <h3>Initialize and start remembering</h3>
-      <p>In your first conversation, say:</p>
-      <pre><code>Call sage_inception to initialize your memory. Then call sage_turn every time I send you a message so you build persistent memory across our conversations.</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
-      <div class="info-box">
-        <strong>Tip:</strong> ChatGPT doesn't have a CLAUDE.md file to remind it. You may want to add "Always call sage_turn at the start of each reply" to your ChatGPT custom instructions so it remembers automatically.
-      </div>
+      <span class="step-num">1</span>
+      <h3>Install MCP SuperAssistant</h3>
+      <p>Install the <a href="https://chromewebstore.google.com/detail/mcp-superassistant/kngiafgkdnlkgmefdafaibkibegkcaef" style="color:var(--accent);">MCP SuperAssistant</a> Chrome extension. It detects MCP tool calls from AI chats and executes them locally.</p>
+    </div>
+
+    <div class="step">
+      <span class="step-num">2</span>
+      <h3>Configure SAGE as an MCP server</h3>
+      <p>Open the extension's sidebar and add a new MCP server with the same config:</p>
+      <pre><code>Command: /Applications/SAGE.app/Contents/MacOS/sage-lite
+Arguments: mcp
+Environment:
+  SAGE_HOME=~/.sage
+  SAGE_PROVIDER=chatgpt</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+    </div>
+
+    <div class="step">
+      <span class="step-num">3</span>
+      <h3>Use ChatGPT as normal</h3>
+      <p>Open <a href="https://chat.openai.com" style="color:var(--accent);">chat.openai.com</a> in Chrome and chat normally — no desktop app needed. The extension intercepts MCP tool calls, runs them against your local SAGE instance, and injects the results back into the chat. Tell ChatGPT:</p>
+      <pre><code>Call sage_inception to initialize your memory. You have SAGE MCP tools available — use sage_turn every reply to build persistent memory.</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
     </div>
   </div>
 

@@ -26,7 +26,7 @@ func newTestHandler(t *testing.T) (*DashboardHandler, *store.SQLiteStore) {
 	s, err := store.NewSQLiteStore(context.Background(), dbPath)
 	require.NoError(t, err)
 	t.Cleanup(func() { s.Close() })
-	h := NewDashboardHandler(s)
+	h := NewDashboardHandler(s, "test")
 	return h, s
 }
 

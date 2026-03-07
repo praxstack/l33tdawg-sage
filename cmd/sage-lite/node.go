@@ -151,7 +151,7 @@ func runServe() error {
 	restServer := rest.NewServer(cometRPC, sqliteStore, sqliteStore, badgerStore, health, logger)
 
 	// Create dashboard handler
-	dashboard := web.NewDashboardHandler(sqliteStore)
+	dashboard := web.NewDashboardHandler(sqliteStore, version)
 
 	// Build combined router
 	r := chi.NewRouter()

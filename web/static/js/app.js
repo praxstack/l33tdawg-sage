@@ -714,10 +714,14 @@ function SearchPage({ onSelectMemory }) {
 
 function SettingsPage() {
     const [stats, setStats] = useState(null);
+    const [health, setHealth] = useState(null);
 
     useEffect(() => {
         fetchStats().then(setStats).catch(() => {});
+        fetchHealth().then(setHealth).catch(() => {});
     }, []);
+
+    const ver = health?.version || 'dev';
 
     return html`
         <div class="settings-page">
@@ -725,7 +729,7 @@ function SettingsPage() {
                 <h3>SAGE Instance</h3>
                 <div class="settings-row">
                     <span class="label">Version</span>
-                    <span class="value">1.0.1</span>
+                    <span class="value">${ver}</span>
                 </div>
                 <div class="settings-row">
                     <span class="label">Dashboard API</span>
@@ -770,6 +774,38 @@ function SettingsPage() {
                             URL.revokeObjectURL(url);
                         });
                     }}>Download JSON</button>
+                </div>
+            </div>
+
+            <div class="settings-section">
+                <h3>About SAGE</h3>
+                <div class="settings-row">
+                    <span class="label">Full Name</span>
+                    <span class="value">(Sovereign) Agent Governed Experience</span>
+                </div>
+                <div class="settings-row">
+                    <span class="label">Author</span>
+                    <span class="value">Dhillon Andrew Kannabhiran</span>
+                </div>
+                <div class="settings-row">
+                    <span class="label">License</span>
+                    <span class="value">Apache 2.0</span>
+                </div>
+                <div class="settings-row">
+                    <span class="label">GitHub</span>
+                    <span class="value"><a href="https://github.com/l33tdawg/sage" target="_blank" style="color:var(--accent)">l33tdawg/sage</a></span>
+                </div>
+                <div class="settings-row">
+                    <span class="label">Website</span>
+                    <span class="value"><a href="https://l33tdawg.github.io/sage/" target="_blank" style="color:var(--accent)">l33tdawg.github.io/sage</a></span>
+                </div>
+                <div class="settings-row">
+                    <span class="label">Architecture</span>
+                    <span class="value">CometBFT v0.38 + SQLite + Ed25519</span>
+                </div>
+                <div class="settings-row">
+                    <span class="label">Connect Guide</span>
+                    <span class="value"><a href="https://l33tdawg.github.io/sage/connect.html" target="_blank" style="color:var(--accent)">How to connect your AI</a></span>
                 </div>
             </div>
         </div>

@@ -15,15 +15,17 @@ import (
 
 // DashboardHandler serves the Brain Dashboard UI and its API endpoints.
 type DashboardHandler struct {
-	store store.MemoryStore
-	SSE   *SSEBroadcaster
+	store   store.MemoryStore
+	SSE     *SSEBroadcaster
+	Version string
 }
 
 // NewDashboardHandler creates a new dashboard handler.
-func NewDashboardHandler(memStore store.MemoryStore) *DashboardHandler {
+func NewDashboardHandler(memStore store.MemoryStore, version string) *DashboardHandler {
 	return &DashboardHandler{
-		store: memStore,
-		SSE:   NewSSEBroadcaster(),
+		store:   memStore,
+		SSE:     NewSSEBroadcaster(),
+		Version: version,
 	}
 }
 
@@ -276,8 +278,9 @@ func (h *DashboardHandler) handleUpdateMemory(w http.ResponseWriter, r *http.Req
 // handleHealth returns system health including Ollama status.
 func (h *DashboardHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	health := map[string]any{
-		"sage":   "running",
-		"uptime": time.Since(startTime).String(),
+		"sage":    "running",
+		"version": h.Version,
+		"uptime":  time.Since(startTime).String(),
 	}
 
 	// Check Ollama
