@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "SAGE Memory for ChatGPT",
+  "name": "SAGE Memory for AI",
   "version": "1.0.0",
-  "description": "Persistent AI memory powered by (S)AGE — Sovereign Agent Governed Experience for ChatGPT",
+  "description": "Give your AI a secure, permanent memory. Works with ChatGPT, and more — even on free plans.",
   "browser_specific_settings": {
     "gecko": {
       "id": "sage-memory@l33tdawg.github.io",

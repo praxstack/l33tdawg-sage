@@ -1,50 +1,35 @@
-# (S)AGE Memory for ChatGPT — Store Listing
+# (S)AGE Memory for AI — Store Listing
+
+## Name
+SAGE Memory for AI
 
 ## Short Description (132 chars max for Chrome)
-Give ChatGPT persistent memory. (S)AGE stores AI memories locally with AES-256 encryption. Your data never leaves your machine.
+Give your AI a secure, permanent memory. Works with ChatGPT, and more — even on free plans.
 
 ## Full Description
 
-### Give your AI a secure, permanent memory
+Every time you close an AI conversation, it forgets everything. (S)AGE fixes that — securely.
 
-Every time you close a ChatGPT conversation, it forgets everything — your projects, your preferences, every lesson it learned. SAGE fixes that.
+This extension connects your AI's web interface to (S)AGE, an open-source memory system that runs entirely on your computer. Your AI remembers your projects, preferences, and lessons learned across every conversation.
 
-(S)AGE Memory for ChatGPT is a browser extension that connects ChatGPT's free web interface to (S)AGE, an open-source AI memory system that runs entirely on your computer.
+- AES-256 encrypted, Ed25519 signed — your data never leaves your machine
+- Works on free plans — no paid tier required
+- 10 memory tools: remember, recall, reflect, and more
+- Sidebar panel with memory stats and quick actions
+- Open source, Apache 2.0 licensed
 
-**How it works:**
-- A sidebar panel inside ChatGPT shows your memory stats, connection status, and quick actions
-- Tell ChatGPT about (S)AGE tools with one click — it learns to save and recall memories
-- All 10 (S)AGE memory tools available: remember, recall, reflect, turn-by-turn learning, and more
-- Responses are monitored for (S)AGE tool calls and executed automatically
-
-**Security first:**
-- Every API request is Ed25519 cryptographically signed
-- All data stored locally on your machine — nothing sent to any cloud
-- AES-256-GCM encryption at rest
-- Open source: https://github.com/l33tdawg/sage
-
-**Requirements:**
-- (S)AGE must be running locally (download from https://l33tdawg.github.io/sage/)
-- Works with ChatGPT free and paid plans on chat.openai.com
-
-**What your AI gains:**
-- Persistent memory across conversations
-- Consensus-validated knowledge (BFT governance)
-- Semantic search across all past experiences
-- Self-improvement through reflection (proven in 4 published research papers)
-- Works with any AI model — memories are model-agnostic
-
-Built by the (S)AGE project — open source, Apache 2.0 licensed.
+Currently supports ChatGPT (chat.openai.com). More providers coming soon.
+Requires (S)AGE running locally. Download free at https://l33tdawg.github.io/sage/
 
 ## Category
 Productivity
 
 ## Tags/Keywords
-AI, memory, ChatGPT, persistent memory, AI assistant, privacy, local-first, MCP
+AI, memory, ChatGPT, persistent memory, AI assistant, privacy, local-first, encryption, open source
 
 ## Privacy Policy
 
-(S)AGE Memory for ChatGPT does not collect, transmit, or store any user data on external servers.
+(S)AGE Memory for AI does not collect, transmit, or store any user data on external servers.
 
 All data processing occurs locally:
 - Memory data is stored in a local SQLite database on your computer (~/.sage/)
@@ -54,17 +39,17 @@ All data processing occurs locally:
 - Ed25519 keypair is generated and stored locally in the browser
 
 The extension requests the following permissions:
-- activeTab: To inject the SAGE sidebar into ChatGPT pages
-- storage: To save your SAGE server URL and cryptographic keys locally
-- Host permissions for localhost:8080: To communicate with your local SAGE server
+- activeTab: To inject the (S)AGE sidebar into AI chat pages
+- storage: To save your (S)AGE server URL and cryptographic keys locally
+- Host permissions for localhost:8080: To communicate with your local (S)AGE server
 - Host permissions for chatgpt.com/chat.openai.com: To inject the content script
 
 Source code: https://github.com/l33tdawg/sage/tree/main/extension/chrome
 License: Apache 2.0
 
 ## Screenshots Needed
-1. SAGE sidebar open in ChatGPT showing connection status and memory stats
+1. (S)AGE sidebar open in ChatGPT showing connection status and memory stats
 2. Quick action buttons (Wake Up, Turn, Recall, Status)
-3. Tool call log showing executed SAGE calls
+3. Tool call log showing executed (S)AGE calls
 4. Popup with connection status and server config
-5. ChatGPT conversation using SAGE memory tools
+5. ChatGPT conversation using (S)AGE memory tools
