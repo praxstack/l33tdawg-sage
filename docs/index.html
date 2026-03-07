@@ -254,11 +254,11 @@ h1 em {
 .setup-flow-label {
   text-align: center;
   font-family: var(--font-mono);
-  font-size: 0.75rem;
-  color: var(--muted);
+  font-size: 0.85rem;
+  color: var(--accent);
   text-transform: uppercase;
   letter-spacing: 0.15em;
-  margin-bottom: 24px;
+  margin-bottom: 32px;
 }
 .setup-steps {
   display: flex;
@@ -277,8 +277,8 @@ h1 em {
   z-index: 1;
 }
 .step-icon {
-  width: 64px;
-  height: 64px;
+  width: 72px;
+  height: 72px;
   border-radius: 50%;
   display: flex;
   align-items: center;
@@ -307,16 +307,16 @@ h1 em {
   50% { box-shadow: 0 0 40px rgba(124,58,237,0.5), 0 0 80px rgba(124,58,237,0.2); }
 }
 .step-label {
-  font-size: 0.8rem;
+  font-size: 0.95rem;
   font-weight: 600;
   color: var(--bright);
   margin-bottom: 4px;
 }
 .step-desc {
-  font-size: 0.7rem;
+  font-size: 0.82rem;
   color: var(--muted);
-  line-height: 1.4;
-  max-width: 120px;
+  line-height: 1.45;
+  max-width: 130px;
 }
 /* Arrow connectors between steps */
 .step-arrow {
@@ -868,7 +868,14 @@ footer a:hover { text-decoration: underline; }
       <p style="text-align:center;color:var(--muted);font-size:0.8rem;margin-top:10px;">Signed &amp; notarized on macOS. No terminal required — just double-click.<br>
       <a href="connect.html" style="color:var(--accent);">How to connect Claude / ChatGPT to SAGE &rarr;</a></p>
 
-      <div class="setup-flow">
+    </div>
+  </div>
+</section>
+
+<!-- Setup Flow — "Escape the Matrix" -->
+<section style="padding: 40px 0 80px;">
+  <div class="container">
+    <div class="setup-flow" style="margin-top:0;">
         <div class="setup-flow-label">How your AI escapes the matrix</div>
         <div class="setup-steps">
 
@@ -922,7 +929,6 @@ footer a:hover { text-decoration: underline; }
 
         </div>
       </div>
-    </div>
   </div>
 </section>
 
