@@ -557,6 +557,80 @@ footer a:hover { text-decoration: underline; }
   opacity: 0.7;
 }
 
+/* ─── Migration Section ─── */
+.migrate { background: linear-gradient(180deg, var(--void) 0%, var(--deep) 50%, var(--void) 100%); }
+.migrate-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 32px;
+  margin-top: 48px;
+}
+.migrate-card {
+  padding: 32px;
+  background: linear-gradient(180deg, rgba(167,139,250,0.04), transparent);
+  border: 1px solid rgba(167,139,250,0.08);
+  border-radius: 16px;
+  transition: all 0.3s;
+}
+.migrate-card:hover {
+  border-color: rgba(167,139,250,0.2);
+  transform: translateY(-3px);
+  box-shadow: 0 16px 40px rgba(0,0,0,0.2);
+}
+.migrate-card-icon {
+  font-size: 2rem;
+  margin-bottom: 16px;
+}
+.migrate-card h3 {
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: var(--bright);
+  margin-bottom: 8px;
+}
+.migrate-card p {
+  font-size: 0.9rem;
+  color: var(--muted);
+  line-height: 1.65;
+  margin-bottom: 16px;
+}
+.migrate-steps {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.migrate-steps li {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 0.85rem;
+  color: var(--text);
+  line-height: 1.5;
+}
+.migrate-steps li .step-marker {
+  flex-shrink: 0;
+  width: 22px; height: 22px;
+  border-radius: 6px;
+  background: rgba(167,139,250,0.12);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  display: flex; align-items: center; justify-content: center;
+  margin-top: 1px;
+}
+.migrate-note {
+  margin-top: 40px;
+  padding: 20px 24px;
+  background: rgba(45,212,191,0.04);
+  border: 1px solid rgba(45,212,191,0.12);
+  border-radius: 12px;
+  font-size: 0.9rem;
+  color: var(--text);
+  line-height: 1.65;
+  text-align: center;
+}
+.migrate-note strong { color: var(--teal); }
+
 /* ─── Scroll Reveal ─── */
 .reveal {
   opacity: 0;
@@ -581,6 +655,7 @@ footer a:hover { text-decoration: underline; }
   .steps-grid { grid-template-columns: 1fr; gap: 20px; }
   .step:not(:last-child)::after { display: none; }
   .features-grid { grid-template-columns: 1fr; }
+  .migrate-grid { grid-template-columns: 1fr; }
   .paper { grid-template-columns: auto 1fr; }
   .paper-arrow { display: none; }
   .nav-links { gap: 16px; }
@@ -615,6 +690,7 @@ footer a:hover { text-decoration: underline; }
       <a href="#how">How It Works</a>
       <a href="#features">Features</a>
       <a href="#research">Research</a>
+      <a href="#switch">Switch</a>
       <a href="https://github.com/l33tdawg/sage" class="nav-cta">GitHub</a>
     </div>
   </div>
@@ -860,6 +936,46 @@ footer a:hover { text-decoration: underline; }
         </div>
         <span class="paper-arrow">&rarr;</span>
       </a>
+    </div>
+  </div>
+</section>
+
+<!-- Switching Providers -->
+<section class="migrate" id="switch">
+  <div class="container">
+    <div class="reveal" style="text-align:center;">
+      <div class="section-tag">Switching Providers?</div>
+      <h2>Take your memories<br>with you</h2>
+      <p class="section-desc" style="margin:0 auto;">Changing AI providers shouldn't mean starting from zero. SAGE imports your conversation history so your new AI already knows your projects, your preferences, and your way of working.</p>
+    </div>
+
+    <div class="migrate-grid reveal">
+      <div class="migrate-card">
+        <div class="migrate-card-icon">&#128172;</div>
+        <h3>Coming from ChatGPT</h3>
+        <p>Export your conversations from OpenAI, then let SAGE turn them into structured memories your new AI can search and learn from.</p>
+        <ol class="migrate-steps">
+          <li><span class="step-marker">1</span> Go to <strong>Settings &rarr; Data Controls &rarr; Export Data</strong> in ChatGPT</li>
+          <li><span class="step-marker">2</span> Download the ZIP file from the email OpenAI sends you</li>
+          <li><span class="step-marker">3</span> Run <code>./sage-lite setup</code> and drag-drop the ZIP into the import step</li>
+          <li><span class="step-marker">4</span> SAGE parses every conversation into searchable, governed memories</li>
+        </ol>
+      </div>
+      <div class="migrate-card">
+        <div class="migrate-card-icon">&#128640;</div>
+        <h3>Coming from any provider</h3>
+        <p>Have conversation logs, notes, or project documentation? SAGE can ingest them too — any text your AI should remember.</p>
+        <ol class="migrate-steps">
+          <li><span class="step-marker">1</span> Export your data from your current provider (most offer this)</li>
+          <li><span class="step-marker">2</span> Drop JSON or text files into the SAGE setup wizard</li>
+          <li><span class="step-marker">3</span> SAGE structures and indexes everything locally</li>
+          <li><span class="step-marker">4</span> Your new AI starts with full context from day one</li>
+        </ol>
+      </div>
+    </div>
+
+    <div class="migrate-note reveal">
+      <strong>Your data stays yours.</strong> The import runs entirely on your machine. Nothing is uploaded anywhere. Your old conversations become private, local memories that only your AI can access.
     </div>
   </div>
 </section>
