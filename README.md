@@ -2,7 +2,7 @@
 
 Your AI forgets everything between conversations. SAGE fixes that.
 
-SAGE is a persistent memory layer that runs on your laptop. Your AI remembers what you've worked on, what went wrong, what went right — across every conversation. No cloud accounts. No third-party access to your data. AES-256 encrypted at rest. Everything stays on your machine.
+SAGE is a persistent memory layer that runs on your laptop. Your AI remembers what you've worked on, what went wrong, what went right — across every conversation. Works with any AI — Claude, ChatGPT, DeepSeek, Gemini, Mistral, local models, or anything that speaks MCP. No cloud accounts. No third-party access to your data. AES-256 encrypted at rest. Everything stays on your machine.
 
 ### Download
 
