@@ -1045,23 +1045,12 @@ function CleanupSettings() {
 function SettingsPage() {
     const [stats, setStats] = useState(null);
     const [health, setHealth] = useState(null);
-    const [countdown, setCountdown] = useState(null);
-    const countdownRef = useRef(null);
 
     // Fetch health with live polling every 3s
     useEffect(() => {
         const poll = () => {
             fetchHealth().then(h => {
                 setHealth(h);
-                // Calculate next block countdown from block_time
-                if (h?.chain?.block_time) {
-                    const lastBlock = new Date(h.chain.block_time).getTime();
-                    const blockInterval = 5000; // ~5s blocks
-                    const nextBlock = lastBlock + blockInterval;
-                    const now = Date.now();
-                    const remaining = Math.max(0, nextBlock - now);
-                    setCountdown(remaining);
-                }
             }).catch(() => {});
             fetchStats().then(setStats).catch(() => {});
         };
@@ -1070,17 +1059,12 @@ function SettingsPage() {
         return () => clearInterval(iv);
     }, []);
 
-    // Countdown ticker — updates every 100ms for smooth display
+    // Countdown ticker — force re-render every 100ms for smooth display
+    const [, setTick] = useState(0);
     useEffect(() => {
-        if (countdown === null) return;
-        const tick = setInterval(() => {
-            setCountdown(prev => {
-                if (prev === null || prev <= 0) return 0;
-                return Math.max(0, prev - 100);
-            });
-        }, 100);
-        return () => clearInterval(tick);
-    }, [countdown !== null]);
+        const iv = setInterval(() => setTick(t => t + 1), 100);
+        return () => clearInterval(iv);
+    }, []);
 
     const ver = health?.version || 'dev';
     const encrypted = health?.encrypted || false;
@@ -1088,17 +1072,48 @@ function SettingsPage() {
     const ollama = health?.ollama || 'unknown';
     const uptime = health?.uptime || '--';
 
-    // Format countdown as seconds with 1 decimal
-    const countdownDisplay = countdown !== null ? (countdown / 1000).toFixed(1) + 's' : '--';
+    // Format countdown — compute from block_time relative to now
+    const getCountdown = () => {
+        if (!chain?.block_time) return null;
+        const lastBlock = new Date(chain.block_time).getTime();
+        const blockInterval = 5000;
+        const elapsed = Date.now() - lastBlock;
+        const remaining = blockInterval - (elapsed % blockInterval);
+        return remaining;
+    };
+    const liveCountdown = getCountdown();
+    const countdownDisplay = liveCountdown !== null ? (liveCountdown / 1000).toFixed(1) + 's' : '--';
+    const countdownPct = liveCountdown !== null ? Math.min(100, (liveCountdown / 5000) * 100) : 0;
 
     // Status indicator dot
     const statusDot = (active) => html`
         <span class="status-dot ${active ? 'active' : 'inactive'}"></span>
     `;
 
+    // Helper: format nanosecond duration to human-readable
+    const formatDuration = (nsStr) => {
+        const ns = parseInt(nsStr);
+        if (isNaN(ns)) return '--';
+        const hours = Math.floor(ns / 3.6e12);
+        const mins = Math.floor((ns % 3.6e12) / 6e10);
+        if (hours > 24) return Math.floor(hours / 24) + 'd ' + (hours % 24) + 'h';
+        if (hours > 0) return hours + 'h ' + mins + 'm';
+        return mins + 'm';
+    };
+
+    const formatBytes = (bytesStr) => {
+        const b = parseInt(bytesStr);
+        if (isNaN(b)) return '0 B';
+        if (b < 1024) return b + ' B';
+        if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
+        return (b / 1048576).toFixed(1) + ' MB';
+    };
+
+    const peers = chain?.peer_list || [];
+
     return html`
         <div class="settings-page">
-            <!-- Chain Health — the hero section -->
+            <!-- Chain Health — full width hero -->
             <div class="settings-section chain-health-section">
                 <h3>
                     <svg width="16" height="16" viewBox="0 0 16 16" style="vertical-align:-2px;margin-right:6px">
@@ -1118,7 +1133,7 @@ function SettingsPage() {
                             <div class="chain-stat-value countdown-value">${countdownDisplay}</div>
                             <div class="chain-stat-label">Next Block</div>
                             <div class="countdown-bar">
-                                <div class="countdown-fill" style="width: ${countdown !== null ? Math.min(100, (countdown / 5000) * 100) : 0}%"></div>
+                                <div class="countdown-fill" style="width: ${countdownPct}%"></div>
                             </div>
                         </div>
                         <div class="chain-stat-card" title="Number of other SAGE nodes connected in quorum mode. 0 = running solo (Personal mode).">
@@ -1159,110 +1174,157 @@ function SettingsPage() {
                 `}
             </div>
 
-            <!-- System Status -->
-            <div class="settings-section">
-                <h3>System Status</h3>
-                <div class="settings-row" title="SAGE memory engine status. If you can see this, it's running.">
-                    <span class="label">${statusDot(true)} SAGE</span>
-                    <span class="value" style="color:#10b981">Running</span>
-                </div>
-                <div class="settings-row" title="Ollama provides local AI embeddings for semantic search. Optional — SAGE falls back to hash-based embeddings if offline.">
-                    <span class="label">${statusDot(ollama === 'running')} Ollama</span>
-                    <span class="value" style="color: ${ollama === 'running' ? '#10b981' : '#6b7280'}">
-                        ${ollama === 'running' ? 'Connected' : 'Offline'}
-                    </span>
-                </div>
-                <div class="settings-row" title="When enabled, all memories are encrypted at rest with AES-256-GCM. Requires a vault passphrase to unlock.">
-                    <span class="label">${statusDot(encrypted)} Encryption</span>
-                    <span class="value" style="color: ${encrypted ? '#10b981' : '#6b7280'}">
-                        ${encrypted ? 'AES-256-GCM' : 'Off'}
-                    </span>
-                </div>
-                <div class="settings-row" title="Current SAGE version.">
-                    <span class="label">Version</span>
-                    <span class="value">${ver}</span>
-                </div>
-                <div class="settings-row" title="How long SAGE has been running since last restart.">
-                    <span class="label">Uptime</span>
-                    <span class="value">${uptime}</span>
-                </div>
-                <div class="settings-row" title="The REST API endpoint that your AI agents connect to for memory operations.">
-                    <span class="label">API Endpoint</span>
-                    <span class="value">${window.location.origin}</span>
-                </div>
-            </div>
-
-            ${stats && html`
+            <!-- Two-column grid for the rest -->
+            <div class="settings-grid">
+                <!-- Left column: System Status -->
                 <div class="settings-section">
-                    <h3>Memory Statistics</h3>
-                    <div class="settings-row" title="Total number of memories across all statuses and domains.">
-                        <span class="label">Total Memories</span>
-                        <span class="value">${stats.total_memories || 0}</span>
+                    <h3>System Status</h3>
+                    <div class="settings-row" title="SAGE memory engine status. If you can see this, it's running.">
+                        <span class="label">${statusDot(true)} SAGE</span>
+                        <span class="value" style="color:#10b981">Running</span>
                     </div>
-                    ${stats.by_status && Object.entries(stats.by_status).map(([s, c]) => html`
-                        <div class="settings-row">
-                            <span class="label">${s}</span>
-                            <span class="value">${c}</span>
+                    <div class="settings-row" title="Ollama provides local AI embeddings for semantic search. Optional — SAGE falls back to hash-based embeddings if offline.">
+                        <span class="label">${statusDot(ollama === 'running')} Ollama</span>
+                        <span class="value" style="color: ${ollama === 'running' ? '#10b981' : '#6b7280'}">
+                            ${ollama === 'running' ? 'Connected' : 'Offline'}
+                        </span>
+                    </div>
+                    <div class="settings-row" title="When enabled, all memories are encrypted at rest with AES-256-GCM. Requires a vault passphrase to unlock.">
+                        <span class="label">${statusDot(encrypted)} Encryption</span>
+                        <span class="value" style="color: ${encrypted ? '#10b981' : '#6b7280'}">
+                            ${encrypted ? 'AES-256-GCM' : 'Off'}
+                        </span>
+                    </div>
+                    <div class="settings-row" title="Current SAGE version.">
+                        <span class="label">Version</span>
+                        <span class="value">${ver}</span>
+                    </div>
+                    <div class="settings-row" title="How long SAGE has been running since last restart.">
+                        <span class="label">Uptime</span>
+                        <span class="value">${uptime}</span>
+                    </div>
+                    <div class="settings-row" title="The REST API endpoint that your AI agents connect to for memory operations.">
+                        <span class="label">API Endpoint</span>
+                        <span class="value">${window.location.origin}</span>
+                    </div>
+                </div>
+
+                <!-- Right column: Memory Statistics -->
+                ${stats ? html`
+                    <div class="settings-section">
+                        <h3>Memory Statistics</h3>
+                        <div class="settings-row" title="Total number of memories across all statuses and domains.">
+                            <span class="label">Total Memories</span>
+                            <span class="value">${stats.total_memories || 0}</span>
                         </div>
-                    `)}
-                    ${stats.db_size_bytes != null && html`
-                        <div class="settings-row">
-                            <span class="label">DB Size</span>
-                            <span class="value">${(stats.db_size_bytes / 1024 / 1024).toFixed(1)} MB</span>
+                        ${stats.by_status && Object.entries(stats.by_status).map(([s, c]) => html`
+                            <div class="settings-row">
+                                <span class="label">${s}</span>
+                                <span class="value">${c}</span>
+                            </div>
+                        `)}
+                        ${stats.db_size_bytes != null && html`
+                            <div class="settings-row">
+                                <span class="label">DB Size</span>
+                                <span class="value">${(stats.db_size_bytes / 1024 / 1024).toFixed(1)} MB</span>
+                            </div>
+                        `}
+                    </div>
+                ` : html`<div></div>`}
+
+                <!-- Peers Section -->
+                <div class="settings-section">
+                    <h3>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:6px">
+                            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+                            <circle cx="9" cy="7" r="4"/>
+                            <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+                            <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+                        </svg>
+                        Connected Peers
+                    </h3>
+                    ${peers.length > 0 ? peers.map(p => html`
+                        <div class="peer-card">
+                            <div class="peer-header">
+                                <span class="status-dot active"></span>
+                                <span class="peer-moniker">${p.moniker || 'unknown'}</span>
+                                <span class="peer-badge">${p.outbound ? 'outbound' : 'inbound'}</span>
+                            </div>
+                            <div class="peer-meta">
+                                <span class="peer-meta-label">IP</span>
+                                <span class="peer-meta-value">${p.remote_ip}</span>
+                                <span class="peer-meta-label">Connected</span>
+                                <span class="peer-meta-value">${formatDuration(p.duration)}</span>
+                                <span class="peer-meta-label">Sent</span>
+                                <span class="peer-meta-value">${formatBytes(p.bytes_sent)}</span>
+                                <span class="peer-meta-label">Received</span>
+                                <span class="peer-meta-value">${formatBytes(p.bytes_recv)}</span>
+                                <span class="peer-meta-label">Node ID</span>
+                                <span class="peer-meta-value">${p.id}...</span>
+                            </div>
+                        </div>
+                    `) : html`
+                        <div class="peer-empty">
+                            No peers connected — running in Personal mode.
+                            <div style="margin-top:8px;font-size:11px;color:var(--text-muted)">
+                                Connect other SAGE nodes via quorum mode to see peers here.
+                            </div>
                         </div>
                     `}
                 </div>
-            `}
 
-            ${html`<${CleanupSettings} />`}
+                <!-- Export + About -->
+                <div class="settings-section">
+                    <h3>Export & About</h3>
+                    <div class="settings-row">
+                        <span class="label">Export all memories</span>
+                        <button class="btn" onClick=${() => {
+                            fetchMemories({ limit: 10000 }).then(data => {
+                                const blob = new Blob([JSON.stringify(data.memories, null, 2)], { type: 'application/json' });
+                                const url = URL.createObjectURL(blob);
+                                const a = document.createElement('a');
+                                a.href = url;
+                                a.download = 'sage-memories-export.json';
+                                a.click();
+                                URL.revokeObjectURL(url);
+                            });
+                        }}>Download JSON</button>
+                    </div>
+                    <div style="border-top:1px solid var(--border);margin-top:8px;padding-top:8px">
+                        <div class="settings-row">
+                            <span class="label">Full Name</span>
+                            <span class="value">(Sovereign) Agent Governed Experience</span>
+                        </div>
+                        <div class="settings-row">
+                            <span class="label">Author</span>
+                            <span class="value">Dhillon Andrew Kannabhiran</span>
+                        </div>
+                        <div class="settings-row">
+                            <span class="label">License</span>
+                            <span class="value">Apache 2.0</span>
+                        </div>
+                        <div class="settings-row">
+                            <span class="label">GitHub</span>
+                            <span class="value"><a href="https://github.com/l33tdawg/sage" target="_blank" style="color:var(--accent)">l33tdawg/sage</a></span>
+                        </div>
+                        <div class="settings-row">
+                            <span class="label">Website</span>
+                            <span class="value"><a href="https://l33tdawg.github.io/sage/" target="_blank" style="color:var(--accent)">l33tdawg.github.io/sage</a></span>
+                        </div>
+                        <div class="settings-row">
+                            <span class="label">Architecture</span>
+                            <span class="value">CometBFT v0.38 + SQLite + Ed25519</span>
+                        </div>
+                        <div class="settings-row">
+                            <span class="label">Connect Guide</span>
+                            <span class="value"><a href="https://l33tdawg.github.io/sage/connect.html" target="_blank" style="color:var(--accent)">How to connect your AI</a></span>
+                        </div>
+                    </div>
+                </div>
 
-            <div class="settings-section">
-                <h3>Export</h3>
-                <div class="settings-row">
-                    <span class="label">Export all memories</span>
-                    <button class="btn" onClick=${() => {
-                        fetchMemories({ limit: 10000 }).then(data => {
-                            const blob = new Blob([JSON.stringify(data.memories, null, 2)], { type: 'application/json' });
-                            const url = URL.createObjectURL(blob);
-                            const a = document.createElement('a');
-                            a.href = url;
-                            a.download = 'sage-memories-export.json';
-                            a.click();
-                            URL.revokeObjectURL(url);
-                        });
-                    }}>Download JSON</button>
-                </div>
-            </div>
-
-            <div class="settings-section">
-                <h3>About SAGE</h3>
-                <div class="settings-row">
-                    <span class="label">Full Name</span>
-                    <span class="value">(Sovereign) Agent Governed Experience</span>
-                </div>
-                <div class="settings-row">
-                    <span class="label">Author</span>
-                    <span class="value">Dhillon Andrew Kannabhiran</span>
-                </div>
-                <div class="settings-row">
-                    <span class="label">License</span>
-                    <span class="value">Apache 2.0</span>
-                </div>
-                <div class="settings-row">
-                    <span class="label">GitHub</span>
-                    <span class="value"><a href="https://github.com/l33tdawg/sage" target="_blank" style="color:var(--accent)">l33tdawg/sage</a></span>
-                </div>
-                <div class="settings-row">
-                    <span class="label">Website</span>
-                    <span class="value"><a href="https://l33tdawg.github.io/sage/" target="_blank" style="color:var(--accent)">l33tdawg.github.io/sage</a></span>
-                </div>
-                <div class="settings-row">
-                    <span class="label">Architecture</span>
-                    <span class="value">CometBFT v0.38 + SQLite + Ed25519</span>
-                </div>
-                <div class="settings-row">
-                    <span class="label">Connect Guide</span>
-                    <span class="value"><a href="https://l33tdawg.github.io/sage/connect.html" target="_blank" style="color:var(--accent)">How to connect your AI</a></span>
+                <!-- Auto-Cleanup — full width -->
+                <div class="settings-section full-width">
+                    ${html`<${CleanupSettings} />`}
                 </div>
             </div>
         </div>

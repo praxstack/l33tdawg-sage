@@ -464,17 +464,48 @@ func (h *DashboardHandler) handleHealth(w http.ResponseWriter, r *http.Request) 
 			chain["voting_power"] = cometStatus.Result.ValidatorInfo.VotingPower
 		}
 	}
-	// Peer count
+	// Peer details
 	netReq, _ := http.NewRequestWithContext(r.Context(), "GET", "http://127.0.0.1:26657/net_info", nil)
 	if netResp, netErr := cometClient.Do(netReq); netErr == nil {
 		defer netResp.Body.Close()
 		var netInfo struct {
 			Result struct {
 				NPeers string `json:"n_peers"`
+				Peers  []struct {
+					NodeInfo struct {
+						Moniker string `json:"moniker"`
+						Network string `json:"network"`
+						ID      string `json:"id"`
+					} `json:"node_info"`
+					IsOutbound       bool   `json:"is_outbound"`
+					RemoteIP         string `json:"remote_ip"`
+					ConnectionStatus struct {
+						Duration    string `json:"Duration"`
+						SendMonitor struct {
+							Bytes string `json:"Bytes"`
+						} `json:"SendMonitor"`
+						RecvMonitor struct {
+							Bytes string `json:"Bytes"`
+						} `json:"RecvMonitor"`
+					} `json:"connection_status"`
+				} `json:"peers"`
 			} `json:"result"`
 		}
 		if decErr := json.NewDecoder(netResp.Body).Decode(&netInfo); decErr == nil {
 			chain["peers"] = netInfo.Result.NPeers
+			peerList := make([]map[string]any, 0, len(netInfo.Result.Peers))
+			for _, p := range netInfo.Result.Peers {
+				peerList = append(peerList, map[string]any{
+					"moniker":    p.NodeInfo.Moniker,
+					"id":         p.NodeInfo.ID[:12],
+					"remote_ip":  p.RemoteIP,
+					"outbound":   p.IsOutbound,
+					"duration":   p.ConnectionStatus.Duration,
+					"bytes_sent": p.ConnectionStatus.SendMonitor.Bytes,
+					"bytes_recv": p.ConnectionStatus.RecvMonitor.Bytes,
+				})
+			}
+			chain["peer_list"] = peerList
 		}
 	}
 	if len(chain) > 0 {
