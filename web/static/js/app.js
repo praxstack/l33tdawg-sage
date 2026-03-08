@@ -31,6 +31,13 @@ const DOMAIN_COLORS = {
 
 const _domainColorCache = {};
 
+function hslToHex(h, s, l) {
+    s /= 100; l /= 100;
+    const a = s * Math.min(l, 1 - l);
+    const f = n => { const k = (n + h / 30) % 12; return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1)); };
+    return '#' + [f(0), f(8), f(4)].map(x => Math.round(x * 255).toString(16).padStart(2, '0')).join('');
+}
+
 function getDomainColor(domain) {
     if (!domain) return '#64748b';
     const lower = domain.toLowerCase();
@@ -46,9 +53,9 @@ function getDomainColor(domain) {
     for (let i = 0; i < lower.length; i++) {
         hash = lower.charCodeAt(i) + ((hash << 5) - hash);
     }
-    // Use HSL for vibrant colors: spread hue, keep saturation/lightness punchy
+    // Use HSL for vibrant colors, then convert to hex (canvas gradients need hex for alpha suffix)
     const hue = ((hash % 360) + 360) % 360;
-    const color = `hsl(${hue}, 70%, 60%)`;
+    const color = hslToHex(hue, 70, 60);
     _domainColorCache[lower] = color;
     return color;
 }
