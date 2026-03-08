@@ -1,15 +1,14 @@
 {
   "manifest_version": 3,
   "name": "SAGE Memory for AI",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Give your AI a secure, permanent memory. Works with ChatGPT, and more — even on free plans.",
   "browser_specific_settings": {
     "gecko": {
       "id": "sage-memory@l33tdawg.github.io",
-      "strict_min_version": "128.0",
+      "strict_min_version": "140.0",
       "data_collection_permissions": {
-        "data_collected": false,
-        "required": []
+        "required": ["none"]
       }
     }
   },

@@ -57,10 +57,12 @@ class AgentIdentity:
     ) -> dict[str, str]:
         """Sign an HTTP request and return auth headers.
 
-        The signed message is: SHA256(body) || big-endian int64 timestamp.
+        The signed message is: SHA256(method + " " + path + "\\n" + body) || big-endian int64 timestamp.
+        This binds signatures to specific endpoints, preventing cross-endpoint replay.
         """
         ts = timestamp or int(time.time())
-        body_hash = hashlib.sha256(body or b"").digest()
+        canonical = method.encode() + b" " + path.encode() + b"\n" + (body or b"")
+        body_hash = hashlib.sha256(canonical).digest()
         message = body_hash + struct.pack(">q", ts)
         signed = self._signing_key.sign(message)
         return {
