@@ -45,6 +45,9 @@ type DashboardHandler struct {
 	// Must implement RedeployChecker (for the guard middleware).
 	// Also provides Deploy/GetStatus for the network redeploy endpoint.
 	Redeployer RedeployOrchestrator
+
+	// Pairing — ephemeral pairing code store for LAN agent setup.
+	Pairing *PairingStore
 }
 
 // RedeployOrchestrator extends RedeployChecker with deploy/status methods
@@ -80,6 +83,9 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 
 	// Health is public (needed by CLI status command).
 	r.Get("/v1/dashboard/health", h.handleHealth)
+
+	// Pairing redemption — unauthenticated (the code IS the auth).
+	h.RegisterPairingRoutes(r)
 
 	// Protected routes — wrapped in auth middleware when encryption is enabled.
 	r.Group(func(r chi.Router) {

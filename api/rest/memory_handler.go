@@ -320,6 +320,15 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Network agent domain access enforcement (read side)
+	if req.DomainTag != "" {
+		agentID := middleware.ContextAgentID(r.Context())
+		if accessErr := checkDomainAccess(r.Context(), s.agentStore, agentID, req.DomainTag, "read"); accessErr != nil {
+			writeProblem(w, http.StatusForbidden, "Access denied", accessErr.Error())
+			return
+		}
+	}
+
 	// Multi-org access control gate — only enforce when domain has a registered owner
 	if req.DomainTag != "" && s.badgerStore != nil {
 		domainOwner, domainErr := s.badgerStore.GetDomainOwner(req.DomainTag)

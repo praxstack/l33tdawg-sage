@@ -315,6 +315,11 @@ type AgentStore interface {
 	RemoveAgent(ctx context.Context, agentID string) error
 	UpdateAgentStatus(ctx context.Context, agentID, status string) error
 	UpdateAgentLastSeen(ctx context.Context, agentID string, lastSeen time.Time) error
+	// RotateAgentKey generates a new Ed25519 keypair for the agent, updates the
+	// agent record and re-attributes all memories from oldAgentID to the new ID.
+	// Both operations run in a single transaction. Returns the new agent_id
+	// (hex-encoded public key) and the Ed25519 seed for bundle generation.
+	RotateAgentKey(ctx context.Context, oldAgentID string) (newAgentID string, seed []byte, err error)
 	// Redeployment
 	AcquireRedeployLock(ctx context.Context, lockedBy, operation string, ttl time.Duration) error
 	ReleaseRedeployLock(ctx context.Context) error

@@ -54,9 +54,15 @@ func (h *DashboardHandler) RegisterNetworkRoutes(r chi.Router) {
 	r.Patch("/v1/dashboard/network/agents/{id}", handleUpdateAgent(agentStore))
 	r.Delete("/v1/dashboard/network/agents/{id}", handleRemoveAgent(agentStore, h.store))
 	r.Get("/v1/dashboard/network/agents/{id}/bundle", handleDownloadBundle(agentStore))
+	r.Post("/v1/dashboard/network/agents/{id}/rotate-key", handleRotateAgentKey(agentStore))
 	r.Get("/v1/dashboard/network/templates", handleTemplates())
 	r.Get("/v1/dashboard/network/redeploy/status", h.handleRedeployStatusLive)
 	r.Post("/v1/dashboard/network/redeploy", h.handleTriggerRedeploy)
+
+	// Pairing code generation (authenticated — admin creates code for an agent)
+	if h.Pairing != nil {
+		registerPairingCreateRoute(r, agentStore, h.Pairing)
+	}
 }
 
 func handleListAgents(agentStore store.AgentStore) http.HandlerFunc {
@@ -315,6 +321,68 @@ func handleDownloadBundle(agentStore store.AgentStore) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/zip")
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="sage-agent-%s.zip"`, agent.Name))
 		w.Write(data) //nolint:errcheck
+	}
+}
+
+func handleRotateAgentKey(agentStore store.AgentStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := chi.URLParam(r, "id")
+
+		// Verify agent exists before rotation
+		oldAgent, err := agentStore.GetAgent(r.Context(), id)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "agent not found")
+			return
+		}
+		if oldAgent.Status == "removed" {
+			writeError(w, http.StatusBadRequest, "cannot rotate key for removed agent")
+			return
+		}
+
+		// Rotate the key (generates new keypair, updates agent + memories atomically)
+		newAgentID, seed, err := agentStore.RotateAgentKey(r.Context(), id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "key rotation failed: "+err.Error())
+			return
+		}
+
+		// Generate and save new bundle
+		bundleDir := filepath.Join(sageHome(), "bundles", newAgentID)
+		if mkErr := os.MkdirAll(bundleDir, 0700); mkErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to create bundle dir")
+			return
+		}
+
+		// Save new agent key (seed)
+		if wErr := os.WriteFile(filepath.Join(bundleDir, "agent.key"), seed, 0600); wErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to save agent key")
+			return
+		}
+
+		// Fetch the updated agent record
+		newAgent, err := agentStore.GetAgent(r.Context(), newAgentID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to fetch rotated agent")
+			return
+		}
+
+		// Generate bundle ZIP
+		bundlePath, err := generateBundle(bundleDir, newAgent, seed)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "bundle generation failed: "+err.Error())
+			return
+		}
+
+		// Update agent with bundle path
+		newAgent.BundlePath = bundlePath
+		_ = agentStore.UpdateAgent(r.Context(), newAgent)
+
+		writeJSONResp(w, http.StatusOK, map[string]any{
+			"agent":        newAgent,
+			"new_agent_id": newAgentID,
+			"old_agent_id": id,
+			"message":      "Key rotated successfully. Download the new bundle and trigger chain redeployment.",
+		})
 	}
 }
 

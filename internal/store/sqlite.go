@@ -2,8 +2,11 @@ package store
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -1764,6 +1767,91 @@ func (s *SQLiteStore) UpdateAgentLastSeen(ctx context.Context, agentID string, l
 		return fmt.Errorf("update agent last seen: %w", err)
 	}
 	return nil
+}
+
+func (s *SQLiteStore) RotateAgentKey(ctx context.Context, oldAgentID string) (string, []byte, error) {
+	// Generate new Ed25519 keypair
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return "", nil, fmt.Errorf("generate key: %w", err)
+	}
+	newAgentID := hex.EncodeToString(pub)
+	newValidatorPubkey := base64.StdEncoding.EncodeToString(pub)
+	seed := priv.Seed()
+
+	// Run the update atomically — agent record + memory re-attribution
+	doRotate := func(q sqlQuerier) error {
+		// 1. Verify old agent exists and is not removed
+		var status string
+		if scanErr := q.QueryRowContext(ctx, `SELECT status FROM network_agents WHERE agent_id=?`, oldAgentID).Scan(&status); scanErr != nil {
+			return fmt.Errorf("agent not found: %s", oldAgentID)
+		}
+		if status == "removed" {
+			return fmt.Errorf("cannot rotate key for removed agent %s", oldAgentID)
+		}
+
+		// 2. Insert new agent row (copy of old, with new keys)
+		_, err2 := q.ExecContext(ctx, `
+			INSERT INTO network_agents (agent_id, name, role, avatar, boot_bio, validator_pubkey,
+				node_id, p2p_address, status, clearance, org_id, dept_id, domain_access, bundle_path, first_seen, created_at)
+			SELECT ?, name, role, avatar, boot_bio, ?,
+				node_id, p2p_address, status, clearance, org_id, dept_id, domain_access, '',
+				first_seen, created_at
+			FROM network_agents WHERE agent_id=?`,
+			newAgentID, newValidatorPubkey, oldAgentID)
+		if err2 != nil {
+			return fmt.Errorf("insert rotated agent: %w", err2)
+		}
+
+		// 3. Re-attribute all memories to the new agent ID
+		_, err2 = q.ExecContext(ctx, `UPDATE memories SET submitting_agent=? WHERE submitting_agent=?`, newAgentID, oldAgentID)
+		if err2 != nil {
+			return fmt.Errorf("re-attribute memories: %w", err2)
+		}
+
+		// 4. Mark old agent as removed with audit note
+		_, err2 = q.ExecContext(ctx, `
+			UPDATE network_agents SET status='removed',
+				removed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+			WHERE agent_id=?`, oldAgentID)
+		if err2 != nil {
+			return fmt.Errorf("retire old agent: %w", err2)
+		}
+
+		// 5. Log the rotation in redeployment_log for audit
+		_, err2 = q.ExecContext(ctx, `
+			INSERT INTO redeployment_log (operation, agent_id, phase, status, details, started_at)
+			VALUES ('rotate_key', ?, 'KEY_ROTATED', 'completed', ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+			newAgentID, fmt.Sprintf("rotated from %s to %s", oldAgentID, newAgentID))
+		if err2 != nil {
+			return fmt.Errorf("log rotation: %w", err2)
+		}
+
+		return nil
+	}
+
+	// If we have a *sql.DB (not already in a tx), wrap in transaction
+	if s.db != nil {
+		tx, txErr := s.db.BeginTx(ctx, nil)
+		if txErr != nil {
+			return "", nil, fmt.Errorf("begin tx: %w", txErr)
+		}
+		defer tx.Rollback() //nolint:errcheck
+
+		if err2 := doRotate(tx); err2 != nil {
+			return "", nil, err2
+		}
+		if err2 := tx.Commit(); err2 != nil {
+			return "", nil, fmt.Errorf("commit: %w", err2)
+		}
+	} else {
+		// Already in a transaction
+		if err2 := doRotate(s.conn); err2 != nil {
+			return "", nil, err2
+		}
+	}
+
+	return newAgentID, seed, nil
 }
 
 func (s *SQLiteStore) AcquireRedeployLock(ctx context.Context, lockedBy, operation string, ttl time.Duration) error {

@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -876,4 +878,118 @@ func TestListMemoriesWithAgentFilter(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 3, total)
 	assert.Len(t, records, 3)
+}
+
+// --- Key rotation tests ---
+
+func TestRotateAgentKey(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// Create an agent with known Ed25519 key
+	agent := testAgent("old-agent-id", "Rotation Test Agent", "validator")
+	agent.ValidatorPubkey = "oldpubkey"
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Insert memories attributed to this agent
+	rec1 := testMemory("m1", "old-agent-id", "memory one", "general")
+	require.NoError(t, s.InsertMemory(ctx, rec1))
+	rec2 := testMemory("m2", "old-agent-id", "memory two", "security")
+	require.NoError(t, s.InsertMemory(ctx, rec2))
+	rec3 := testMemory("m3", "other-agent", "memory three", "general")
+	require.NoError(t, s.InsertMemory(ctx, rec3))
+
+	// Rotate the key
+	newAgentID, seed, err := s.RotateAgentKey(ctx, "old-agent-id")
+	require.NoError(t, err)
+	assert.NotEmpty(t, newAgentID)
+	assert.NotEqual(t, "old-agent-id", newAgentID)
+	assert.Len(t, seed, ed25519.SeedSize, "seed should be 32 bytes")
+
+	// Verify newAgentID is hex-encoded Ed25519 public key
+	pubBytes, err := hex.DecodeString(newAgentID)
+	require.NoError(t, err)
+	assert.Len(t, pubBytes, ed25519.PublicKeySize, "decoded agent_id should be 32 bytes (Ed25519 pubkey)")
+
+	// Verify the seed reconstructs the same public key
+	privKey := ed25519.NewKeyFromSeed(seed)
+	pubKey := privKey.Public().(ed25519.PublicKey)
+	assert.Equal(t, newAgentID, hex.EncodeToString(pubKey))
+
+	// Verify the new agent exists with correct properties
+	newAgent, err := s.GetAgent(ctx, newAgentID)
+	require.NoError(t, err)
+	assert.Equal(t, "Rotation Test Agent", newAgent.Name)
+	assert.Equal(t, "validator", newAgent.Role)
+	assert.NotEmpty(t, newAgent.ValidatorPubkey)
+	assert.NotEqual(t, "oldpubkey", newAgent.ValidatorPubkey)
+
+	// Verify old agent is marked as removed
+	oldAgent, err := s.GetAgent(ctx, "old-agent-id")
+	require.NoError(t, err)
+	assert.Equal(t, "removed", oldAgent.Status)
+	assert.NotNil(t, oldAgent.RemovedAt)
+
+	// Verify memories were re-attributed to the new agent
+	mem1, err := s.GetMemory(ctx, "m1")
+	require.NoError(t, err)
+	assert.Equal(t, newAgentID, mem1.SubmittingAgent)
+
+	mem2, err := s.GetMemory(ctx, "m2")
+	require.NoError(t, err)
+	assert.Equal(t, newAgentID, mem2.SubmittingAgent)
+
+	// Verify other agent's memory was NOT re-attributed
+	mem3, err := s.GetMemory(ctx, "m3")
+	require.NoError(t, err)
+	assert.Equal(t, "other-agent", mem3.SubmittingAgent)
+}
+
+func TestRotateAgentKey_RemovedAgent(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	agent := testAgent("removed-agent", "Removed Agent", "validator")
+	require.NoError(t, s.CreateAgent(ctx, agent))
+	require.NoError(t, s.RemoveAgent(ctx, "removed-agent"))
+
+	_, _, err := s.RotateAgentKey(ctx, "removed-agent")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "removed")
+}
+
+func TestRotateAgentKey_NonexistentAgent(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	_, _, err := s.RotateAgentKey(ctx, "does-not-exist")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+}
+
+func TestRotateAgentKey_MemoryCountTransfers(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	agent := testAgent("rotate-mem-agent", "Memory Count Agent", "member")
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Insert 3 memories
+	for i := 0; i < 3; i++ {
+		rec := testMemory(fmt.Sprintf("rm%d", i), "rotate-mem-agent", fmt.Sprintf("content %d", i), "general")
+		require.NoError(t, s.InsertMemory(ctx, rec))
+	}
+
+	newAgentID, _, err := s.RotateAgentKey(ctx, "rotate-mem-agent")
+	require.NoError(t, err)
+
+	// New agent should now have 3 memories attributed
+	newAgent, err := s.GetAgent(ctx, newAgentID)
+	require.NoError(t, err)
+	assert.Equal(t, 3, newAgent.MemoryCount)
+
+	// Old agent should have 0 memories (they were re-attributed)
+	oldAgent, err := s.GetAgent(ctx, "rotate-mem-agent")
+	require.NoError(t, err)
+	assert.Equal(t, 0, oldAgent.MemoryCount)
 }
