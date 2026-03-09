@@ -32,6 +32,8 @@ type SubmitMemoryRequest struct {
 	Embedding        []float32                `json:"embedding,omitempty"`
 	KnowledgeTriples []memory.KnowledgeTriple `json:"knowledge_triples,omitempty"`
 	ParentHash       string                   `json:"parent_hash,omitempty"`
+	TaskStatus       string                   `json:"task_status,omitempty"`
+	LinkedMemories   []string                 `json:"linked_memories,omitempty"`
 }
 
 // SubmitMemoryResponse is the JSON body for a successful submission.
@@ -71,6 +73,7 @@ type MemoryResult struct {
 	Classification  int          `json:"classification"`
 	Status          string       `json:"status"`
 	ParentHash      string       `json:"parent_hash,omitempty"`
+	TaskStatus      string       `json:"task_status,omitempty"`
 	CreatedAt       time.Time    `json:"created_at"`
 	CommittedAt     *time.Time   `json:"committed_at,omitempty"`
 }
@@ -87,10 +90,12 @@ type MemoryDetailResponse struct {
 	Classification  int                   `json:"classification"`
 	Status          string                `json:"status"`
 	ParentHash      string                `json:"parent_hash,omitempty"`
+	TaskStatus      string                `json:"task_status,omitempty"`
 	CreatedAt       time.Time             `json:"created_at"`
 	CommittedAt     *time.Time            `json:"committed_at,omitempty"`
 	Votes           []*store.ValidationVote `json:"votes,omitempty"`
 	Corroborations  []*store.Corroboration  `json:"corroborations,omitempty"`
+	LinkedMemories  []memory.MemoryLink     `json:"linked_memories,omitempty"`
 }
 
 // CometBFT broadcast_tx_sync response structure.
@@ -182,7 +187,7 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 	}
 	if !memory.IsValidMemoryType(memory.MemoryType(req.MemoryType)) {
 		writeProblem(w, http.StatusBadRequest, "Invalid memory type",
-			"memory_type must be one of: fact, observation, inference.")
+			"memory_type must be one of: fact, observation, inference, task.")
 		return
 	}
 	if req.DomainTag == "" {
@@ -510,11 +515,116 @@ func memoryTypeToTx(mt string) tx.MemoryType {
 		return tx.MemoryTypeObservation
 	case "inference":
 		return tx.MemoryTypeInference
+	case "task":
+		return tx.MemoryTypeTask
 	default:
 		return tx.MemoryTypeFact
 	}
 }
 
+
+// handleUpdateTaskStatus handles PUT /v1/memory/{memory_id}/task-status.
+func (s *Server) handleUpdateTaskStatus(w http.ResponseWriter, r *http.Request) {
+	memoryID := chi.URLParam(r, "memory_id")
+	if memoryID == "" {
+		writeProblem(w, http.StatusBadRequest, "Missing memory_id", "memory_id is required.")
+		return
+	}
+
+	var req struct {
+		TaskStatus string `json:"task_status"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
+		return
+	}
+
+	ts := memory.TaskStatus(req.TaskStatus)
+	if !memory.IsValidTaskStatus(ts) {
+		writeProblem(w, http.StatusBadRequest, "Invalid task status",
+			"task_status must be one of: planned, in_progress, done, dropped.")
+		return
+	}
+
+	if err := s.store.UpdateTaskStatus(r.Context(), memoryID, ts); err != nil {
+		writeProblem(w, http.StatusNotFound, "Task not found", err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"memory_id":   memoryID,
+		"task_status": req.TaskStatus,
+	})
+}
+
+// handleLinkMemories handles POST /v1/memory/link.
+func (s *Server) handleLinkMemories(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SourceID string `json:"source_id"`
+		TargetID string `json:"target_id"`
+		LinkType string `json:"link_type"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
+		return
+	}
+	if req.SourceID == "" || req.TargetID == "" {
+		writeProblem(w, http.StatusBadRequest, "Missing IDs", "source_id and target_id are required.")
+		return
+	}
+	if req.LinkType == "" {
+		req.LinkType = "related"
+	}
+
+	if err := s.store.LinkMemories(r.Context(), req.SourceID, req.TargetID, req.LinkType); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Link failed", err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"source_id": req.SourceID,
+		"target_id": req.TargetID,
+		"link_type": req.LinkType,
+	})
+}
+
+// handleGetOpenTasks handles GET /v1/memory/tasks.
+func (s *Server) handleGetOpenTasks(w http.ResponseWriter, r *http.Request) {
+	domain := r.URL.Query().Get("domain")
+	provider := r.URL.Query().Get("provider")
+
+	tasks, err := s.store.GetOpenTasks(r.Context(), domain, provider)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Failed to get tasks", err.Error())
+		return
+	}
+
+	type taskResult struct {
+		MemoryID        string  `json:"memory_id"`
+		Content         string  `json:"content"`
+		DomainTag       string  `json:"domain_tag"`
+		TaskStatus      string  `json:"task_status"`
+		ConfidenceScore float64 `json:"confidence_score"`
+		CreatedAt       string  `json:"created_at"`
+	}
+
+	results := make([]taskResult, 0, len(tasks))
+	for _, t := range tasks {
+		results = append(results, taskResult{
+			MemoryID:        t.MemoryID,
+			Content:         t.Content,
+			DomainTag:       t.DomainTag,
+			TaskStatus:      string(t.TaskStatus),
+			ConfidenceScore: t.ConfidenceScore,
+			CreatedAt:       t.CreatedAt.Format("2006-01-02T15:04:05Z"),
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tasks": results,
+		"total": len(results),
+	})
+}
 
 // generateUUID creates a random UUID v4 string without an external dependency.
 func generateUUID() string {

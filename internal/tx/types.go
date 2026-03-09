@@ -43,6 +43,7 @@ const (
 	MemoryTypeFact        MemoryType = 1
 	MemoryTypeObservation MemoryType = 2
 	MemoryTypeInference   MemoryType = 3
+	MemoryTypeTask        MemoryType = 4
 )
 
 // ClearanceLevel defines the security classification tier.

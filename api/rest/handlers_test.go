@@ -133,6 +133,32 @@ func (m *mockMemoryStore) UpdateDomainTag(_ context.Context, memoryID string, do
 	return nil
 }
 
+func (m *mockMemoryStore) UpdateTaskStatus(_ context.Context, memoryID string, taskStatus memory.TaskStatus) error {
+	if rec, ok := m.memories[memoryID]; ok {
+		rec.TaskStatus = taskStatus
+		return nil
+	}
+	return fmt.Errorf("task not found: %s", memoryID)
+}
+
+func (m *mockMemoryStore) LinkMemories(_ context.Context, _, _, _ string) error {
+	return nil
+}
+
+func (m *mockMemoryStore) GetLinkedMemories(_ context.Context, _ string) ([]memory.MemoryLink, error) {
+	return nil, nil
+}
+
+func (m *mockMemoryStore) GetOpenTasks(_ context.Context, _ string, _ string) ([]*memory.MemoryRecord, error) {
+	var tasks []*memory.MemoryRecord
+	for _, rec := range m.memories {
+		if rec.MemoryType == memory.TypeTask && rec.IsOpenTask() {
+			tasks = append(tasks, rec)
+		}
+	}
+	return tasks, nil
+}
+
 func (m *mockMemoryStore) Close() error { return nil }
 
 type mockScoreStore struct {

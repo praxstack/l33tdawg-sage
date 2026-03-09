@@ -105,6 +105,11 @@ func RunCleanup(ctx context.Context, store CleanupStore, cfg CleanupConfig, dryR
 	now := time.Now()
 	var toDeprecate []string
 	for _, rec := range candidates {
+		// Never auto-deprecate open tasks
+		if rec.IsOpenTask() {
+			continue
+		}
+
 		currentConf := ComputeConfidence(rec.ConfidenceScore, rec.CreatedAt, now, 0, rec.DomainTag)
 
 		// Apply type-based decay multiplier for observations

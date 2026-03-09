@@ -24,6 +24,15 @@ func GetDecayRate(domainTag string) float64 {
 	return DefaultDecayRate
 }
 
+// ComputeConfidenceForRecord calculates current confidence with task awareness.
+// Open tasks (planned/in_progress) never decay — they stay at initial confidence.
+func ComputeConfidenceForRecord(rec *MemoryRecord, now time.Time, corroborationCount int) float64 {
+	if rec.IsOpenTask() {
+		return rec.ConfidenceScore // No decay for open tasks
+	}
+	return ComputeConfidence(rec.ConfidenceScore, rec.CreatedAt, now, corroborationCount, rec.DomainTag)
+}
+
 // ComputeConfidence calculates the current confidence of a memory.
 // Formula: conf(M, t) = conf_0 * exp(-λ_M * Δt_days) * (1 + 0.1 * log(1 + corr_count))
 func ComputeConfidence(initialConf float64, createdAt time.Time, now time.Time, corroborationCount int, domainTag string) float64 {

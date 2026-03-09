@@ -371,6 +371,8 @@ func txMemoryTypeToString(mt tx.MemoryType) string {
 		return string(memory.TypeObservation)
 	case tx.MemoryTypeInference:
 		return string(memory.TypeInference)
+	case tx.MemoryTypeTask:
+		return string(memory.TypeTask)
 	default:
 		return string(memory.TypeFact)
 	}

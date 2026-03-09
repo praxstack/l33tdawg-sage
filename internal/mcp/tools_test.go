@@ -85,6 +85,28 @@ func mockSageAPI(t *testing.T) *httptest.Server {
 		})
 	})
 
+	mux.HandleFunc("/v1/memory/tasks", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"tasks": []map[string]any{
+				{
+					"memory_id":        "task-1",
+					"content":          "[TASK] Build task memory type",
+					"domain_tag":       "sage-architecture",
+					"task_status":      "planned",
+					"confidence_score": 0.9,
+					"created_at":       "2024-01-01T00:00:00Z",
+				},
+			},
+			"total": 1,
+		})
+	})
+
+	mux.HandleFunc("/v1/memory/link", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "linked"})
+	})
+
 	mux.HandleFunc("/v1/dashboard/stats", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{

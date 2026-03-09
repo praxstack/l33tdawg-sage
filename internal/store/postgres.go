@@ -1049,6 +1049,105 @@ func (s *PostgresStore) UpdateDomainTag(ctx context.Context, memoryID string, do
 	return nil
 }
 
+// UpdateTaskStatus updates the task_status of a task memory.
+func (s *PostgresStore) UpdateTaskStatus(ctx context.Context, memoryID string, taskStatus memory.TaskStatus) error {
+	result, err := s.db.Exec(ctx,
+		`UPDATE memories SET task_status = $2 WHERE memory_id = $1 AND memory_type = 'task'`,
+		memoryID, string(taskStatus))
+	if err != nil {
+		return fmt.Errorf("update task status: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("task not found: %s", memoryID)
+	}
+	return nil
+}
+
+// LinkMemories creates a link between two memories.
+func (s *PostgresStore) LinkMemories(ctx context.Context, sourceID, targetID, linkType string) error {
+	_, err := s.db.Exec(ctx,
+		`INSERT INTO memory_links (source_id, target_id, link_type) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+		sourceID, targetID, linkType)
+	if err != nil {
+		return fmt.Errorf("link memories: %w", err)
+	}
+	return nil
+}
+
+// GetLinkedMemories returns all memories linked to the given memory ID.
+func (s *PostgresStore) GetLinkedMemories(ctx context.Context, memoryID string) ([]memory.MemoryLink, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT source_id, target_id, link_type, created_at FROM memory_links WHERE source_id = $1 OR target_id = $1`,
+		memoryID)
+	if err != nil {
+		return nil, fmt.Errorf("get linked memories: %w", err)
+	}
+	defer rows.Close()
+
+	var links []memory.MemoryLink
+	for rows.Next() {
+		var l memory.MemoryLink
+		var createdAt time.Time
+		if err := rows.Scan(&l.SourceID, &l.TargetID, &l.LinkType, &createdAt); err != nil {
+			return nil, fmt.Errorf("scan link: %w", err)
+		}
+		l.CreatedAt = createdAt.Format(time.RFC3339)
+		links = append(links, l)
+	}
+	return links, rows.Err()
+}
+
+// GetOpenTasks returns all task memories that are planned or in_progress.
+func (s *PostgresStore) GetOpenTasks(ctx context.Context, domain string, provider string) ([]*memory.MemoryRecord, error) {
+	query := `SELECT memory_id, submitting_agent, content, content_hash,
+		memory_type, domain_tag, COALESCE(provider, ''), confidence_score, status, parent_hash, COALESCE(task_status, ''),
+		created_at, committed_at, deprecated_at
+		FROM memories
+		WHERE memory_type = 'task'
+		AND task_status IN ('planned', 'in_progress')
+		AND status != 'deprecated'`
+	args := []any{}
+	argN := 1
+
+	if domain != "" {
+		query += fmt.Sprintf(" AND domain_tag = $%d", argN)
+		args = append(args, domain)
+		argN++
+	}
+	if provider != "" {
+		query += fmt.Sprintf(" AND (provider = $%d OR provider = '')", argN)
+		args = append(args, provider)
+		argN++ //nolint:ineffassign
+	}
+	query += " ORDER BY created_at DESC"
+
+	rows, err := s.db.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("get open tasks: %w", err)
+	}
+	defer rows.Close()
+
+	var records []*memory.MemoryRecord
+	for rows.Next() {
+		var r memory.MemoryRecord
+		var mt, st, ts string
+		var parentHash *string
+		if err := rows.Scan(&r.MemoryID, &r.SubmittingAgent, &r.Content, &r.ContentHash,
+			&mt, &r.DomainTag, &r.Provider, &r.ConfidenceScore, &st, &parentHash, &ts,
+			&r.CreatedAt, &r.CommittedAt, &r.DeprecatedAt); err != nil {
+			return nil, fmt.Errorf("scan task: %w", err)
+		}
+		r.MemoryType = memory.MemoryType(mt)
+		r.Status = memory.MemoryStatus(st)
+		r.TaskStatus = memory.TaskStatus(ts)
+		if parentHash != nil {
+			r.ParentHash = *parentHash
+		}
+		records = append(records, &r)
+	}
+	return records, rows.Err()
+}
+
 func (s *PostgresStore) Close() error {
 	if s.pool != nil {
 		s.pool.Close()

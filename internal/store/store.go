@@ -121,6 +121,10 @@ type MemoryStore interface {
 	GetTimeline(ctx context.Context, from, to time.Time, domain string, bucket string) ([]TimelineBucket, error)
 	DeleteMemory(ctx context.Context, memoryID string) error
 	UpdateDomainTag(ctx context.Context, memoryID string, domain string) error
+	UpdateTaskStatus(ctx context.Context, memoryID string, taskStatus memory.TaskStatus) error
+	LinkMemories(ctx context.Context, sourceID, targetID, linkType string) error
+	GetLinkedMemories(ctx context.Context, memoryID string) ([]memory.MemoryLink, error)
+	GetOpenTasks(ctx context.Context, domain string, provider string) ([]*memory.MemoryRecord, error)
 	Close() error
 }
 

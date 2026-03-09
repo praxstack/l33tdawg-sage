@@ -164,6 +164,9 @@ func (s *Server) setupRouter() chi.Router {
 		r.Post("/v1/memory/{memory_id}/vote", s.handleVoteMemory)
 		r.Post("/v1/memory/{memory_id}/challenge", s.handleChallengeMemory)
 		r.Post("/v1/memory/{memory_id}/corroborate", s.handleCorroborateMemory)
+		r.Put("/v1/memory/{memory_id}/task-status", s.handleUpdateTaskStatus)
+		r.Post("/v1/memory/link", s.handleLinkMemories)
+		r.Get("/v1/memory/tasks", s.handleGetOpenTasks)
 
 		// Agent endpoints
 		r.Get("/v1/agent/me", s.handleGetAgent)

@@ -26,7 +26,7 @@ func (s *Server) registerTools() map[string]Tool {
 				"properties": map[string]any{
 					"content":    map[string]any{"type": "string", "description": "The memory content to store"},
 					"domain":     map[string]any{"type": "string", "description": "Domain tag (e.g. general, security, code)", "default": "general"},
-					"type":       map[string]any{"type": "string", "enum": []string{"fact", "observation", "inference"}, "default": "observation"},
+					"type":       map[string]any{"type": "string", "enum": []string{"fact", "observation", "inference", "task"}, "default": "observation"},
 					"confidence": map[string]any{"type": "number", "description": "Confidence score 0-1", "default": 0.8},
 				},
 				"required": []string{"content"},
@@ -139,6 +139,37 @@ func (s *Server) registerTools() map[string]Tool {
 				"required": []string{"topic"},
 			},
 			Handler: s.toolTurn,
+		},
+		"sage_task": {
+			Name: "sage_task",
+			Description: "Create or update a task in your persistent backlog. Tasks are memories that don't decay while open — " +
+				"they persist until explicitly completed or dropped. Use this to track planned work, feature ideas, " +
+				"bug reports, and anything that should survive across sessions. " +
+				"To create: provide content + domain. To update status: provide memory_id + status. " +
+				"To link related memories: provide memory_id + link_to (array of memory IDs).",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"content":   map[string]any{"type": "string", "description": "Task description (for creating new tasks)"},
+					"domain":    map[string]any{"type": "string", "description": "Domain tag for the task", "default": "general"},
+					"memory_id": map[string]any{"type": "string", "description": "Existing task memory ID (for updates)"},
+					"status":    map[string]any{"type": "string", "enum": []string{"planned", "in_progress", "done", "dropped"}, "description": "Task status", "default": "planned"},
+					"link_to":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Memory IDs to link this task to"},
+				},
+			},
+			Handler: s.toolTask,
+		},
+		"sage_backlog": {
+			Name: "sage_backlog",
+			Description: "View your open task backlog — all planned and in-progress tasks across domains. " +
+				"Use this to see what's been discussed but not yet done, review priorities, and avoid losing track of ideas across sessions.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"domain": map[string]any{"type": "string", "description": "Filter by domain (omit for all domains)"},
+				},
+			},
+			Handler: s.toolBacklog,
 		},
 		"sage_reflect": {
 			Name: "sage_reflect",
@@ -661,6 +692,140 @@ func (s *Server) toolReflect(ctx context.Context, params map[string]any) (any, e
 		"memories_stored": stored,
 		"task":           taskSummary,
 		"message":        "Reflection stored. Your future self will thank you.",
+	}, nil
+}
+
+func (s *Server) toolTask(ctx context.Context, params map[string]any) (any, error) {
+	memoryID := stringParam(params, "memory_id", "")
+	content := stringParam(params, "content", "")
+	domain := stringParam(params, "domain", "general")
+	status := stringParam(params, "status", "planned")
+
+	// Parse link_to array
+	var linkTo []string
+	if raw, ok := params["link_to"]; ok {
+		if arr, ok := raw.([]any); ok {
+			for _, v := range arr {
+				if s, ok := v.(string); ok && s != "" {
+					linkTo = append(linkTo, s)
+				}
+			}
+		}
+	}
+
+	result := map[string]any{}
+
+	if memoryID != "" {
+		// Update existing task
+		updateReq, _ := json.Marshal(map[string]any{
+			"task_status": status,
+		})
+		path := fmt.Sprintf("/v1/memory/%s/task-status", url.PathEscape(memoryID))
+		if err := s.doSignedJSON(ctx, "PUT", path, updateReq, nil); err != nil {
+			return nil, fmt.Errorf("update task status: %w", err)
+		}
+		result["memory_id"] = memoryID
+		result["status"] = status
+		result["action"] = "updated"
+	} else if content != "" {
+		// Create new task
+		taskContent := fmt.Sprintf("[TASK] %s", content)
+		embedReq, _ := json.Marshal(map[string]string{"text": taskContent})
+		var embedResp struct {
+			Embedding []float32 `json:"embedding"`
+		}
+		if err := s.doSignedJSON(ctx, "POST", "/v1/embed", embedReq, &embedResp); err != nil {
+			return nil, fmt.Errorf("get embedding: %w", err)
+		}
+
+		submitReq, _ := json.Marshal(map[string]any{
+			"content":          taskContent,
+			"memory_type":      "task",
+			"domain_tag":       domain,
+			"provider":         s.provider,
+			"confidence_score": 0.90,
+			"embedding":        embedResp.Embedding,
+			"task_status":      status,
+		})
+		var submitResp struct {
+			MemoryID string `json:"memory_id"`
+			Status   string `json:"status"`
+		}
+		if err := s.doSignedJSON(ctx, "POST", "/v1/memory/submit", submitReq, &submitResp); err != nil {
+			return nil, fmt.Errorf("submit task: %w", err)
+		}
+		memoryID = submitResp.MemoryID
+		result["memory_id"] = memoryID
+		result["task_status"] = status
+		result["domain"] = domain
+		result["action"] = "created"
+	} else {
+		return nil, fmt.Errorf("provide either content (to create) or memory_id (to update)")
+	}
+
+	// Link to related memories
+	if len(linkTo) > 0 && memoryID != "" {
+		linked := 0
+		for _, targetID := range linkTo {
+			linkReq, _ := json.Marshal(map[string]string{
+				"source_id": memoryID,
+				"target_id": targetID,
+				"link_type": "related",
+			})
+			if err := s.doSignedJSON(ctx, "POST", "/v1/memory/link", linkReq, nil); err == nil {
+				linked++
+			}
+		}
+		result["linked"] = linked
+	}
+
+	result["message"] = "Task tracked. It won't decay until completed or dropped."
+	return result, nil
+}
+
+func (s *Server) toolBacklog(ctx context.Context, params map[string]any) (any, error) {
+	domain := stringParam(params, "domain", "")
+
+	q := url.Values{}
+	if domain != "" {
+		q.Set("domain", domain)
+	}
+	if s.provider != "" {
+		q.Set("provider", s.provider)
+	}
+
+	path := "/v1/memory/tasks?" + q.Encode()
+	var tasksResp struct {
+		Tasks []struct {
+			MemoryID        string  `json:"memory_id"`
+			Content         string  `json:"content"`
+			DomainTag       string  `json:"domain_tag"`
+			TaskStatus      string  `json:"task_status"`
+			ConfidenceScore float64 `json:"confidence_score"`
+			CreatedAt       string  `json:"created_at"`
+		} `json:"tasks"`
+		Total int `json:"total"`
+	}
+	if err := s.doSignedJSON(ctx, "GET", path, nil, &tasksResp); err != nil {
+		return nil, fmt.Errorf("get backlog: %w", err)
+	}
+
+	// Group by domain
+	byDomain := map[string][]map[string]any{}
+	for _, t := range tasksResp.Tasks {
+		byDomain[t.DomainTag] = append(byDomain[t.DomainTag], map[string]any{
+			"memory_id":   t.MemoryID,
+			"content":     t.Content,
+			"task_status": t.TaskStatus,
+			"confidence":  t.ConfidenceScore,
+			"created_at":  t.CreatedAt,
+		})
+	}
+
+	return map[string]any{
+		"tasks_by_domain": byDomain,
+		"total_open":      tasksResp.Total,
+		"message":         fmt.Sprintf("You have %d open tasks across %d domains.", tasksResp.Total, len(byDomain)),
 	}, nil
 }
 

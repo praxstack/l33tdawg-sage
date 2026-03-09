@@ -128,7 +128,7 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 		content_hash     BLOB NOT NULL,
 		embedding        BLOB,
 		embedding_hash   BLOB,
-		memory_type      TEXT NOT NULL CHECK (memory_type IN ('fact', 'observation', 'inference')),
+		memory_type      TEXT NOT NULL CHECK (memory_type IN ('fact', 'observation', 'inference', 'task')),
 		domain_tag       TEXT NOT NULL,
 		confidence_score REAL NOT NULL CHECK (confidence_score BETWEEN 0 AND 1),
 		status           TEXT NOT NULL DEFAULT 'proposed',
@@ -381,6 +381,15 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 		operation   TEXT,
 		expires_at  TEXT
 	);
+
+	CREATE TABLE IF NOT EXISTS memory_links (
+		source_id  TEXT NOT NULL REFERENCES memories(memory_id),
+		target_id  TEXT NOT NULL REFERENCES memories(memory_id),
+		link_type  TEXT NOT NULL DEFAULT 'related',
+		created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+		PRIMARY KEY (source_id, target_id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_memory_links_target ON memory_links(target_id);
 	`
 
 	if _, err := s.conn.ExecContext(ctx, schema); err != nil {
@@ -389,6 +398,9 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 
 	// Migration: add provider column if missing.
 	s.migrateProvider(ctx)
+
+	// Migration: add task support (task_status column + update CHECK constraint).
+	s.migrateTaskSupport(ctx)
 
 	// Seed default domains
 	seeds := []struct {
@@ -424,6 +436,60 @@ func (s *SQLiteStore) migrateProvider(ctx context.Context) {
 	}
 	_, _ = s.conn.ExecContext(ctx, `ALTER TABLE memories ADD COLUMN provider TEXT NOT NULL DEFAULT ''`)
 	_, _ = s.conn.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memories_provider ON memories(provider)`)
+}
+
+// migrateTaskSupport adds task_status column and updates the memory_type CHECK constraint
+// to support 'task' type memories. For existing databases, we must recreate the table
+// since SQLite doesn't support ALTER TABLE to modify CHECK constraints.
+func (s *SQLiteStore) migrateTaskSupport(ctx context.Context) {
+	// Check if task_status column already exists
+	row := s.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name='task_status'`)
+	var count int
+	if err := row.Scan(&count); err != nil || count > 0 {
+		return // already migrated or error
+	}
+
+	// Add task_status column
+	_, _ = s.conn.ExecContext(ctx, `ALTER TABLE memories ADD COLUMN task_status TEXT DEFAULT '' CHECK (task_status IN ('', 'planned', 'in_progress', 'done', 'dropped'))`)
+
+	// Recreate the table to update the memory_type CHECK constraint.
+	// SQLite doesn't allow altering CHECK constraints, so we use the rename-and-copy approach.
+	_, err := s.conn.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS memories_new (
+			memory_id        TEXT PRIMARY KEY,
+			submitting_agent TEXT NOT NULL,
+			content          TEXT NOT NULL,
+			content_hash     BLOB NOT NULL,
+			embedding        BLOB,
+			embedding_hash   BLOB,
+			memory_type      TEXT NOT NULL CHECK (memory_type IN ('fact', 'observation', 'inference', 'task')),
+			domain_tag       TEXT NOT NULL,
+			confidence_score REAL NOT NULL CHECK (confidence_score BETWEEN 0 AND 1),
+			status           TEXT NOT NULL DEFAULT 'proposed',
+			parent_hash      TEXT,
+			classification   INTEGER NOT NULL DEFAULT 1,
+			created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+			committed_at     TEXT,
+			deprecated_at    TEXT,
+			provider         TEXT NOT NULL DEFAULT '',
+			task_status      TEXT DEFAULT '' CHECK (task_status IN ('', 'planned', 'in_progress', 'done', 'dropped'))
+		)`)
+	if err != nil {
+		return
+	}
+
+	_, err = s.conn.ExecContext(ctx, `INSERT INTO memories_new SELECT memory_id, submitting_agent, content, content_hash, embedding, embedding_hash, memory_type, domain_tag, confidence_score, status, parent_hash, classification, created_at, committed_at, deprecated_at, provider, '' FROM memories`)
+	if err != nil {
+		_, _ = s.conn.ExecContext(ctx, `DROP TABLE IF EXISTS memories_new`)
+		return
+	}
+
+	_, _ = s.conn.ExecContext(ctx, `DROP TABLE memories`)
+	_, _ = s.conn.ExecContext(ctx, `ALTER TABLE memories_new RENAME TO memories`)
+	_, _ = s.conn.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memories_domain ON memories(domain_tag)`)
+	_, _ = s.conn.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status)`)
+	_, _ = s.conn.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memories_provider ON memories(provider)`)
+	_, _ = s.conn.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memories_task_status ON memories(task_status) WHERE task_status != ''`)
 }
 
 // --- Helper functions ---
@@ -546,8 +612,8 @@ func (s *SQLiteStore) InsertMemory(ctx context.Context, record *memory.MemoryRec
 
 	_, err = s.conn.ExecContext(ctx,
 		`INSERT INTO memories (memory_id, submitting_agent, content, content_hash, embedding, embedding_hash,
-			memory_type, domain_tag, provider, confidence_score, status, parent_hash, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			memory_type, domain_tag, provider, confidence_score, status, parent_hash, task_status, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (memory_id) DO UPDATE SET
 			submitting_agent = excluded.submitting_agent,
 			status = excluded.status,
@@ -555,7 +621,7 @@ func (s *SQLiteStore) InsertMemory(ctx context.Context, record *memory.MemoryRec
 		record.MemoryID, record.SubmittingAgent, content, record.ContentHash,
 		encEmb, record.EmbeddingHash,
 		string(record.MemoryType), record.DomainTag, record.Provider, record.ConfidenceScore,
-		string(record.Status), record.ParentHash, formatTime(record.CreatedAt))
+		string(record.Status), record.ParentHash, string(record.TaskStatus), formatTime(record.CreatedAt))
 	if err != nil {
 		return fmt.Errorf("insert memory: %w", err)
 	}
@@ -565,17 +631,17 @@ func (s *SQLiteStore) InsertMemory(ctx context.Context, record *memory.MemoryRec
 func (s *SQLiteStore) GetMemory(ctx context.Context, memoryID string) (*memory.MemoryRecord, error) {
 	row := s.conn.QueryRowContext(ctx,
 		`SELECT memory_id, submitting_agent, content, content_hash, embedding, embedding_hash,
-			memory_type, domain_tag, provider, confidence_score, status, parent_hash, created_at, committed_at, deprecated_at
+			memory_type, domain_tag, provider, confidence_score, status, parent_hash, created_at, committed_at, deprecated_at, COALESCE(task_status, '')
 		FROM memories WHERE memory_id = ?`, memoryID)
 
 	var r memory.MemoryRecord
-	var mt, st, createdAt string
+	var mt, st, createdAt, taskStatus string
 	var embData []byte
 	var parentHash, committedAt, deprecatedAt *string
 
 	err := row.Scan(&r.MemoryID, &r.SubmittingAgent, &r.Content, &r.ContentHash,
 		&embData, &r.EmbeddingHash, &mt, &r.DomainTag, &r.Provider, &r.ConfidenceScore,
-		&st, &parentHash, &createdAt, &committedAt, &deprecatedAt)
+		&st, &parentHash, &createdAt, &committedAt, &deprecatedAt, &taskStatus)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("memory not found: %s", memoryID)
@@ -585,6 +651,7 @@ func (s *SQLiteStore) GetMemory(ctx context.Context, memoryID string) (*memory.M
 
 	r.MemoryType = memory.MemoryType(mt)
 	r.Status = memory.MemoryStatus(st)
+	r.TaskStatus = memory.TaskStatus(taskStatus)
 
 	// Decrypt content and embedding if encrypted.
 	if decContent, decErr := s.decryptContent(r.Content); decErr == nil {
@@ -636,7 +703,7 @@ func (s *SQLiteStore) QuerySimilar(ctx context.Context, embedding []float32, opt
 
 	query := `SELECT memory_id, submitting_agent, content, content_hash, embedding,
 		memory_type, domain_tag, provider, confidence_score, status, parent_hash, created_at,
-		committed_at, deprecated_at
+		committed_at, deprecated_at, COALESCE(task_status, '')
 		FROM memories WHERE embedding IS NOT NULL`
 	var args []any
 
@@ -672,19 +739,20 @@ func (s *SQLiteStore) QuerySimilar(ctx context.Context, embedding []float32, opt
 
 	for rows.Next() {
 		var r memory.MemoryRecord
-		var mt, st, createdAt string
+		var mt, st, createdAt, taskStatus string
 		var embData []byte
 		var parentHash, committedAt, deprecatedAt *string
 
 		scanErr := rows.Scan(&r.MemoryID, &r.SubmittingAgent, &r.Content, &r.ContentHash,
 			&embData, &mt, &r.DomainTag, &r.Provider, &r.ConfidenceScore,
-			&st, &parentHash, &createdAt, &committedAt, &deprecatedAt)
+			&st, &parentHash, &createdAt, &committedAt, &deprecatedAt, &taskStatus)
 		if scanErr != nil {
 			return nil, fmt.Errorf("scan row: %w", scanErr)
 		}
 
 		r.MemoryType = memory.MemoryType(mt)
 		r.Status = memory.MemoryStatus(st)
+		r.TaskStatus = memory.TaskStatus(taskStatus)
 
 		// Decrypt content and embedding if encrypted.
 		if decContent, decErr := s.decryptContent(r.Content); decErr == nil {
@@ -871,7 +939,7 @@ func (s *SQLiteStore) ListMemories(ctx context.Context, opts ListOptions) ([]*me
 	countQuery := `SELECT COUNT(*) FROM memories WHERE 1=1`
 	query := `SELECT memory_id, submitting_agent, content, content_hash,
 		memory_type, domain_tag, provider, confidence_score, status, parent_hash, created_at,
-		committed_at, deprecated_at FROM memories WHERE 1=1`
+		committed_at, deprecated_at, COALESCE(task_status, '') FROM memories WHERE 1=1`
 	var args []any
 
 	if opts.DomainTag != "" {
@@ -927,15 +995,16 @@ func (s *SQLiteStore) ListMemories(ctx context.Context, opts ListOptions) ([]*me
 	var results []*memory.MemoryRecord
 	for rows.Next() {
 		var r memory.MemoryRecord
-		var mt, st, createdAt string
+		var mt, st, createdAt, taskStatus string
 		var parentHash, committedAt, deprecatedAt *string
 		if scanErr := rows.Scan(&r.MemoryID, &r.SubmittingAgent, &r.Content, &r.ContentHash,
 			&mt, &r.DomainTag, &r.Provider, &r.ConfidenceScore, &st, &parentHash,
-			&createdAt, &committedAt, &deprecatedAt); scanErr != nil {
+			&createdAt, &committedAt, &deprecatedAt, &taskStatus); scanErr != nil {
 			return nil, 0, fmt.Errorf("scan memory: %w", scanErr)
 		}
 		r.MemoryType = memory.MemoryType(mt)
 		r.Status = memory.MemoryStatus(st)
+		r.TaskStatus = memory.TaskStatus(taskStatus)
 		r.CreatedAt = parseTime(createdAt)
 		r.CommittedAt = parseTimePtr(committedAt)
 		r.DeprecatedAt = parseTimePtr(deprecatedAt)
@@ -2031,7 +2100,7 @@ func (s *SQLiteStore) GetCleanupCandidates(ctx context.Context, observationTTLDa
 	// Find non-deprecated observations and low-confidence memories
 	rows, err := s.conn.QueryContext(ctx,
 		`SELECT memory_id, submitting_agent, content, content_hash, embedding, embedding_hash,
-			memory_type, domain_tag, provider, confidence_score, status, parent_hash, created_at, committed_at, deprecated_at
+			memory_type, domain_tag, provider, confidence_score, status, parent_hash, created_at, committed_at, deprecated_at, COALESCE(task_status, '')
 		FROM memories
 		WHERE status NOT IN ('deprecated')
 		AND (
@@ -2084,19 +2153,20 @@ func (s *SQLiteStore) DeprecateMemories(ctx context.Context, memoryIDs []string)
 // scanMemoryRow scans a single memory row from a *sql.Rows.
 func (s *SQLiteStore) scanMemoryRow(rows *sql.Rows) (*memory.MemoryRecord, error) {
 	var r memory.MemoryRecord
-	var mt, st, createdAt string
+	var mt, st, createdAt, taskStatus string
 	var embData []byte
 	var parentHash, committedAt, deprecatedAt *string
 
 	err := rows.Scan(&r.MemoryID, &r.SubmittingAgent, &r.Content, &r.ContentHash,
 		&embData, &r.EmbeddingHash, &mt, &r.DomainTag, &r.Provider, &r.ConfidenceScore,
-		&st, &parentHash, &createdAt, &committedAt, &deprecatedAt)
+		&st, &parentHash, &createdAt, &committedAt, &deprecatedAt, &taskStatus)
 	if err != nil {
 		return nil, fmt.Errorf("scan memory: %w", err)
 	}
 
 	r.MemoryType = memory.MemoryType(mt)
 	r.Status = memory.MemoryStatus(st)
+	r.TaskStatus = memory.TaskStatus(taskStatus)
 
 	if decContent, decErr := s.decryptContent(r.Content); decErr == nil {
 		r.Content = decContent
@@ -2112,4 +2182,88 @@ func (s *SQLiteStore) scanMemoryRow(rows *sql.Rows) (*memory.MemoryRecord, error
 	}
 
 	return &r, nil
+}
+
+// UpdateTaskStatus updates the task_status of a task memory.
+func (s *SQLiteStore) UpdateTaskStatus(ctx context.Context, memoryID string, taskStatus memory.TaskStatus) error {
+	result, err := s.conn.ExecContext(ctx,
+		`UPDATE memories SET task_status = ? WHERE memory_id = ? AND memory_type = 'task'`,
+		string(taskStatus), memoryID)
+	if err != nil {
+		return fmt.Errorf("update task status: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("task not found: %s", memoryID)
+	}
+	return nil
+}
+
+// LinkMemories creates a link between two memories.
+func (s *SQLiteStore) LinkMemories(ctx context.Context, sourceID, targetID, linkType string) error {
+	_, err := s.conn.ExecContext(ctx,
+		`INSERT INTO memory_links (source_id, target_id, link_type) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`,
+		sourceID, targetID, linkType)
+	if err != nil {
+		return fmt.Errorf("link memories: %w", err)
+	}
+	return nil
+}
+
+// GetLinkedMemories returns all memories linked to the given memory ID.
+func (s *SQLiteStore) GetLinkedMemories(ctx context.Context, memoryID string) ([]memory.MemoryLink, error) {
+	rows, err := s.conn.QueryContext(ctx,
+		`SELECT source_id, target_id, link_type, created_at FROM memory_links
+		WHERE source_id = ? OR target_id = ?`, memoryID, memoryID)
+	if err != nil {
+		return nil, fmt.Errorf("get linked memories: %w", err)
+	}
+	defer rows.Close()
+
+	var links []memory.MemoryLink
+	for rows.Next() {
+		var l memory.MemoryLink
+		if err := rows.Scan(&l.SourceID, &l.TargetID, &l.LinkType, &l.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan link: %w", err)
+		}
+		links = append(links, l)
+	}
+	return links, rows.Err()
+}
+
+// GetOpenTasks returns all task memories that are planned or in_progress.
+func (s *SQLiteStore) GetOpenTasks(ctx context.Context, domain string, provider string) ([]*memory.MemoryRecord, error) {
+	query := `SELECT memory_id, submitting_agent, content, content_hash, embedding, embedding_hash,
+		memory_type, domain_tag, provider, confidence_score, status, parent_hash, created_at, committed_at, deprecated_at, COALESCE(task_status, '')
+		FROM memories
+		WHERE memory_type = 'task'
+		AND task_status IN ('planned', 'in_progress')
+		AND status NOT IN ('deprecated')`
+	var args []any
+
+	if domain != "" {
+		query += ` AND domain_tag = ?`
+		args = append(args, domain)
+	}
+	if provider != "" {
+		query += ` AND (provider = ? OR provider = '')`
+		args = append(args, provider)
+	}
+	query += ` ORDER BY created_at DESC`
+
+	rows, err := s.conn.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("get open tasks: %w", err)
+	}
+	defer rows.Close()
+
+	var records []*memory.MemoryRecord
+	for rows.Next() {
+		rec, err := s.scanMemoryRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, rec)
+	}
+	return records, rows.Err()
 }

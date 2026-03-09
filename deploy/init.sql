@@ -15,15 +15,28 @@ CREATE TABLE memories (
     content_hash     BYTEA            NOT NULL,
     embedding        vector(768),
     embedding_hash   BYTEA,
-    memory_type      TEXT             NOT NULL CHECK (memory_type IN ('fact', 'observation', 'inference')),
+    memory_type      TEXT             NOT NULL CHECK (memory_type IN ('fact', 'observation', 'inference', 'task')),
     domain_tag       TEXT             NOT NULL,
     confidence_score DOUBLE PRECISION NOT NULL CHECK (confidence_score BETWEEN 0 AND 1),
     status           TEXT             NOT NULL DEFAULT 'proposed',
     parent_hash      TEXT,
+    task_status      TEXT             DEFAULT '' CHECK (task_status IN ('', 'planned', 'in_progress', 'done', 'dropped')),
     created_at       TIMESTAMPTZ      NOT NULL DEFAULT NOW(),
     committed_at     TIMESTAMPTZ,
     deprecated_at    TIMESTAMPTZ
 );
+
+-- ============================================================
+-- 1b. memory_links
+-- ============================================================
+CREATE TABLE memory_links (
+    source_id  UUID NOT NULL REFERENCES memories(memory_id),
+    target_id  UUID NOT NULL REFERENCES memories(memory_id),
+    link_type  TEXT NOT NULL DEFAULT 'related',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (source_id, target_id)
+);
+CREATE INDEX idx_memory_links_target ON memory_links(target_id);
 
 -- ============================================================
 -- 2. knowledge_triples

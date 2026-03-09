@@ -56,7 +56,7 @@ func TestHandleToolsList(t *testing.T) {
 
 	result := resp.Result.(map[string]any)
 	tools := result["tools"].([]map[string]any)
-	assert.Len(t, tools, 10)
+	assert.Len(t, tools, 12)
 
 	// Collect tool names
 	names := make(map[string]bool)
