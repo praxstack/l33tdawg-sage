@@ -64,6 +64,7 @@ func NewDashboardHandler(memStore store.MemoryStore, version string) *DashboardH
 		store:   memStore,
 		SSE:     NewSSEBroadcaster(),
 		Version: version,
+		Pairing: NewPairingStore(),
 	}
 	// If the store implements PreferencesStore, wire it up.
 	if ps, ok := memStore.(PreferencesStore); ok {

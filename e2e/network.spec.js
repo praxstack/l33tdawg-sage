@@ -293,4 +293,360 @@ test.describe('Add Agent Wizard', () => {
         await page.locator('.wizard-close, .detail-close').first().click();
         await expect(wizard).not.toBeVisible();
     });
+
+    test('Step 3: shows connect method cards (Bundle and LAN)', async ({ page }) => {
+        await page.goto(`${BASE}/ui/#/network`);
+        await page.waitForSelector('.agent-card-add');
+        await page.locator('.agent-card-add').click();
+
+        // Step 1 → fill and advance
+        await page.locator('.wizard-input').first().fill('Test Agent');
+        await page.locator('.btn').filter({ hasText: 'Next' }).click();
+
+        // Step 2 → advance
+        await page.locator('.btn').filter({ hasText: 'Next' }).click();
+
+        // Step 3 — should show two connect cards
+        const connectCards = page.locator('.connect-card');
+        await expect(connectCards).toHaveCount(2);
+
+        // Bundle card
+        await expect(connectCards.nth(0)).toContainText('Download Bundle');
+        await expect(connectCards.nth(0)).toHaveClass(/selected/); // default selection
+
+        // LAN card
+        await expect(connectCards.nth(1)).toContainText('Easy Setup');
+        await expect(connectCards.nth(1)).toContainText('LAN');
+    });
+
+    test('Step 3: can switch connect method to LAN', async ({ page }) => {
+        await page.goto(`${BASE}/ui/#/network`);
+        await page.waitForSelector('.agent-card-add');
+        await page.locator('.agent-card-add').click();
+
+        await page.locator('.wizard-input').first().fill('Test Agent');
+        await page.locator('.btn').filter({ hasText: 'Next' }).click();
+        await page.locator('.btn').filter({ hasText: 'Next' }).click();
+
+        // Click LAN card
+        await page.locator('.connect-card').nth(1).click();
+        await expect(page.locator('.connect-card').nth(1)).toHaveClass(/selected/);
+
+        // Summary should show LAN Pairing
+        await expect(page.locator('.summary-card')).toContainText('LAN Pairing');
+    });
+
+    test('Step 3: shows warning banner about chain pause', async ({ page }) => {
+        await page.goto(`${BASE}/ui/#/network`);
+        await page.waitForSelector('.agent-card-add');
+        await page.locator('.agent-card-add').click();
+
+        await page.locator('.wizard-input').first().fill('Test Agent');
+        await page.locator('.btn').filter({ hasText: 'Next' }).click();
+        await page.locator('.btn').filter({ hasText: 'Next' }).click();
+
+        await expect(page.locator('.warning-banner')).toContainText('pause the chain');
+    });
+
+    test('Step 3: shows summary with all settings', async ({ page }) => {
+        await page.goto(`${BASE}/ui/#/network`);
+        await page.waitForSelector('.agent-card-add');
+        await page.locator('.agent-card-add').click();
+
+        await page.locator('.wizard-input').first().fill('My Agent');
+        await page.locator('.btn').filter({ hasText: 'Next' }).click();
+        await page.locator('.btn').filter({ hasText: 'Next' }).click();
+
+        const summary = page.locator('.summary-card');
+        await expect(summary).toContainText('My Agent');
+        await expect(summary).toContainText('member'); // default role
+        await expect(summary).toContainText('Bundle Download'); // default connect
+    });
+});
+
+test.describe('Key Rotation', () => {
+    test('shows Rotate Key button in action bar', async ({ page }) => {
+        await page.goto(`${BASE}/ui/#/network`);
+        await page.waitForSelector('.agent-list');
+
+        const firstCard = page.locator('.agent-card-row').first();
+        await firstCard.click();
+        await page.waitForSelector('.agent-action-bar');
+
+        const rotateBtn = page.locator('.agent-action-bar .btn').filter({ hasText: 'Rotate Key' });
+        await expect(rotateBtn).toBeVisible();
+    });
+
+    test('Rotate Key opens confirmation modal', async ({ page }) => {
+        await page.goto(`${BASE}/ui/#/network`);
+        await page.waitForSelector('.agent-list');
+
+        const firstCard = page.locator('.agent-card-row').first();
+        await firstCard.click();
+        await page.waitForSelector('.agent-action-bar');
+
+        await page.locator('.agent-action-bar .btn').filter({ hasText: 'Rotate Key' }).click();
+
+        // Confirmation modal should appear
+        const modal = page.locator('.wizard-overlay');
+        await expect(modal).toBeVisible();
+        await expect(modal).toContainText('Rotate Agent Key');
+        await expect(modal).toContainText('new Ed25519 identity key');
+        await expect(modal).toContainText('old key will be permanently retired');
+    });
+
+    test('Rotate Key confirmation can be cancelled', async ({ page }) => {
+        await page.goto(`${BASE}/ui/#/network`);
+        await page.waitForSelector('.agent-list');
+
+        const firstCard = page.locator('.agent-card-row').first();
+        await firstCard.click();
+        await page.waitForSelector('.agent-action-bar');
+
+        await page.locator('.agent-action-bar .btn').filter({ hasText: 'Rotate Key' }).click();
+        await expect(page.locator('.wizard-overlay')).toBeVisible();
+
+        // Cancel button
+        await page.locator('.wizard-footer .btn').filter({ hasText: 'Cancel' }).click();
+        await expect(page.locator('.wizard-overlay')).not.toBeVisible();
+    });
+
+    test('Rotate Key confirmation has warning banner', async ({ page }) => {
+        await page.goto(`${BASE}/ui/#/network`);
+        await page.waitForSelector('.agent-list');
+
+        const firstCard = page.locator('.agent-card-row').first();
+        await firstCard.click();
+        await page.waitForSelector('.agent-action-bar');
+
+        await page.locator('.agent-action-bar .btn').filter({ hasText: 'Rotate Key' }).click();
+
+        await expect(page.locator('.wizard-overlay .warning-banner')).toContainText('new bundle after rotation');
+    });
+});
+
+test.describe('API — Pairing & Rotation', () => {
+    test('pairing endpoint returns code for valid agent', async ({ request }) => {
+        // First get an agent ID
+        const agentsRes = await request.get(`${BASE}/v1/dashboard/network/agents`);
+        const agents = await agentsRes.json();
+        expect(agents.agents.length).toBeGreaterThanOrEqual(1);
+        const agentId = agents.agents[0].agent_id;
+
+        // Create pairing code
+        const pairRes = await request.post(`${BASE}/v1/dashboard/network/agents/${agentId}/pair`);
+        expect(pairRes.ok()).toBeTruthy();
+        const pairData = await pairRes.json();
+        expect(pairData.code).toBeDefined();
+        expect(pairData.code).toMatch(/^SAG-[A-Z0-9]+$/);
+        expect(pairData.expires_at).toBeDefined();
+        expect(pairData.ttl_seconds).toBeGreaterThanOrEqual(895); // ~15 min, allow for rounding
+    });
+
+    test('pairing code is consumed after redeem attempt', async ({ request }) => {
+        // Create a pairing code
+        const agentsRes = await request.get(`${BASE}/v1/dashboard/network/agents`);
+        const agents = await agentsRes.json();
+        const agentId = agents.agents[0].agent_id;
+
+        const pairRes = await request.post(`${BASE}/v1/dashboard/network/agents/${agentId}/pair`);
+        const pairData = await pairRes.json();
+        expect(pairData.code).toBeDefined();
+
+        // First redeem attempt — may fail (no bundle for auto-seeded agents) but consumes the code
+        await request.get(`${BASE}/v1/dashboard/network/pair/${pairData.code}`);
+
+        // Second attempt — code should be consumed, returns 404
+        const redeemRes2 = await request.get(`${BASE}/v1/dashboard/network/pair/${pairData.code}`);
+        expect(redeemRes2.ok()).toBeFalsy();
+    });
+
+    test('invalid pairing code returns 404', async ({ request }) => {
+        const res = await request.get(`${BASE}/v1/dashboard/network/pair/SAG-ZZZZZ`);
+        expect(res.ok()).toBeFalsy();
+    });
+
+    test('multiple pairing codes can be generated', async ({ request }) => {
+        const agentsRes = await request.get(`${BASE}/v1/dashboard/network/agents`);
+        const agents = await agentsRes.json();
+        const agentId = agents.agents[0].agent_id;
+
+        const res1 = await request.post(`${BASE}/v1/dashboard/network/agents/${agentId}/pair`);
+        const res2 = await request.post(`${BASE}/v1/dashboard/network/agents/${agentId}/pair`);
+        const data1 = await res1.json();
+        const data2 = await res2.json();
+
+        // Each call should produce a unique code
+        expect(data1.code).not.toBe(data2.code);
+    });
+
+    test('templates API has expected fields', async ({ request }) => {
+        const res = await request.get(`${BASE}/v1/dashboard/network/templates`);
+        expect(res.ok()).toBeTruthy();
+        const body = await res.json();
+        expect(body.templates.length).toBeGreaterThanOrEqual(1);
+        // Each template should have name, role, bio, clearance
+        const t = body.templates[0];
+        expect(t.name).toBeDefined();
+        expect(t.role).toBeDefined();
+        expect(t.bio).toBeDefined();
+        expect(t.clearance).toBeDefined();
+    });
+});
+
+test.describe('Access Control — Domain & Clearance Interactions', () => {
+    test.beforeEach(async ({ page }) => {
+        await page.goto(`${BASE}/ui/#/network`);
+        await page.waitForSelector('.agent-list', { timeout: 10000 });
+
+        // Expand first agent and switch to Access Control tab
+        const firstCard = page.locator('.agent-card-row').first();
+        await firstCard.click();
+        await page.waitForSelector('.agent-expanded.open');
+        await page.locator('.agent-tab').filter({ hasText: 'Access Control' }).click();
+    });
+
+    test('domain matrix checkbox toggle enables Save button', async ({ page }) => {
+        const matrix = page.locator('.domain-matrix');
+        await expect(matrix).toBeVisible();
+
+        // Find a checkbox in the domain matrix and toggle it
+        const checkbox = matrix.locator('input[type="checkbox"]').first();
+        await checkbox.evaluate(el => el.click());
+
+        const saveBtn = page.locator('.access-save-bar .btn-primary');
+        await expect(saveBtn).toBeEnabled();
+    });
+
+    test('clearance slider change enables Save button', async ({ page }) => {
+        const slider = page.locator('.clearance-row input[type="range"]');
+        await expect(slider).toBeVisible();
+
+        // Change slider value via JS
+        await slider.evaluate(el => {
+            const newVal = parseInt(el.value) >= parseInt(el.max) ? parseInt(el.min) + 1 : parseInt(el.value) + 1;
+            el.value = newVal;
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+
+        const saveBtn = page.locator('.access-save-bar .btn-primary');
+        await expect(saveBtn).toBeEnabled();
+    });
+
+    test('Save button saves and shows confirmation', async ({ page }) => {
+        // Make a change to enable save
+        const slider = page.locator('.clearance-row input[type="range"]');
+        await slider.evaluate(el => {
+            const newVal = parseInt(el.value) >= parseInt(el.max) ? parseInt(el.min) + 1 : parseInt(el.value) + 1;
+            el.value = newVal;
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+
+        const saveBtn = page.locator('.access-save-bar .btn-primary');
+        await expect(saveBtn).toBeEnabled();
+        await saveBtn.click();
+
+        // Should show "Saved" confirmation text
+        const savedConfirm = page.locator('.access-saved');
+        await expect(savedConfirm).toBeVisible({ timeout: 5000 });
+        await expect(savedConfirm).toContainText('Saved');
+    });
+});
+
+test.describe('Edit Mode — Save Persists', () => {
+    test('saving name change in edit mode succeeds', async ({ page }) => {
+        await page.goto(`${BASE}/ui/#/network`);
+        await page.waitForSelector('.agent-list', { timeout: 10000 });
+
+        const firstCard = page.locator('.agent-card-row').first();
+        await firstCard.click();
+        await page.waitForSelector('.agent-action-bar');
+
+        // Enter edit mode
+        await page.locator('.agent-action-bar .btn').filter({ hasText: 'Edit' }).click();
+
+        const nameInput = page.locator('.agent-overview-grid input.wizard-input');
+        await expect(nameInput).toBeVisible();
+
+        // Read current name and modify it
+        const currentName = await nameInput.inputValue();
+        const newName = currentName + ' E2E';
+        await nameInput.fill(newName);
+
+        // Click Save
+        await page.locator('.agent-action-bar .btn-primary').filter({ hasText: 'Save' }).click();
+
+        // After save, edit mode should exit (no input visible)
+        await expect(nameInput).not.toBeVisible({ timeout: 5000 });
+
+        // Restore original name to avoid test pollution
+        await page.locator('.agent-action-bar .btn').filter({ hasText: 'Edit' }).click();
+        const restoredInput = page.locator('.agent-overview-grid input.wizard-input');
+        await restoredInput.fill(currentName);
+        await page.locator('.agent-action-bar .btn-primary').filter({ hasText: 'Save' }).click();
+    });
+});
+
+test.describe('Wizard — Template & Step 3 Defaults', () => {
+    test('template selection populates bio field', async ({ page }) => {
+        await page.goto(`${BASE}/ui/#/network`);
+        await page.waitForSelector('.agent-card-add');
+        await page.locator('.agent-card-add').click();
+
+        // Wait for templates to load (async fetch)
+        const templateSelect = page.locator('select').first();
+        await expect(templateSelect).toBeVisible();
+
+        // Wait for template options to populate (fetched from /templates API)
+        await page.waitForFunction(() => {
+            const sel = document.querySelector('select');
+            return sel && sel.options.length >= 2;
+        }, { timeout: 5000 });
+
+        const options = templateSelect.locator('option');
+        const optionCount = await options.count();
+        expect(optionCount).toBeGreaterThanOrEqual(2);
+
+        // Select the first actual template (index 1, since 0 is placeholder)
+        await templateSelect.selectOption({ index: 1 });
+
+        // Bio textarea should now be populated
+        const bioTextarea = page.locator('.wizard-textarea');
+        await expect(bioTextarea).toBeVisible();
+        const bioValue = await bioTextarea.inputValue();
+        expect(bioValue.length).toBeGreaterThan(0);
+    });
+
+    test('Step 3 — Bundle card is selected by default', async ({ page }) => {
+        await page.goto(`${BASE}/ui/#/network`);
+        await page.waitForSelector('.agent-card-add');
+        await page.locator('.agent-card-add').click();
+
+        // Step 1 → fill and advance
+        await page.locator('.wizard-input').first().fill('Default Test');
+        await page.locator('.btn').filter({ hasText: 'Next' }).click();
+
+        // Step 2 → advance
+        await page.locator('.btn').filter({ hasText: 'Next' }).click();
+
+        // Step 3 — Bundle card (first connect card) should have 'selected' class
+        const bundleCard = page.locator('.connect-card').nth(0);
+        await expect(bundleCard).toHaveClass(/selected/);
+    });
+});
+
+test.describe('Agent Card — Role Badge', () => {
+    test('agent cards display role badges', async ({ page }) => {
+        await page.goto(`${BASE}/ui/#/network`);
+        await page.waitForSelector('.agent-list', { timeout: 10000 });
+
+        // At least one agent card should show a role badge
+        const roleBadges = page.locator('.agent-role-badge');
+        const count = await roleBadges.count();
+        expect(count).toBeGreaterThanOrEqual(1);
+
+        // Badge text should be a valid role
+        const badgeText = await roleBadges.first().textContent();
+        expect(['admin', 'member', 'observer']).toContain(badgeText.trim().toLowerCase());
+    });
 });

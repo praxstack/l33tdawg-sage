@@ -1,6 +1,6 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
-import { fetchStats, fetchGraph, fetchMemories, deleteMemory, fetchHealth, checkAuth, login, importMemories, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger } from './api.js';
+import { fetchStats, fetchGraph, fetchMemories, deleteMemory, fetchHealth, checkAuth, login, importMemories, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger } from './api.js';
 
 const { h, render, createContext } = preact;
 const { useState, useEffect, useRef, useCallback, useContext } = preactHooks;
@@ -511,6 +511,7 @@ function BrainView({ sse, onSelectMemory }) {
             </div>
 
             <div class="domain-bar">
+                <${HelpTip} text="Click a domain to filter the graph. Click again to show all." />
                 ${domains.map(d => html`
                     <button class="domain-pill ${filterDomains.has(d) ? 'active' : ''}"
                             style="color: ${getDomainColor(d)}; ${filterDomains.has(d) ? `background: ${getDomainColor(d)}20` : ''}"
@@ -791,6 +792,7 @@ function SearchPage({ onSelectMemory }) {
             <input class="search-page-input" type="text" placeholder="Search memories..."
                    value=${query} onInput=${handleSearch} />
             <div class="search-filters">
+                <${HelpTip} text="Search across all committed memories by content, domain, or tags. Results are ranked by relevance." />
                 <select class="filter-select" value=${domainFilter} onChange=${handleDomainFilter}>
                     <option value="">All domains</option>
                     ${domains.map(d => html`<option value=${d}>${d}</option>`)}
@@ -1983,7 +1985,7 @@ function HealthBar() {
             </div>
             <div class="health-sep"></div>
             <div class="health-item">
-                <span class="health-num">${totalMem}</span> memories
+                <span class="health-num">${totalMem}</span> memories <${HelpTip} text="Total committed memories across all domains and agents." />
             </div>
             <div class="health-sep"></div>
             <div class="health-item">
@@ -2128,11 +2130,19 @@ function HelpOverlay({ onClose }) {
                     </div>
                     <div class="guide-detail-item">
                         <div class="guide-detail-label">Adding an agent</div>
-                        <div class="guide-detail-desc">Click the "+" card to launch the Add Agent wizard. You'll set the agent's identity (name, avatar, role), permissions (clearance, domain access), and choose a connection method — either download a configuration bundle or use a LAN pairing code for easy setup.</div>
+                        <div class="guide-detail-desc">Click the "+" card to launch the Add Agent wizard. You'll set the agent's identity (name, avatar, role), permissions (clearance, domain access), and choose a connection method — either download a configuration bundle or use LAN pairing. The LAN pairing code (e.g. SAG-X7K) is valid for 15 minutes and single-use. On the new machine, run <code>sage-lite pair CODE</code> or enter it in the setup wizard. The new agent auto-fetches its keys and config over the local network — no manual file copying needed.</div>
                     </div>
                     <div class="guide-detail-item">
                         <div class="guide-detail-label">Overview tab</div>
                         <div class="guide-detail-desc">Shows the agent's identity info: name, status, memory count, clearance level, first/last seen timestamps, agent ID (Ed25519 public key), validator key, and bio. Click Edit to modify name and bio.</div>
+                    </div>
+                    <div class="guide-detail-item">
+                        <div class="guide-detail-label">Activity tab</div>
+                        <div class="guide-detail-desc">The Activity tab shows per-agent statistics — total memories contributed, domains active in, and a timeline of recent memory operations. Use this to monitor which agents are most active and what knowledge they're producing.</div>
+                    </div>
+                    <div class="guide-detail-item">
+                        <div class="guide-detail-label">Key rotation</div>
+                        <div class="guide-detail-desc">If an agent's key is compromised or you want to rotate keys proactively, use the Rotate Key button in the agent's Overview tab. This generates a new Ed25519 identity, re-attributes all existing memories to the new key in a single transaction, and triggers a chain redeployment. The old key is permanently retired. You'll need to distribute a new bundle to the agent afterwards.</div>
                     </div>
                     <div class="guide-detail-item">
                         <div class="guide-detail-label">Removing an agent</div>
@@ -2503,6 +2513,9 @@ function NetworkPage() {
     const [editing, setEditing] = useState(false);
     const [editName, setEditName] = useState('');
     const [editBio, setEditBio] = useState('');
+    // Key rotation state
+    const [showRotateConfirm, setShowRotateConfirm] = useState(null);
+    const [rotating, setRotating] = useState(false);
 
     const loadAgents = useCallback(async () => {
         try {
@@ -2593,6 +2606,19 @@ function NetworkPage() {
         } catch (e) { alert('Failed to remove agent'); }
     }, [loadAgents, startRedeployPoll]);
 
+    const handleRotateKey = useCallback(async (agent) => {
+        setRotating(true);
+        try {
+            const res = await rotateAgentKey(agent.agent_id);
+            if (res.error) { alert(res.error); setRotating(false); return; }
+            const rdRes = await startRedeploy('rotate_key', res.new_agent_id);
+            if (rdRes.error) alert('Key rotated but redeployment failed: ' + rdRes.error);
+            else { setRedeployStatus(rdRes); startRedeployPoll(); }
+            setShowRotateConfirm(null); setExpandedId(null); loadAgents();
+        } catch (e) { alert('Failed to rotate key'); }
+        setRotating(false);
+    }, [loadAgents, startRedeployPoll]);
+
     if (loading) return html`<div class="network-page"><p style="color:var(--text-muted);text-align:center;padding:40px;">Loading agents...</p></div>`;
 
     const isRedeploying = redeployStatus?.status && !['idle','completed','failed'].includes(redeployStatus.status);
@@ -2625,6 +2651,7 @@ function NetworkPage() {
                                     <span style="display:flex;align-items:center;gap:6px;">
                                         <span class="agent-status-dot ${agent.status}"></span>
                                         ${agent.status}
+                                        <${HelpTip} text="Green = active, Yellow = pending setup, Red = offline, Gray = removed." />
                                     </span>
                                     <span>${agent.memory_count || 0} memories</span>
                                     <span>Clearance: ${CLEARANCE_LABELS[agent.clearance] || 'Internal'}</span>
@@ -2735,6 +2762,7 @@ function NetworkPage() {
                                             ` : html`
                                                 <button class="btn" onClick=${() => setEditing(true)}>Edit</button>
                                                 <button class="btn" onClick=${() => downloadBundle(agent.agent_id)}>Download Bundle</button>
+                                                <button class="btn" onClick=${() => setShowRotateConfirm(agent)}>Rotate Key</button>
                                                 ${isLastAdmin
                                                     ? html`<button class="btn btn-danger btn-disabled" disabled=${true} title="Cannot remove the last admin — network needs at least one admin">Remove</button>`
                                                     : html`<button class="btn btn-danger" onClick=${() => setShowRemoveConfirm(agent)}>Remove</button>`}
@@ -2755,6 +2783,26 @@ function NetworkPage() {
 
             ${showWizard && html`<${AddAgentWizard} onClose=${() => setShowWizard(false)} onCreated=${() => { setShowWizard(false); loadAgents(); }} />`}
             ${showRemoveConfirm && html`<${RemoveConfirmModal} agent=${showRemoveConfirm} onConfirm=${() => handleRemove(showRemoveConfirm)} onCancel=${() => setShowRemoveConfirm(null)} />`}
+            ${showRotateConfirm && html`
+                <div class="wizard-overlay" onClick=${(e) => { if (e.target === e.currentTarget) setShowRotateConfirm(null); }}>
+                    <div class="wizard-modal" style="max-width:440px;">
+                        <div class="wizard-header"><h2>Rotate Agent Key</h2><button class="detail-close" onClick=${() => setShowRotateConfirm(null)}>x</button></div>
+                        <div class="wizard-body" style="padding:20px;">
+                            <p style="color:var(--text-dim);margin-bottom:16px;">
+                                This will generate a new Ed25519 identity key for <strong>${showRotateConfirm.name}</strong>.
+                                All existing memories will be re-attributed to the new key. A chain redeployment will be triggered.
+                            </p>
+                            <div class="warning-banner">⚠ The agent will need a new bundle after rotation. The old key will be permanently retired.</div>
+                        </div>
+                        <div class="wizard-footer">
+                            <button class="btn" onClick=${() => setShowRotateConfirm(null)}>Cancel</button>
+                            <button class="btn btn-danger" disabled=${rotating} onClick=${() => handleRotateKey(showRotateConfirm)}>
+                                ${rotating ? 'Rotating...' : 'Rotate Key'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            `}
         </div>
     `;
 }
@@ -2785,6 +2833,8 @@ function AddAgentWizard({ onClose, onCreated }) {
     const [deploying, setDeploying] = useState(false);
     const [deployStatus, setDeployStatus] = useState(null);
     const deployPollRef = useRef(null);
+    const [pairingCode, setPairingCode] = useState(null);
+    const [pairingExpiry, setPairingExpiry] = useState(null);
 
     useEffect(() => {
         fetchTemplates().then(data => {
@@ -2891,7 +2941,7 @@ function AddAgentWizard({ onClose, onCreated }) {
 
                     ${step === 1 && html`
                         <div class="wizard-field">
-                            <label>Template</label>
+                            <label>Template <${HelpTip} text="Templates pre-fill role, bio, and clearance for common agent types. Choose Custom for manual configuration." /></label>
                             <select class="wizard-select" value=${template} onChange=${e => {
                                 const t = templates.find(t => t.name === e.target.value);
                                 if (t) applyTemplate(t);
@@ -2953,7 +3003,7 @@ function AddAgentWizard({ onClose, onCreated }) {
                             />
                         </div>
                         <div class="wizard-field">
-                            <label>Clearance Level</label>
+                            <label>Clearance Level <${HelpTip} text="Determines what sensitivity level of memories this agent can access. Higher clearance = access to more classified knowledge." /></label>
                             <div class="clearance-row">
                                 <input type="range" min="0" max="4" value=${clearance} onInput=${e => setClearance(parseInt(e.target.value))} style="flex:1;" />
                                 <span class="clearance-label" style="color:${clearance >= 3 ? 'var(--danger)' : clearance >= 2 ? 'var(--warning)' : 'var(--text-dim)'};">
@@ -2967,6 +3017,7 @@ function AddAgentWizard({ onClose, onCreated }) {
                         <div style="margin-bottom:16px;">
                             <p style="font-size:13px;color:var(--text-dim);margin-bottom:16px;">
                                 Choose how the new agent will receive its configuration and keys.
+                                <${HelpTip} text="Bundle: download a ZIP to copy manually. LAN: generate a pairing code — the new agent fetches config automatically over your local network." />
                             </p>
                             <div class="connect-cards">
                                 <div class="connect-card ${connectMethod === 'bundle' ? 'selected' : ''}" onClick=${() => setConnectMethod('bundle')}>
@@ -3047,10 +3098,24 @@ function AddAgentWizard({ onClose, onCreated }) {
                                                 }}>Download Bundle ZIP</button>
                                             `}
                                             ${connectMethod === 'lan' && html`
-                                                <div style="font-size:36px;font-weight:900;letter-spacing:8px;color:var(--primary);font-family:monospace;padding:20px;background:var(--bg-elevated);border-radius:var(--radius-lg);border:1px solid var(--border);margin:16px 0;">
-                                                    SAG-${Math.random().toString(36).substr(2, 3).toUpperCase()}
-                                                </div>
-                                                <p style="font-size:12px;color:var(--text-muted);">Valid for 15 minutes. Run <code style="background:var(--bg-elevated);padding:2px 6px;border-radius:4px;">sage-lite pair CODE</code> on the new machine.</p>
+                                                ${pairingCode ? html`
+                                                    <div class="pairing-code-display">
+                                                        ${pairingCode}
+                                                    </div>
+                                                    <p style="font-size:12px;color:var(--text-muted);margin-top:8px;">
+                                                        Valid for 15 minutes. Run <code style="background:var(--bg-elevated);padding:2px 6px;border-radius:4px;">sage-lite pair ${pairingCode}</code> on the new machine.
+                                                    </p>
+                                                ` : html`
+                                                    <button class="btn btn-primary" style="padding:12px 28px;font-size:14px;" onClick=${async () => {
+                                                        try {
+                                                            const res = await createPairingCode(createdAgent.agent_id);
+                                                            if (res.code) {
+                                                                setPairingCode(res.code);
+                                                                setPairingExpiry(res.expires_at);
+                                                            }
+                                                        } catch (e) { /* ignore */ }
+                                                    }}>Generate Pairing Code</button>
+                                                `}
                                             `}
                                         </div>
                                     `

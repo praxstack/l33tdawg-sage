@@ -214,4 +214,86 @@ test.describe('API Health', () => {
         expect(body.templates).toBeDefined();
         expect(body.templates.length).toBeGreaterThanOrEqual(1);
     });
+
+    test('pairing redeem endpoint rejects invalid code', async ({ request }) => {
+        const res = await request.get(`${BASE}/v1/dashboard/network/pair/INVALID`);
+        expect(res.ok()).toBeFalsy();
+    });
+
+    test('agent detail endpoint returns agent data', async ({ request }) => {
+        const agentsRes = await request.get(`${BASE}/v1/dashboard/network/agents`);
+        const agents = await agentsRes.json();
+        expect(agents.agents.length).toBeGreaterThanOrEqual(1);
+
+        const id = agents.agents[0].agent_id;
+        const res = await request.get(`${BASE}/v1/dashboard/network/agents/${id}`);
+        expect(res.ok()).toBeTruthy();
+        const body = await res.json();
+        expect(body.agent_id).toBe(id);
+        expect(body.name).toBeDefined();
+        expect(body.role).toBeDefined();
+    });
+});
+
+test.describe('Brain Page — Domain Filters', () => {
+    test('domain filter pills exist on brain view', async ({ page }) => {
+        await page.goto(`${BASE}/ui/`);
+        await page.waitForSelector('.sidebar', { timeout: 10000 });
+
+        // Wait for memories/stats to load so domain pills render
+        await page.waitForTimeout(2000);
+
+        const domainPills = page.locator('.domain-pill');
+        const count = await domainPills.count();
+        expect(count).toBeGreaterThanOrEqual(1);
+    });
+});
+
+test.describe('Import Page', () => {
+    test('renders with upload drop zone', async ({ page }) => {
+        await page.goto(`${BASE}/ui/#/import`);
+        await page.waitForSelector('.import-page', { timeout: 10000 });
+
+        const dropZone = page.locator('.drop-zone');
+        await expect(dropZone).toBeVisible();
+        await expect(dropZone).toContainText('Drop your export file');
+    });
+});
+
+test.describe('Settings — Cleanup Section', () => {
+    test('cleanup section exists on settings page', async ({ page }) => {
+        await page.goto(`${BASE}/ui/#/settings`);
+        await page.waitForSelector('.settings-page', { timeout: 10000 });
+
+        const cleanupSection = page.locator('.cleanup-section');
+        await expect(cleanupSection).toBeVisible();
+        await expect(cleanupSection).toContainText('Auto-Cleanup');
+    });
+});
+
+test.describe('API — Agent Update & Redeploy Status', () => {
+    test('agent update endpoint accepts PATCH with bio change', async ({ request }) => {
+        // Get an agent ID
+        const agentsRes = await request.get(`${BASE}/v1/dashboard/network/agents`);
+        const agents = await agentsRes.json();
+        expect(agents.agents.length).toBeGreaterThanOrEqual(1);
+        const agent = agents.agents[0];
+        const id = agent.agent_id;
+
+        // PATCH with a bio change
+        const res = await request.patch(`${BASE}/v1/dashboard/network/agents/${id}`, {
+            data: { boot_bio: agent.boot_bio || 'E2E test bio' },
+        });
+        expect(res.ok()).toBeTruthy();
+        const body = await res.json();
+        expect(body.agent_id).toBe(id);
+    });
+
+    test('redeploy status endpoint returns status fields', async ({ request }) => {
+        const res = await request.get(`${BASE}/v1/dashboard/network/redeploy/status`);
+        expect(res.ok()).toBeTruthy();
+        const body = await res.json();
+        // Should have 'active' field at minimum
+        expect(body).toHaveProperty('active');
+    });
 });

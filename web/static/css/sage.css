@@ -2127,6 +2127,22 @@ input[type="range"]::-moz-range-thumb {
     line-height: 1.5;
 }
 
+/* Pairing code display */
+.pairing-code-display {
+    font-size: 36px;
+    font-weight: 900;
+    letter-spacing: 8px;
+    color: var(--primary);
+    font-family: monospace;
+    padding: 20px;
+    background: var(--bg-elevated);
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border);
+    margin: 16px 0;
+    text-align: center;
+    user-select: all;
+}
+
 /* Deploy progress */
 .deploy-progress {
     display: flex;

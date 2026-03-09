@@ -205,3 +205,17 @@ export async function startRedeploy(operation, agentId) {
     });
     return res.json();
 }
+
+export async function createPairingCode(agentId) {
+    const res = await fetch(`${API_BASE}/v1/dashboard/network/agents/${agentId}/pair`, {
+        method: 'POST',
+    });
+    return res.json();
+}
+
+export async function rotateAgentKey(agentId) {
+    const res = await fetch(`${API_BASE}/v1/dashboard/network/agents/${agentId}/rotate-key`, {
+        method: 'POST',
+    });
+    return res.json();
+}

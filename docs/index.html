@@ -851,6 +851,32 @@ footer a:hover { text-decoration: underline; }
 }
 .dev-badge strong { color: var(--bright); }
 
+/* ─── Network Agents Section ─── */
+.network { background: linear-gradient(180deg, var(--void) 0%, var(--deep) 50%, var(--void) 100%); }
+.network-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
+  margin-top: 48px;
+}
+.network-grid .feature-card {
+  padding: 28px;
+  background: rgba(167,139,250,0.02);
+  border: 1px solid rgba(167,139,250,0.07);
+  border-radius: 14px;
+  transition: all 0.3s;
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+.network-grid .feature-card:hover {
+  background: rgba(167,139,250,0.05);
+  border-color: rgba(167,139,250,0.15);
+}
+.network-span-2 {
+  grid-column: span 2;
+}
+
 /* ─── Scroll Reveal ─── */
 .reveal {
   opacity: 0;
@@ -875,6 +901,8 @@ footer a:hover { text-decoration: underline; }
   .steps-grid { grid-template-columns: 1fr; gap: 20px; }
   .step:not(:last-child)::after { display: none; }
   .features-grid { grid-template-columns: 1fr; }
+  .network-grid { grid-template-columns: 1fr; }
+  .network-span-2 { grid-column: span 1; }
   .migrate-grid { grid-template-columns: 1fr; }
   .paper { grid-template-columns: auto 1fr; }
   .paper-arrow { display: none; }
@@ -925,6 +953,7 @@ footer a:hover { text-decoration: underline; }
       <a href="#features">Features</a>
       <a href="#research">Research</a>
       <a href="#switch">Switch</a>
+      <a href="#network">Network</a>
       <a href="#developers">Developers</a>
       <a href="https://github.com/l33tdawg/sage" class="nav-cta">GitHub</a>
     </div>
@@ -1410,7 +1439,60 @@ footer a:hover { text-decoration: underline; }
     </div>
 
     <div class="migrate-note reveal" style="margin-top:32px;">
-      <strong>Scales to enterprise.</strong> SAGE Personal is the single-node edition. The full architecture supports multi-validator BFT consensus, RBAC, federation, departments, clearance levels, and cross-org knowledge sharing. Same codebase, same API — just add validators. See the <a href="https://github.com/l33tdawg/sage/blob/main/docs/ARCHITECTURE.md">Architecture Guide</a>.
+      <strong>Scales to enterprise.</strong> SAGE Personal is the single-node edition. Add agents from the <a href="#network" style="color:var(--teal);">CEREBRUM dashboard</a> for multi-agent networks, or deploy the full architecture with multi-validator BFT consensus, RBAC, federation, and cross-org knowledge sharing. Same codebase, same API. See the <a href="https://github.com/l33tdawg/sage/blob/main/docs/ARCHITECTURE.md">Architecture Guide</a>.
+    </div>
+  </div>
+</section>
+
+<!-- Multi-Agent Networks -->
+<section class="network" id="network">
+  <div class="container">
+    <div class="reveal" style="text-align:center;">
+      <div class="section-tag">Multi-Agent Networks</div>
+      <h2>Build your private<br>AI network</h2>
+      <p class="section-desc" style="margin:0 auto;">SAGE Personal is one brain. When you need a team of brains — across machines, family members, or an entire org — add agents from the CEREBRUM dashboard. Same security, same consensus, zero configuration files.</p>
+    </div>
+
+    <div class="network-grid reveal">
+      <div class="feature-card">
+        <div class="feature-icon purple">&#128101;</div>
+        <div>
+          <h3>Agent Management</h3>
+          <p>Add, configure, and manage agents from the CEREBRUM dashboard. Each agent gets its own Ed25519 identity, role, and permissions. No CLI needed.</p>
+        </div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon teal">&#128737;</div>
+        <div>
+          <h3>Domain Access Control</h3>
+          <p>Per-domain read/write permissions with a visual matrix. Five clearance tiers from Guest to Top Secret. Enforced server-side on every request.</p>
+        </div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon gold">&#128279;</div>
+        <div>
+          <h3>LAN Pairing</h3>
+          <p>Generate a 6-character pairing code. New agents fetch their config automatically over your local network. Setup takes seconds, not hours.</p>
+        </div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon pink">&#128260;</div>
+        <div>
+          <h3>Key Rotation</h3>
+          <p>Rotate agent keys with one click. All memories are re-attributed in a single atomic transaction. Old keys are permanently retired.</p>
+        </div>
+      </div>
+      <div class="feature-card network-span-2">
+        <div class="feature-icon purple">&#9881;&#65039;</div>
+        <div>
+          <h3>Redeployment Orchestrator</h3>
+          <p>9-phase state machine handles chain redeployment automatically. Backups at every phase, rollback on failure. Your memories are never at risk.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="migrate-note reveal" style="margin-top:32px;">
+      <strong>Start solo, scale when ready.</strong> Every SAGE Personal instance is already running the full consensus engine. Adding agents doesn't require a migration — just open the dashboard, click "Add Agent", and pair over your LAN.
     </div>
   </div>
 </section>
