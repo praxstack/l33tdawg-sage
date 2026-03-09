@@ -1,6 +1,6 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
-import { fetchStats, fetchGraph, fetchMemories, deleteMemory, fetchHealth, checkAuth, login, importMemories, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger } from './api.js';
+import { fetchStats, fetchGraph, fetchMemories, deleteMemory, fetchHealth, checkAuth, login, importMemories, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, checkForUpdate, applyUpdate, restartServer } from './api.js';
 
 const { h, render, createContext } = preact;
 const { useState, useEffect, useRef, useCallback, useContext } = preactHooks;
@@ -122,6 +122,7 @@ function BrainView({ sse, onSelectMemory }) {
     const [domains, setDomains] = useState([]);
     const [filterDomains, setFilterDomains] = useState(new Set());
     const [searchText, setSearchText] = useState('');
+    const [searchOpen, setSearchOpen] = useState(false);
     const [tooltip, setTooltip] = useState(null);
     const [sseConnected, setSseConnected] = useState(false);
 
@@ -231,17 +232,18 @@ function BrainView({ sse, onSelectMemory }) {
             // Determine visible nodes
             const visibleNodes = s.nodes.filter(n => {
                 if (s.filterDomains.size > 0 && !s.filterDomains.has(n.domain)) return false;
+                if (s.searchFilter) {
+                    const q = s.searchFilter;
+                    const match = (n.content && n.content.toLowerCase().includes(q)) ||
+                        (n.domain && n.domain.toLowerCase().includes(q)) ||
+                        (n.memory_type && n.memory_type.toLowerCase().includes(q)) ||
+                        (n.agent && n.agent.toLowerCase().includes(q));
+                    if (!match) return false;
+                }
                 return true;
             });
             const visibleIds = new Set(visibleNodes.map(n => n.id));
-
-            // Determine search-matching nodes
-            const searchMatch = s.searchFilter
-                ? new Set(visibleNodes.filter(n =>
-                    (n.content && n.content.toLowerCase().includes(s.searchFilter)) ||
-                    (n.domain && n.domain.toLowerCase().includes(s.searchFilter))
-                ).map(n => n.id))
-                : null;
+            const searchMatch = null;
 
             // Draw edges
             const nodeMap = {};
@@ -521,9 +523,23 @@ function BrainView({ sse, onSelectMemory }) {
                 `)}
             </div>
 
-            <div class="search-overlay">
-                <input class="search-input" type="text" placeholder="Filter memories..."
-                       value=${searchText} onInput=${e => setSearchText(e.target.value)} />
+            <div class="graph-search ${searchOpen ? 'open' : ''} ${searchText ? 'has-filter' : ''}">
+                <button class="graph-search-toggle" onClick=${() => { setSearchOpen(!searchOpen); if (searchOpen && !searchText) setSearchOpen(false); }}
+                        title="Search & filter memories">
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="6.5" cy="6.5" r="4.5"/><line x1="10" y1="10" x2="14" y2="14"/>
+                    </svg>
+                    ${!searchOpen && searchText ? html`<span class="search-badge"></span>` : null}
+                </button>
+                ${searchOpen && html`
+                    <input class="graph-search-input" type="text"
+                           placeholder="Filter by content, domain, type, or agent..."
+                           value=${searchText} onInput=${e => setSearchText(e.target.value)}
+                           ref=${el => { if (el) el.focus(); }} />
+                    ${searchText && html`
+                        <button class="graph-search-clear" onClick=${() => { setSearchText(''); }}>×</button>
+                    `}
+                `}
             </div>
 
             ${stats && html`
@@ -633,8 +649,19 @@ function simulateForces(state, W, H) {
 // Memory Detail Panel
 // ============================================================================
 
-function MemoryDetail({ memory, onClose, onDelete }) {
+function MemoryDetail({ memory, onClose, onDelete, onNavigate }) {
     const [confirming, setConfirming] = useState(false);
+    const [agentInfo, setAgentInfo] = useState(null);
+
+    const agentId = memory?.agent || memory?.submitting_agent;
+    useEffect(() => {
+        if (!agentId) return;
+        fetchAgents().then(data => {
+            const agents = data.agents || [];
+            const match = agents.find(a => a.agent_id === agentId);
+            if (match) setAgentInfo(match);
+        }).catch(() => {});
+    }, [agentId]);
 
     if (!memory) return null;
 
@@ -689,7 +716,19 @@ function MemoryDetail({ memory, onClose, onDelete }) {
                     </div>
                     <div class="detail-meta-item">
                         <label>Agent</label>
-                        <span class="value" style="font-size: 11px; word-break: break-all;">${memory.agent || memory.submitting_agent || 'unknown'}</span>
+                        ${agentInfo ? html`
+                            <span class="value agent-detail-link" onClick=${() => {
+                                if (onNavigate) onNavigate('network');
+                                onClose();
+                            }} title="View agent on Network page">
+                                <span style="margin-right:4px;">${agentInfo.avatar || '🤖'}</span>
+                                <span>${agentInfo.name}</span>
+                                <span class="agent-role-badge" style="margin-left:6px;font-size:9px;padding:1px 5px;">${agentInfo.role}</span>
+                                <span style="margin-left:4px;font-size:10px;color:var(--primary);">→</span>
+                            </span>
+                        ` : html`
+                            <span class="value" style="font-size: 11px; word-break: break-all;">${memory.agent || memory.submitting_agent || 'unknown'}</span>
+                        `}
                     </div>
                     <div class="detail-meta-item">
                         <label>Memory ID</label>
@@ -1134,6 +1173,169 @@ function SynapticLedger() {
 }
 
 // ============================================================================
+// Software Update Component
+// ============================================================================
+
+function SoftwareUpdate() {
+    const [updateInfo, setUpdateInfo] = useState(null);
+    const [checking, setChecking] = useState(false);
+    const [downloading, setDownloading] = useState(false);
+    const [progress, setProgress] = useState('');
+    const [error, setError] = useState(null);
+    const [installed, setInstalled] = useState(false);
+    const [restarting, setRestarting] = useState(false);
+
+    const doCheck = async () => {
+        setChecking(true);
+        setError(null);
+        try {
+            const data = await checkForUpdate();
+            if (data.error) setError(data.error);
+            setUpdateInfo(data);
+        } catch (e) {
+            setError('Failed to check for updates');
+        }
+        setChecking(false);
+    };
+
+    useEffect(() => { doCheck(); }, []);
+
+    const doUpdate = async () => {
+        if (!updateInfo?.download_url) return;
+        setDownloading(true);
+        setProgress('Downloading...');
+        setError(null);
+        try {
+            const res = await applyUpdate(updateInfo.download_url);
+            if (res.ok) {
+                setInstalled(true);
+                setProgress('Update installed!');
+            } else {
+                setError(res.error || 'Update failed');
+                setProgress('');
+            }
+        } catch (e) {
+            setError('Update failed: ' + e.message);
+            setProgress('');
+        }
+        setDownloading(false);
+    };
+
+    const doRestart = async () => {
+        setRestarting(true);
+        try {
+            await restartServer();
+            // Server will restart — wait then reload
+            setTimeout(() => {
+                const poll = setInterval(() => {
+                    fetch('/health').then(r => {
+                        if (r.ok) { clearInterval(poll); window.location.reload(); }
+                    }).catch(() => {});
+                }, 1000);
+            }, 2000);
+        } catch (e) {
+            // Expected — server is restarting
+            setTimeout(() => {
+                const poll = setInterval(() => {
+                    fetch('/health').then(r => {
+                        if (r.ok) { clearInterval(poll); window.location.reload(); }
+                    }).catch(() => {});
+                }, 1000);
+            }, 2000);
+        }
+    };
+
+    const formatSize = (bytes) => {
+        if (!bytes) return '';
+        if (bytes < 1048576) return (bytes / 1024).toFixed(0) + ' KB';
+        return (bytes / 1048576).toFixed(1) + ' MB';
+    };
+
+    return html`
+        <div class="settings-section update-section">
+            <h3>
+                <svg width="16" height="16" viewBox="0 0 16 16" style="vertical-align:-2px;margin-right:6px">
+                    <path d="M8 2v8M5 7l3 3 3-3" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linecap="round"/>
+                    <path d="M3 12h10" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linecap="round"/>
+                </svg>
+                Software Update
+            </h3>
+
+            <div class="update-status">
+                <div class="update-version-row">
+                    <span class="label">Current Version</span>
+                    <span class="value mono">${updateInfo?.current_version || '...'}</span>
+                </div>
+
+                ${updateInfo?.latest_version && html`
+                    <div class="update-version-row">
+                        <span class="label">Latest Version</span>
+                        <span class="value mono ${updateInfo.update_available ? 'update-highlight' : ''}">${updateInfo.latest_version}</span>
+                    </div>
+                `}
+
+                ${updateInfo?.platform && html`
+                    <div class="update-version-row">
+                        <span class="label">Platform</span>
+                        <span class="value mono">${updateInfo.platform}</span>
+                    </div>
+                `}
+            </div>
+
+            ${error && html`<div class="update-error">${error}</div>`}
+
+            ${!updateInfo?.update_available && updateInfo?.latest_version && !error && html`
+                <div class="update-current">You're up to date.</div>
+            `}
+
+            ${updateInfo?.update_available && !installed && html`
+                <div class="update-available">
+                    <div class="update-release-name">${updateInfo.release_name || 'New version available'}</div>
+                    ${updateInfo.download_size ? html`<span class="update-size">${formatSize(updateInfo.download_size)}</span>` : null}
+                    ${updateInfo.release_url && html`
+                        <a class="update-notes-link" href="${updateInfo.release_url}" target="_blank" rel="noopener">Release notes →</a>
+                    `}
+                </div>
+            `}
+
+            ${progress && html`<div class="update-progress">${progress}</div>`}
+
+            <div class="update-actions">
+                ${!installed && !downloading && html`
+                    <button class="btn btn-secondary" onClick=${doCheck} disabled=${checking}>
+                        ${checking ? 'Checking...' : 'Check for Updates'}
+                    </button>
+                `}
+
+                ${updateInfo?.update_available && !installed && !downloading && html`
+                    <button class="btn btn-primary" onClick=${doUpdate}>
+                        Update Now
+                    </button>
+                `}
+
+                ${downloading && html`
+                    <button class="btn btn-primary" disabled>
+                        <span class="spinner"></span> Downloading...
+                    </button>
+                `}
+
+                ${installed && !restarting && html`
+                    <button class="btn btn-primary update-restart-btn" onClick=${doRestart}>
+                        Restart to Apply
+                    </button>
+                `}
+
+                ${restarting && html`
+                    <button class="btn btn-primary" disabled>
+                        <span class="spinner"></span> Restarting...
+                    </button>
+                `}
+            </div>
+        </div>
+    `;
+}
+
+// ============================================================================
 // Boot Instructions Component
 // ============================================================================
 
@@ -1451,6 +1653,7 @@ function CleanupSettings() {
 // ============================================================================
 
 function SettingsPage() {
+    const [settingsTab, setSettingsTab] = useState('overview');
     const [stats, setStats] = useState(null);
     const [health, setHealth] = useState(null);
 
@@ -1519,214 +1722,157 @@ function SettingsPage() {
 
     const peers = chain?.peer_list || [];
 
+    const tabs = [
+        { id: 'overview', label: 'Overview', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><path d="M4 4h3v3H4zM9 4h3v3H9zM4 9h3v3H4zM9 9h3v3H9z" fill="currentColor" opacity="0.8"/><path d="M2 2h12v12H2z" stroke="currentColor" fill="none" stroke-width="1.5" rx="2"/></svg>` },
+        { id: 'security', label: 'Security', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><path d="M8 1L2 4v4c0 4 3 6 6 7 3-1 6-3 6-7V4L8 1z" stroke="currentColor" fill="none" stroke-width="1.5"/></svg>` },
+        { id: 'config', label: 'Configuration', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><circle cx="8" cy="8" r="3" stroke="currentColor" fill="none" stroke-width="1.5"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M13 3l-1.5 1.5M4.5 11.5L3 13" stroke="currentColor" stroke-width="1.5"/></svg>` },
+        { id: 'update', label: 'Update', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><path d="M8 2v8M5 7l3 3 3-3" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linecap="round"/><path d="M3 12h10" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linecap="round"/></svg>` },
+    ];
+
     return html`
         <div class="settings-page">
-            <!-- Chain Health — full width hero -->
-            <div class="settings-section chain-health-section">
-                <h3>
-                    <svg width="16" height="16" viewBox="0 0 16 16" style="vertical-align:-2px;margin-right:6px">
-                        <path d="M4 4h3v3H4zM9 4h3v3H9zM4 9h3v3H4zM9 9h3v3H9z" fill="currentColor" opacity="0.8"/>
-                        <path d="M2 2h12v12H2z" stroke="currentColor" fill="none" stroke-width="1.5" rx="2"/>
-                    </svg>
-                    Chain Health <${HelpTip} text="Your BFT consensus chain status. Blocks are produced every ~5 seconds. All validators must agree on memory operations." />
-                </h3>
-
-                ${chain ? html`
-                    <div class="chain-stats-grid">
-                        <div class="chain-stat-card" title="Total number of blocks committed to the chain. Each block contains validated memory operations.">
-                            <div class="chain-stat-value block-height">${Number(chain.block_height || 0).toLocaleString()}</div>
-                            <div class="chain-stat-label">Block Height</div>
-                        </div>
-                        <div class="chain-stat-card" title="Countdown to the next block being produced (~5s intervals). Memories are committed to the chain in blocks.">
-                            <div class="chain-stat-value countdown-value">${countdownDisplay}</div>
-                            <div class="chain-stat-label">Next Block</div>
-                            <div class="countdown-bar">
-                                <div class="countdown-fill" style="width: ${countdownPct}%"></div>
-                            </div>
-                        </div>
-                        <div class="chain-stat-card" title="Number of other SAGE nodes connected in quorum mode. 0 = running solo (Personal mode).">
-                            <div class="chain-stat-value">${chain.peers || '0'}</div>
-                            <div class="chain-stat-label">Peers</div>
-                        </div>
-                        <div class="chain-stat-card" title="This validator's voting power in the BFT consensus. Higher = more influence on which memories get committed.">
-                            <div class="chain-stat-value">${chain.voting_power || '0'}</div>
-                            <div class="chain-stat-label">Voting Power</div>
-                        </div>
-                    </div>
-
-                    <div class="chain-details">
-                        <div class="settings-row" title="Unique identifier for this blockchain network. Each SAGE deployment has its own chain.">
-                            <span class="label">Chain ID</span>
-                            <span class="value chain-id-value">${chain.chain_id || '--'}</span>
-                        </div>
-                        <div class="settings-row" title="The display name of this SAGE node. Set during initialization.">
-                            <span class="label">Node</span>
-                            <span class="value">${chain.moniker || '--'}</span>
-                        </div>
-                        <div class="settings-row" title="Whether this node is catching up with the latest blocks. 'In sync' means it's up to date.">
-                            <span class="label">Syncing</span>
-                            <span class="value" style="color: ${chain.catching_up ? '#ef4444' : '#10b981'}">
-                                ${chain.catching_up ? 'Catching up...' : 'In sync'}
-                            </span>
-                        </div>
-                        <div class="settings-row" title="Timestamp of the most recently committed block.">
-                            <span class="label">Last Block</span>
-                            <span class="value">${chain.block_time ? new Date(chain.block_time).toLocaleTimeString() : '--'}</span>
-                        </div>
-                    </div>
-                ` : html`
-                    <div class="chain-offline">
-                        ${statusDot(false)}
-                        <span>Chain unavailable — CometBFT not running</span>
-                    </div>
-                `}
+            <div class="settings-tabs">
+                ${tabs.map(t => html`
+                    <button class="settings-tab ${settingsTab === t.id ? 'active' : ''}"
+                            onClick=${() => setSettingsTab(t.id)}>
+                        ${t.icon}
+                        <span>${t.label}</span>
+                    </button>
+                `)}
             </div>
 
-            <!-- Two-column grid for the rest -->
-            <div class="settings-grid">
-                <!-- Left column: System Status -->
-                <div class="settings-section">
-                    <h3>System Status</h3>
-                    <div class="settings-row" title="SAGE memory engine status. If you can see this, it's running.">
-                        <span class="label">${statusDot(true)} SAGE</span>
-                        <span class="value" style="color:#10b981">Running</span>
+            ${settingsTab === 'overview' && html`
+                <div class="settings-tab-content">
+                    <!-- Chain Health -->
+                    <div class="settings-section chain-health-section">
+                        <h3>
+                            Chain Health <${HelpTip} text="Your BFT consensus chain status. Blocks are produced every ~5 seconds. All validators must agree on memory operations." />
+                        </h3>
+                        ${chain ? html`
+                            <div class="chain-stats-grid">
+                                <div class="chain-stat-card" title="Total number of blocks committed to the chain.">
+                                    <div class="chain-stat-value block-height">${Number(chain.block_height || 0).toLocaleString()}</div>
+                                    <div class="chain-stat-label">Block Height</div>
+                                </div>
+                                <div class="chain-stat-card" title="Countdown to the next block (~5s intervals).">
+                                    <div class="chain-stat-value countdown-value">${countdownDisplay}</div>
+                                    <div class="chain-stat-label">Next Block</div>
+                                    <div class="countdown-bar"><div class="countdown-fill" style="width: ${countdownPct}%"></div></div>
+                                </div>
+                                <div class="chain-stat-card" title="Connected SAGE nodes in quorum mode. 0 = solo.">
+                                    <div class="chain-stat-value">${chain.peers || '0'}</div>
+                                    <div class="chain-stat-label">Peers</div>
+                                </div>
+                                <div class="chain-stat-card" title="This validator's voting power in BFT consensus.">
+                                    <div class="chain-stat-value">${chain.voting_power || '0'}</div>
+                                    <div class="chain-stat-label">Voting Power</div>
+                                </div>
+                            </div>
+                            <div class="chain-details">
+                                <div class="settings-row"><span class="label">Chain ID</span><span class="value chain-id-value">${chain.chain_id || '--'}</span></div>
+                                <div class="settings-row"><span class="label">Node</span><span class="value">${chain.moniker || '--'}</span></div>
+                                <div class="settings-row"><span class="label">Syncing</span><span class="value" style="color: ${chain.catching_up ? '#ef4444' : '#10b981'}">${chain.catching_up ? 'Catching up...' : 'In sync'}</span></div>
+                                <div class="settings-row"><span class="label">Last Block</span><span class="value">${chain.block_time ? new Date(chain.block_time).toLocaleTimeString() : '--'}</span></div>
+                            </div>
+                        ` : html`<div class="chain-offline">${statusDot(false)} <span>Chain unavailable — CometBFT not running</span></div>`}
                     </div>
-                    <div class="settings-row" title="Ollama provides local AI embeddings for semantic search. Optional — SAGE falls back to hash-based embeddings if offline.">
-                        <span class="label">${statusDot(ollama === 'running')} Ollama</span>
-                        <span class="value" style="color: ${ollama === 'running' ? '#10b981' : '#6b7280'}">
-                            ${ollama === 'running' ? 'Connected' : 'Offline'}
-                        </span>
-                    </div>
-                    <div class="settings-row" title="When enabled, all memories are encrypted at rest with AES-256-GCM. Manage via Synaptic Ledger below.">
-                        <span class="label">${statusDot(encrypted)} Synaptic Ledger</span>
-                        <span class="value" style="color: ${encrypted ? '#10b981' : '#6b7280'}">
-                            ${encrypted ? 'AES-256-GCM' : 'Off'}
-                        </span>
-                    </div>
-                    <div class="settings-row" title="Current SAGE version.">
-                        <span class="label">Version</span>
-                        <span class="value">${ver}</span>
-                    </div>
-                    <div class="settings-row" title="How long SAGE has been running since last restart.">
-                        <span class="label">Uptime</span>
-                        <span class="value">${uptime}</span>
-                    </div>
-                    <div class="settings-row" title="The REST API endpoint that your AI agents connect to for memory operations.">
-                        <span class="label">API Endpoint</span>
-                        <span class="value">${window.location.origin}</span>
+
+                    <div class="settings-grid">
+                        <!-- System Status -->
+                        <div class="settings-section">
+                            <h3>System Status</h3>
+                            <div class="settings-row"><span class="label">${statusDot(true)} SAGE</span><span class="value" style="color:#10b981">Running</span></div>
+                            <div class="settings-row"><span class="label">${statusDot(ollama === 'running')} Ollama</span><span class="value" style="color: ${ollama === 'running' ? '#10b981' : '#6b7280'}">${ollama === 'running' ? 'Connected' : 'Offline'}</span></div>
+                            <div class="settings-row"><span class="label">${statusDot(encrypted)} Synaptic Ledger</span><span class="value" style="color: ${encrypted ? '#10b981' : '#6b7280'}">${encrypted ? 'AES-256-GCM' : 'Off'}</span></div>
+                            <div class="settings-row"><span class="label">Version</span><span class="value">${ver}</span></div>
+                            <div class="settings-row"><span class="label">Uptime</span><span class="value">${uptime}</span></div>
+                            <div class="settings-row"><span class="label">API Endpoint</span><span class="value">${window.location.origin}</span></div>
+                        </div>
+
+                        <!-- Memory Statistics -->
+                        ${stats ? html`
+                            <div class="settings-section">
+                                <h3>Memory Statistics</h3>
+                                <div class="settings-row"><span class="label">Total Memories</span><span class="value">${stats.total_memories || 0}</span></div>
+                                ${stats.by_status && Object.entries(stats.by_status).map(([s, c]) => html`
+                                    <div class="settings-row"><span class="label">${s}</span><span class="value">${c}</span></div>
+                                `)}
+                                ${stats.db_size_bytes != null && html`
+                                    <div class="settings-row"><span class="label">DB Size</span><span class="value">${(stats.db_size_bytes / 1024 / 1024).toFixed(1)} MB</span></div>
+                                `}
+                            </div>
+                        ` : html`<div></div>`}
+
+                        <!-- Connected Peers -->
+                        <div class="settings-section">
+                            <h3>
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:6px">
+                                    <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>
+                                    <path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+                                </svg>
+                                Connected Peers
+                            </h3>
+                            ${peers.length > 0 ? peers.map(p => html`
+                                <div class="peer-card">
+                                    <div class="peer-header">
+                                        <span class="status-dot active"></span>
+                                        <span class="peer-moniker">${p.moniker || 'unknown'}</span>
+                                        <span class="peer-badge">${p.outbound ? 'outbound' : 'inbound'}</span>
+                                    </div>
+                                    <div class="peer-meta">
+                                        <span class="peer-meta-label">IP</span><span class="peer-meta-value">${p.remote_ip}</span>
+                                        <span class="peer-meta-label">Connected</span><span class="peer-meta-value">${formatDuration(p.duration)}</span>
+                                        <span class="peer-meta-label">Sent</span><span class="peer-meta-value">${formatBytes(p.bytes_sent)}</span>
+                                        <span class="peer-meta-label">Received</span><span class="peer-meta-value">${formatBytes(p.bytes_recv)}</span>
+                                        <span class="peer-meta-label">Node ID</span><span class="peer-meta-value">${p.id}...</span>
+                                    </div>
+                                </div>
+                            `) : html`
+                                <div class="peer-empty">No peers connected — running in Personal mode.
+                                    <div style="margin-top:8px;font-size:11px;color:var(--text-muted)">Connect other SAGE nodes via quorum mode to see peers here.</div>
+                                </div>
+                            `}
+                        </div>
                     </div>
                 </div>
+            `}
 
-                <!-- Right column: Memory Statistics -->
-                ${stats ? html`
-                    <div class="settings-section">
-                        <h3>Memory Statistics</h3>
-                        <div class="settings-row" title="Total number of memories across all statuses and domains.">
-                            <span class="label">Total Memories</span>
-                            <span class="value">${stats.total_memories || 0}</span>
-                        </div>
-                        ${stats.by_status && Object.entries(stats.by_status).map(([s, c]) => html`
-                            <div class="settings-row">
-                                <span class="label">${s}</span>
-                                <span class="value">${c}</span>
-                            </div>
-                        `)}
-                        ${stats.db_size_bytes != null && html`
-                            <div class="settings-row">
-                                <span class="label">DB Size</span>
-                                <span class="value">${(stats.db_size_bytes / 1024 / 1024).toFixed(1)} MB</span>
-                            </div>
-                        `}
+            ${settingsTab === 'security' && html`
+                <div class="settings-tab-content">
+                    <div class="settings-section ledger-section">
+                        ${html`<${SynapticLedger} />`}
                     </div>
-                ` : html`<div></div>`}
 
-                <!-- Peers Section -->
-                <div class="settings-section">
-                    <h3>
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:6px">
-                            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
-                            <circle cx="9" cy="7" r="4"/>
-                            <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
-                            <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
-                        </svg>
-                        Connected Peers
-                    </h3>
-                    ${peers.length > 0 ? peers.map(p => html`
-                        <div class="peer-card">
-                            <div class="peer-header">
-                                <span class="status-dot active"></span>
-                                <span class="peer-moniker">${p.moniker || 'unknown'}</span>
-                                <span class="peer-badge">${p.outbound ? 'outbound' : 'inbound'}</span>
-                            </div>
-                            <div class="peer-meta">
-                                <span class="peer-meta-label">IP</span>
-                                <span class="peer-meta-value">${p.remote_ip}</span>
-                                <span class="peer-meta-label">Connected</span>
-                                <span class="peer-meta-value">${formatDuration(p.duration)}</span>
-                                <span class="peer-meta-label">Sent</span>
-                                <span class="peer-meta-value">${formatBytes(p.bytes_sent)}</span>
-                                <span class="peer-meta-label">Received</span>
-                                <span class="peer-meta-value">${formatBytes(p.bytes_recv)}</span>
-                                <span class="peer-meta-label">Node ID</span>
-                                <span class="peer-meta-value">${p.id}...</span>
-                            </div>
+                    <div class="settings-section" style="margin-top:16px">
+                        <h3>Export & Data</h3>
+                        <div class="settings-row">
+                            <span class="label">Export all memories</span>
+                            <button class="btn" onClick=${() => {
+                                fetchMemories({ limit: 10000 }).then(data => {
+                                    const blob = new Blob([JSON.stringify(data.memories, null, 2)], { type: 'application/json' });
+                                    const url = URL.createObjectURL(blob);
+                                    const a = document.createElement('a');
+                                    a.href = url;
+                                    a.download = 'sage-memories-export.json';
+                                    a.click();
+                                    URL.revokeObjectURL(url);
+                                });
+                            }}>Download JSON</button>
                         </div>
-                    `) : html`
-                        <div class="peer-empty">
-                            No peers connected — running in Personal mode.
-                            <div style="margin-top:8px;font-size:11px;color:var(--text-muted)">
-                                Connect other SAGE nodes via quorum mode to see peers here.
-                            </div>
-                        </div>
-                    `}
+                    </div>
                 </div>
+            `}
 
-                <!-- Export + About -->
-                <div class="settings-section">
-                    <h3>Export & About</h3>
-                    <div class="settings-row">
-                        <span class="label">Export all memories</span>
-                        <button class="btn" onClick=${() => {
-                            fetchMemories({ limit: 10000 }).then(data => {
-                                const blob = new Blob([JSON.stringify(data.memories, null, 2)], { type: 'application/json' });
-                                const url = URL.createObjectURL(blob);
-                                const a = document.createElement('a');
-                                a.href = url;
-                                a.download = 'sage-memories-export.json';
-                                a.click();
-                                URL.revokeObjectURL(url);
-                            });
-                        }}>Download JSON</button>
+            ${settingsTab === 'config' && html`
+                <div class="settings-tab-content">
+                    ${html`<${BootInstructions} />`}
+
+                    <div class="settings-section" style="margin-top:16px">
+                        ${html`<${CleanupSettings} />`}
                     </div>
-                    <div style="border-top:1px solid var(--border);margin-top:8px;padding-top:8px">
-                        <div class="settings-row">
-                            <span class="label">Full Name</span>
-                            <span class="value">(Sovereign) Agent Governed Experience</span>
-                        </div>
-                        <div class="settings-row">
-                            <span class="label">Author</span>
-                            <span class="value">Dhillon Andrew Kannabhiran</span>
-                        </div>
-                        <div class="settings-row">
-                            <span class="label">License</span>
-                            <span class="value">Apache 2.0</span>
-                        </div>
-                        <div class="settings-row">
-                            <span class="label">GitHub</span>
-                            <span class="value"><a href="https://github.com/l33tdawg/sage" target="_blank" style="color:var(--accent)">l33tdawg/sage</a></span>
-                        </div>
-                        <div class="settings-row">
-                            <span class="label">Website</span>
-                            <span class="value"><a href="https://l33tdawg.github.io/sage/" target="_blank" style="color:var(--accent)">l33tdawg.github.io/sage</a></span>
-                        </div>
-                        <div class="settings-row">
-                            <span class="label">Architecture</span>
-                            <span class="value">CometBFT v0.38 + SQLite + Ed25519</span>
-                        </div>
-                        <div class="settings-row">
-                            <span class="label">Connect Guide</span>
-                            <span class="value"><a href="https://l33tdawg.github.io/sage/connect.html" target="_blank" style="color:var(--accent)">How to connect your AI</a></span>
-                        </div>
+
+                    <div class="settings-section" style="margin-top:16px">
+                        <h3>Preferences</h3>
                         <div class="settings-row">
                             <span class="label">Contextual Tooltips</span>
                             <span class="value" style="display:flex;align-items:center;gap:8px;">
@@ -1740,20 +1886,24 @@ function SettingsPage() {
                         </div>
                     </div>
                 </div>
+            `}
 
-                <!-- Synaptic Ledger (Encryption) — full width -->
-                <div class="settings-section full-width ledger-section">
-                    ${html`<${SynapticLedger} />`}
+            ${settingsTab === 'update' && html`
+                <div class="settings-tab-content">
+                    ${html`<${SoftwareUpdate} />`}
+
+                    <div class="settings-section" style="margin-top:16px">
+                        <h3>About</h3>
+                        <div class="settings-row"><span class="label">Full Name</span><span class="value">(Sovereign) Agent Governed Experience</span></div>
+                        <div class="settings-row"><span class="label">Author</span><span class="value">Dhillon Andrew Kannabhiran</span></div>
+                        <div class="settings-row"><span class="label">License</span><span class="value">Apache 2.0</span></div>
+                        <div class="settings-row"><span class="label">GitHub</span><span class="value"><a href="https://github.com/l33tdawg/sage" target="_blank" style="color:var(--accent)">l33tdawg/sage</a></span></div>
+                        <div class="settings-row"><span class="label">Website</span><span class="value"><a href="https://l33tdawg.github.io/sage/" target="_blank" style="color:var(--accent)">l33tdawg.github.io/sage</a></span></div>
+                        <div class="settings-row"><span class="label">Architecture</span><span class="value">CometBFT v0.38 + SQLite + Ed25519</span></div>
+                        <div class="settings-row"><span class="label">Connect Guide</span><span class="value"><a href="https://l33tdawg.github.io/sage/connect.html" target="_blank" style="color:var(--accent)">How to connect your AI</a></span></div>
+                    </div>
                 </div>
-
-                <!-- Auto-Cleanup — full width -->
-                <div class="settings-section full-width">
-                    ${html`<${CleanupSettings} />`}
-                </div>
-
-                <!-- Boot Instructions — full width -->
-                ${html`<${BootInstructions} />`}
-            </div>
+            `}
         </div>
     `;
 }
@@ -3400,6 +3550,7 @@ function App() {
                 memory=${selectedMemory}
                 onClose=${() => setSelectedMemory(null)}
                 onDelete=${() => setSelectedMemory(null)}
+                onNavigate=${(p) => { setPage(p); window.location.hash = '#/' + p; }}
             />
         </div>
         ${showHelp && html`<${HelpOverlay} onClose=${() => setShowHelp(false)} />`}

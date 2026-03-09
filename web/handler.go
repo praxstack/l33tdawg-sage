@@ -110,6 +110,11 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 		r.Get("/v1/dashboard/settings/boot-instructions", h.handleGetBootInstructions)
 		r.Post("/v1/dashboard/settings/boot-instructions", h.handleSaveBootInstructions)
 
+		// Software Update
+		r.Get("/v1/dashboard/settings/update/check", h.handleCheckUpdate)
+		r.Post("/v1/dashboard/settings/update/apply", h.handleApplyUpdate)
+		r.Post("/v1/dashboard/settings/update/restart", h.handleRestart)
+
 		// Synaptic Ledger (encryption vault) management
 		r.Get("/v1/dashboard/settings/ledger", h.handleGetLedgerStatus)
 		r.Post("/v1/dashboard/settings/ledger/enable", h.handleEnableLedger)

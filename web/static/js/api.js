@@ -233,3 +233,26 @@ export async function rotateAgentKey(agentId) {
     });
     return res.json();
 }
+
+// ─── Software Update API ───
+
+export async function checkForUpdate() {
+    const res = await fetch(`${API_BASE}/v1/dashboard/settings/update/check`);
+    return res.json();
+}
+
+export async function applyUpdate(downloadUrl) {
+    const res = await fetch(`${API_BASE}/v1/dashboard/settings/update/apply`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ download_url: downloadUrl }),
+    });
+    return res.json();
+}
+
+export async function restartServer() {
+    const res = await fetch(`${API_BASE}/v1/dashboard/settings/update/restart`, {
+        method: 'POST',
+    });
+    return res.json();
+}

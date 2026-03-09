@@ -113,23 +113,38 @@ test.describe('CEREBRUM Guide', () => {
 });
 
 test.describe('Settings Page', () => {
-    test('shows chain health section', async ({ page }) => {
+    test('shows settings tabs', async ({ page }) => {
+        await page.goto(`${BASE}/ui/#/settings`);
+        await page.waitForSelector('.settings-page');
+
+        await expect(page.locator('.settings-tabs')).toBeVisible();
+        await expect(page.locator('.settings-tab').filter({ hasText: 'Overview' })).toBeVisible();
+        await expect(page.locator('.settings-tab').filter({ hasText: 'Security' })).toBeVisible();
+        await expect(page.locator('.settings-tab').filter({ hasText: 'Configuration' })).toBeVisible();
+        await expect(page.locator('.settings-tab').filter({ hasText: 'Update' })).toBeVisible();
+    });
+
+    test('shows chain health section on Overview tab', async ({ page }) => {
         await page.goto(`${BASE}/ui/#/settings`);
         await page.waitForSelector('.settings-page');
 
         await expect(page.locator('h3').filter({ hasText: 'Chain Health' })).toBeVisible();
     });
 
-    test('shows contextual tooltips toggle', async ({ page }) => {
+    test('shows contextual tooltips toggle on Configuration tab', async ({ page }) => {
         await page.goto(`${BASE}/ui/#/settings`);
         await page.waitForSelector('.settings-page');
 
+        await page.locator('.settings-tab').filter({ hasText: 'Configuration' }).click();
         await expect(page.locator('.label').filter({ hasText: 'Contextual Tooltips' })).toBeVisible();
     });
 
     test('tooltips toggle works', async ({ page }) => {
         await page.goto(`${BASE}/ui/#/settings`);
         await page.waitForSelector('.settings-page');
+
+        // Switch to Configuration tab
+        await page.locator('.settings-tab').filter({ hasText: 'Configuration' }).click();
 
         // Find the tooltips toggle and scroll to it
         const row = page.locator('.settings-row').filter({ hasText: 'Contextual Tooltips' });
@@ -149,10 +164,11 @@ test.describe('Settings Page', () => {
         expect(tipCount).toBeGreaterThanOrEqual(1);
     });
 
-    test('shows Synaptic Ledger section', async ({ page }) => {
+    test('shows Synaptic Ledger section on Security tab', async ({ page }) => {
         await page.goto(`${BASE}/ui/#/settings`);
         await page.waitForSelector('.settings-page');
 
+        await page.locator('.settings-tab').filter({ hasText: 'Security' }).click();
         await expect(page.locator('h3').filter({ hasText: 'Synaptic Ledger' })).toBeVisible();
     });
 });
@@ -261,10 +277,11 @@ test.describe('Import Page', () => {
 });
 
 test.describe('Settings — Cleanup Section', () => {
-    test('cleanup section exists on settings page', async ({ page }) => {
+    test('cleanup section exists on Configuration tab', async ({ page }) => {
         await page.goto(`${BASE}/ui/#/settings`);
         await page.waitForSelector('.settings-page', { timeout: 10000 });
 
+        await page.locator('.settings-tab').filter({ hasText: 'Configuration' }).click();
         const cleanupSection = page.locator('.cleanup-section');
         await expect(cleanupSection).toBeVisible();
         await expect(cleanupSection).toContainText('Auto-Cleanup');
@@ -299,8 +316,10 @@ test.describe('API — Agent Update & Redeploy Status', () => {
 });
 
 test.describe('Boot Instructions', () => {
-    test('settings page shows boot instructions section', async ({ page }) => {
+    test('Configuration tab shows boot instructions section', async ({ page }) => {
         await page.goto(`${BASE}/ui/#/settings`);
+        await page.waitForSelector('.settings-page');
+        await page.locator('.settings-tab').filter({ hasText: 'Configuration' }).click();
         await page.waitForSelector('.boot-instructions-section');
         await expect(page.locator('.boot-instructions-section')).toContainText('Boot Instructions');
         await expect(page.locator('.boot-textarea')).toBeVisible();
@@ -329,6 +348,8 @@ test.describe('Boot Instructions', () => {
 
     test('boot instructions Save button enables on change', async ({ page }) => {
         await page.goto(`${BASE}/ui/#/settings`);
+        await page.waitForSelector('.settings-page');
+        await page.locator('.settings-tab').filter({ hasText: 'Configuration' }).click();
         await page.waitForSelector('.boot-textarea');
 
         const textarea = page.locator('.boot-textarea');
@@ -340,5 +361,59 @@ test.describe('Boot Instructions', () => {
         // Type something
         await textarea.fill('Test instruction');
         await expect(saveBtn).not.toBeDisabled();
+    });
+});
+
+test.describe('Software Update', () => {
+    test('Update tab shows Software Update section', async ({ page }) => {
+        await page.goto(`${BASE}/ui/#/settings`);
+        await page.waitForSelector('.settings-page');
+
+        await page.locator('.settings-tab').filter({ hasText: 'Update' }).click();
+        const section = page.locator('.update-section');
+        await expect(section).toBeVisible();
+        await expect(section).toContainText('Software Update');
+    });
+
+    test('update check API returns version info', async ({ request }) => {
+        const res = await request.get(`${BASE}/v1/dashboard/settings/update/check`);
+        expect(res.ok()).toBeTruthy();
+        const body = await res.json();
+        expect(body.current_version).toBeDefined();
+        expect(body.platform).toBeDefined();
+    });
+
+    test('update section shows current version', async ({ page }) => {
+        await page.goto(`${BASE}/ui/#/settings`);
+        await page.waitForSelector('.settings-page');
+        await page.locator('.settings-tab').filter({ hasText: 'Update' }).click();
+
+        // Wait for version info to load
+        await page.waitForFunction(() => {
+            const el = document.querySelector('.update-version-row .mono');
+            return el && el.textContent && el.textContent !== '...';
+        }, { timeout: 15000 });
+
+        const versionRow = page.locator('.update-version-row').first();
+        await expect(versionRow).toContainText('Current Version');
+    });
+
+    test('update section has Check for Updates button', async ({ page }) => {
+        await page.goto(`${BASE}/ui/#/settings`);
+        await page.waitForSelector('.settings-page');
+        await page.locator('.settings-tab').filter({ hasText: 'Update' }).click();
+        await page.waitForSelector('.update-section');
+
+        const checkBtn = page.locator('.update-actions .btn').filter({ hasText: 'Check for Updates' });
+        await expect(checkBtn).toBeVisible();
+    });
+
+    test('update apply endpoint rejects invalid URL', async ({ request }) => {
+        const res = await request.post(`${BASE}/v1/dashboard/settings/update/apply`, {
+            data: { download_url: 'https://evil.com/malware.tar.gz' },
+        });
+        expect(res.ok()).toBeFalsy();
+        const body = await res.json();
+        expect(body.error).toContain('GitHub release');
     });
 });
