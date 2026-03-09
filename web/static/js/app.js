@@ -1,6 +1,6 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
-import { fetchStats, fetchGraph, fetchMemories, deleteMemory, fetchHealth, checkAuth, login, importMemories, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger } from './api.js';
+import { fetchStats, fetchGraph, fetchMemories, deleteMemory, fetchHealth, checkAuth, login, importMemories, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger } from './api.js';
 
 const { h, render, createContext } = preact;
 const { useState, useEffect, useRef, useCallback, useContext } = preactHooks;
@@ -1134,6 +1134,70 @@ function SynapticLedger() {
 }
 
 // ============================================================================
+// Boot Instructions Component
+// ============================================================================
+
+function BootInstructions() {
+    const [instructions, setInstructions] = useState('');
+    const [original, setOriginal] = useState('');
+    const [saving, setSaving] = useState(false);
+    const [saved, setSaved] = useState(false);
+
+    useEffect(() => {
+        fetchBootInstructions().then(data => {
+            setInstructions(data.instructions || '');
+            setOriginal(data.instructions || '');
+        }).catch(() => {});
+    }, []);
+
+    const handleSave = async () => {
+        if (saving) return;
+        setSaving(true);
+        setSaved(false);
+        try {
+            const res = await saveBootInstructions(instructions);
+            if (res.ok) {
+                setOriginal(instructions);
+                setSaved(true);
+                setTimeout(() => setSaved(false), 2000);
+            }
+        } catch (e) { /* ignore */ }
+        setSaving(false);
+    };
+
+    const dirty = instructions !== original;
+
+    return html`
+        <div class="settings-section full-width boot-instructions-section">
+            <h3>
+                <svg width="16" height="16" viewBox="0 0 16 16" style="vertical-align:-2px;margin-right:6px">
+                    <path d="M8 1L2 4v4c0 3.5 2.6 6.8 6 7.9 3.4-1.1 6-4.4 6-7.9V4L8 1z" stroke="currentColor" fill="none" stroke-width="1.5"/>
+                    <path d="M6 8l2 2 3-4" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                Boot Instructions <${HelpTip} text="Custom instructions injected into every MCP inception. Use this to configure agent behavior on startup — like pulling reflections, checking tasks, or setting personality." />
+            </h3>
+            <p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">
+                These instructions are appended to every <code style="background:var(--bg-elevated);padding:1px 4px;border-radius:3px;">sage_inception</code> response.
+                Connected AI agents will follow them at the start of each session.
+            </p>
+            <textarea
+                class="boot-textarea"
+                placeholder="e.g. Pull yesterday's last reflection before starting. Always check pending tasks first. Use a friendly but professional tone."
+                value=${instructions}
+                onInput=${e => setInstructions(e.target.value)}
+                rows="5"
+            ></textarea>
+            <div style="display:flex;align-items:center;gap:8px;margin-top:8px;">
+                <button class="btn btn-primary" onClick=${handleSave} disabled=${!dirty || saving}>
+                    ${saving ? 'Saving...' : saved ? 'Saved!' : 'Save'}
+                </button>
+                ${dirty && !saving && html`<span style="font-size:11px;color:var(--warning);">Unsaved changes</span>`}
+            </div>
+        </div>
+    `;
+}
+
+// ============================================================================
 // Cleanup Settings Component
 // ============================================================================
 
@@ -1686,6 +1750,9 @@ function SettingsPage() {
                 <div class="settings-section full-width">
                     ${html`<${CleanupSettings} />`}
                 </div>
+
+                <!-- Boot Instructions — full width -->
+                ${html`<${BootInstructions} />`}
             </div>
         </div>
     `;

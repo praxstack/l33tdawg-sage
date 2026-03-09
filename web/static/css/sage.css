@@ -2127,6 +2127,30 @@ input[type="range"]::-moz-range-thumb {
     line-height: 1.5;
 }
 
+/* Boot instructions textarea */
+.boot-textarea {
+    width: 100%;
+    min-height: 100px;
+    padding: 12px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    line-height: 1.6;
+    resize: vertical;
+    outline: none;
+    transition: border-color 0.2s;
+}
+.boot-textarea:focus {
+    border-color: var(--primary);
+}
+.boot-textarea::placeholder {
+    color: var(--text-muted);
+    opacity: 0.6;
+}
+
 /* Pairing code display */
 .pairing-code-display {
     font-size: 36px;

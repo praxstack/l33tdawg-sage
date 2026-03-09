@@ -107,6 +107,8 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 		r.Get("/v1/dashboard/settings/cleanup", h.handleGetCleanupSettings)
 		r.Post("/v1/dashboard/settings/cleanup", h.handleSaveCleanupSettings)
 		r.Post("/v1/dashboard/cleanup/run", h.handleRunCleanup)
+		r.Get("/v1/dashboard/settings/boot-instructions", h.handleGetBootInstructions)
+		r.Post("/v1/dashboard/settings/boot-instructions", h.handleSaveBootInstructions)
 
 		// Synaptic Ledger (encryption vault) management
 		r.Get("/v1/dashboard/settings/ledger", h.handleGetLedgerStatus)
@@ -667,4 +669,38 @@ func (h *DashboardHandler) handleRunCleanup(w http.ResponseWriter, r *http.Reque
 	}
 
 	writeJSONResp(w, http.StatusOK, result)
+}
+
+// handleGetBootInstructions returns the custom boot instructions for MCP inception.
+func (h *DashboardHandler) handleGetBootInstructions(w http.ResponseWriter, r *http.Request) {
+	if h.prefStore == nil {
+		writeError(w, http.StatusNotImplemented, "preferences not available")
+		return
+	}
+	instructions, err := h.prefStore.GetPreference(r.Context(), "boot_instructions")
+	if err != nil {
+		instructions = ""
+	}
+	writeJSONResp(w, http.StatusOK, map[string]any{"instructions": instructions})
+}
+
+// handleSaveBootInstructions saves custom boot instructions for MCP inception.
+func (h *DashboardHandler) handleSaveBootInstructions(w http.ResponseWriter, r *http.Request) {
+	if h.prefStore == nil {
+		writeError(w, http.StatusNotImplemented, "preferences not available")
+		return
+	}
+	var body struct {
+		Instructions string `json:"instructions"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if err := h.prefStore.SetPreference(r.Context(), "boot_instructions", body.Instructions); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSONResp(w, http.StatusOK, map[string]any{"ok": true, "instructions": body.Instructions})
 }

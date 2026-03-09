@@ -297,3 +297,48 @@ test.describe('API — Agent Update & Redeploy Status', () => {
         expect(body).toHaveProperty('active');
     });
 });
+
+test.describe('Boot Instructions', () => {
+    test('settings page shows boot instructions section', async ({ page }) => {
+        await page.goto(`${BASE}/ui/#/settings`);
+        await page.waitForSelector('.boot-instructions-section');
+        await expect(page.locator('.boot-instructions-section')).toContainText('Boot Instructions');
+        await expect(page.locator('.boot-textarea')).toBeVisible();
+    });
+
+    test('boot instructions API round-trip', async ({ request }) => {
+        // Save
+        const saveRes = await request.post(`${BASE}/v1/dashboard/settings/boot-instructions`, {
+            data: { instructions: 'E2E test: pull last reflection on boot' },
+        });
+        expect(saveRes.ok()).toBeTruthy();
+        const saveBody = await saveRes.json();
+        expect(saveBody.ok).toBe(true);
+
+        // Read back
+        const getRes = await request.get(`${BASE}/v1/dashboard/settings/boot-instructions`);
+        expect(getRes.ok()).toBeTruthy();
+        const getBody = await getRes.json();
+        expect(getBody.instructions).toBe('E2E test: pull last reflection on boot');
+
+        // Clear it
+        await request.post(`${BASE}/v1/dashboard/settings/boot-instructions`, {
+            data: { instructions: '' },
+        });
+    });
+
+    test('boot instructions Save button enables on change', async ({ page }) => {
+        await page.goto(`${BASE}/ui/#/settings`);
+        await page.waitForSelector('.boot-textarea');
+
+        const textarea = page.locator('.boot-textarea');
+        const saveBtn = page.locator('.boot-instructions-section .btn-primary');
+
+        // Should be disabled initially (no changes)
+        await expect(saveBtn).toBeDisabled();
+
+        // Type something
+        await textarea.fill('Test instruction');
+        await expect(saveBtn).not.toBeDisabled();
+    });
+});

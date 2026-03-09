@@ -206,6 +206,20 @@ export async function startRedeploy(operation, agentId) {
     return res.json();
 }
 
+export async function fetchBootInstructions() {
+    const res = await fetch(`${API_BASE}/v1/dashboard/settings/boot-instructions`);
+    return res.json();
+}
+
+export async function saveBootInstructions(instructions) {
+    const res = await fetch(`${API_BASE}/v1/dashboard/settings/boot-instructions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ instructions }),
+    });
+    return res.json();
+}
+
 export async function createPairingCode(agentId) {
     const res = await fetch(`${API_BASE}/v1/dashboard/network/agents/${agentId}/pair`, {
         method: 'POST',
