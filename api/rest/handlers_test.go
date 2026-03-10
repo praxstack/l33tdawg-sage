@@ -159,6 +159,14 @@ func (m *mockMemoryStore) GetOpenTasks(_ context.Context, _ string, _ string) ([
 	return tasks, nil
 }
 
+func (m *mockMemoryStore) SetTags(_ context.Context, _ string, _ []string) error { return nil }
+func (m *mockMemoryStore) GetTags(_ context.Context, _ string) ([]string, error) { return nil, nil }
+func (m *mockMemoryStore) ListAllTags(_ context.Context) ([]store.TagCount, error) {
+	return nil, nil
+}
+func (m *mockMemoryStore) ListMemoriesByTag(_ context.Context, _ string, _, _ int) ([]*memory.MemoryRecord, int, error) {
+	return nil, 0, nil
+}
 func (m *mockMemoryStore) Close() error { return nil }
 
 type mockScoreStore struct {

@@ -125,6 +125,11 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 		r.Get("/v1/dashboard/tasks", h.handleGetTasks)
 		r.Put("/v1/dashboard/tasks/{id}/status", h.handleUpdateTaskStatusDashboard)
 
+		// Tags
+		r.Get("/v1/dashboard/tags", h.handleListTags)
+		r.Get("/v1/dashboard/memory/{id}/tags", h.handleGetMemoryTags)
+		r.Put("/v1/dashboard/memory/{id}/tags", h.handleSetMemoryTags)
+
 		// Auto-start (open at login)
 		r.Get("/v1/dashboard/settings/autostart", h.handleGetAutostart)
 		r.Post("/v1/dashboard/settings/autostart", h.handleSetAutostart)
@@ -282,6 +287,7 @@ func (h *DashboardHandler) handleListMemories(w http.ResponseWriter, r *http.Req
 
 	opts := store.ListOptions{
 		DomainTag:       q.Get("domain"),
+		Tag:             q.Get("tag"),
 		Provider:        q.Get("provider"),
 		Status:          q.Get("status"),
 		SubmittingAgent: q.Get("agent"),
@@ -439,7 +445,7 @@ func (h *DashboardHandler) handleDeleteMemory(w http.ResponseWriter, r *http.Req
 	writeJSONResp(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
-// handleUpdateMemory updates a memory's domain tag.
+// handleUpdateMemory updates a memory's domain tag and/or tags.
 func (h *DashboardHandler) handleUpdateMemory(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if id == "" {
@@ -448,22 +454,76 @@ func (h *DashboardHandler) handleUpdateMemory(w http.ResponseWriter, r *http.Req
 	}
 
 	var body struct {
-		Domain string `json:"domain"`
+		Domain string   `json:"domain"`
+		Tags   []string `json:"tags,omitempty"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB limit
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if body.Domain == "" {
-		writeError(w, http.StatusBadRequest, "domain is required")
+	if body.Domain == "" && body.Tags == nil {
+		writeError(w, http.StatusBadRequest, "domain or tags is required")
 		return
 	}
-	if err := h.store.UpdateDomainTag(r.Context(), id, body.Domain); err != nil {
+	if body.Domain != "" {
+		if err := h.store.UpdateDomainTag(r.Context(), id, body.Domain); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	if body.Tags != nil {
+		if err := h.store.SetTags(r.Context(), id, body.Tags); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	writeJSONResp(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
+// handleListTags returns all unique tags with counts.
+func (h *DashboardHandler) handleListTags(w http.ResponseWriter, r *http.Request) {
+	tags, err := h.store.ListAllTags(r.Context())
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSONResp(w, http.StatusOK, map[string]string{"status": "updated"})
+	if tags == nil {
+		tags = []store.TagCount{}
+	}
+	writeJSONResp(w, http.StatusOK, map[string]any{"tags": tags})
+}
+
+// handleGetMemoryTags returns tags for a specific memory.
+func (h *DashboardHandler) handleGetMemoryTags(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	tags, err := h.store.GetTags(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if tags == nil {
+		tags = []string{}
+	}
+	writeJSONResp(w, http.StatusOK, map[string]any{"memory_id": id, "tags": tags})
+}
+
+// handleSetMemoryTags replaces all tags on a memory.
+func (h *DashboardHandler) handleSetMemoryTags(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var body struct {
+		Tags []string `json:"tags"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if err := h.store.SetTags(r.Context(), id, body.Tags); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSONResp(w, http.StatusOK, map[string]any{"memory_id": id, "tags": body.Tags, "status": "updated"})
 }
 
 // handleGetTasks returns open tasks from the backlog.

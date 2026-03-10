@@ -390,6 +390,14 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 		PRIMARY KEY (source_id, target_id)
 	);
 	CREATE INDEX IF NOT EXISTS idx_memory_links_target ON memory_links(target_id);
+
+	CREATE TABLE IF NOT EXISTS memory_tags (
+		memory_id  TEXT NOT NULL REFERENCES memories(memory_id) ON DELETE CASCADE,
+		tag        TEXT NOT NULL,
+		created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+		PRIMARY KEY (memory_id, tag)
+	);
+	CREATE INDEX IF NOT EXISTS idx_memory_tags_tag ON memory_tags(tag);
 	`
 
 	if _, err := s.conn.ExecContext(ctx, schema); err != nil {
@@ -965,6 +973,12 @@ func (s *SQLiteStore) ListMemories(ctx context.Context, opts ListOptions) ([]*me
 		query += filter
 		countQuery += filter
 		args = append(args, opts.SubmittingAgent)
+	}
+	if opts.Tag != "" {
+		filter := " AND memory_id IN (SELECT memory_id FROM memory_tags WHERE tag = ?)"
+		query += filter
+		countQuery += filter
+		args = append(args, opts.Tag)
 	}
 
 	switch opts.Sort {
@@ -2266,4 +2280,130 @@ func (s *SQLiteStore) GetOpenTasks(ctx context.Context, domain string, provider 
 		records = append(records, rec)
 	}
 	return records, rows.Err()
+}
+
+// ---- Tag operations ----
+
+// SetTags replaces all tags on a memory with the given set.
+func (s *SQLiteStore) SetTags(ctx context.Context, memoryID string, tags []string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_tags WHERE memory_id = ?`, memoryID); err != nil {
+		return fmt.Errorf("clear tags: %w", err)
+	}
+
+	if len(tags) > 0 {
+		stmt, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO memory_tags (memory_id, tag) VALUES (?, ?)`)
+		if err != nil {
+			return fmt.Errorf("prepare insert: %w", err)
+		}
+		defer stmt.Close()
+		for _, tag := range tags {
+			tag = strings.TrimSpace(tag)
+			if tag == "" {
+				continue
+			}
+			if _, err := stmt.ExecContext(ctx, memoryID, tag); err != nil {
+				return fmt.Errorf("insert tag %q: %w", tag, err)
+			}
+		}
+	}
+
+	return tx.Commit()
+}
+
+// GetTags returns all tags for a memory.
+func (s *SQLiteStore) GetTags(ctx context.Context, memoryID string) ([]string, error) {
+	rows, err := s.conn.QueryContext(ctx, `SELECT tag FROM memory_tags WHERE memory_id = ? ORDER BY tag`, memoryID)
+	if err != nil {
+		return nil, fmt.Errorf("query tags: %w", err)
+	}
+	defer rows.Close()
+
+	var tags []string
+	for rows.Next() {
+		var tag string
+		if err := rows.Scan(&tag); err != nil {
+			return nil, fmt.Errorf("scan tag: %w", err)
+		}
+		tags = append(tags, tag)
+	}
+	return tags, rows.Err()
+}
+
+// ListAllTags returns all unique tags with their memory counts.
+func (s *SQLiteStore) ListAllTags(ctx context.Context) ([]TagCount, error) {
+	rows, err := s.conn.QueryContext(ctx,
+		`SELECT tag, COUNT(*) as cnt FROM memory_tags GROUP BY tag ORDER BY cnt DESC, tag ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("list tags: %w", err)
+	}
+	defer rows.Close()
+
+	var tags []TagCount
+	for rows.Next() {
+		var tc TagCount
+		if err := rows.Scan(&tc.Tag, &tc.Count); err != nil {
+			return nil, fmt.Errorf("scan tag count: %w", err)
+		}
+		tags = append(tags, tc)
+	}
+	return tags, rows.Err()
+}
+
+// ListMemoriesByTag returns memories that have a specific tag.
+func (s *SQLiteStore) ListMemoriesByTag(ctx context.Context, tag string, limit, offset int) ([]*memory.MemoryRecord, int, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+
+	var total int
+	if err := s.conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM memory_tags WHERE tag = ?`, tag).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count by tag: %w", err)
+	}
+
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT m.memory_id, m.submitting_agent, m.content, m.content_hash,
+			m.memory_type, m.domain_tag, m.provider, m.confidence_score, m.status, m.parent_hash,
+			m.created_at, m.committed_at, m.deprecated_at, COALESCE(m.task_status, '')
+		FROM memories m
+		INNER JOIN memory_tags mt ON m.memory_id = mt.memory_id
+		WHERE mt.tag = ?
+		ORDER BY m.created_at DESC
+		LIMIT ? OFFSET ?`, tag, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list by tag: %w", err)
+	}
+	defer rows.Close()
+
+	var results []*memory.MemoryRecord
+	for rows.Next() {
+		var r memory.MemoryRecord
+		var memType, st, createdAt, taskStatus string
+		var parentHash, committedAt, deprecatedAt *string
+		if scanErr := rows.Scan(&r.MemoryID, &r.SubmittingAgent, &r.Content, &r.ContentHash,
+			&memType, &r.DomainTag, &r.Provider, &r.ConfidenceScore, &st, &parentHash,
+			&createdAt, &committedAt, &deprecatedAt, &taskStatus); scanErr != nil {
+			return nil, 0, fmt.Errorf("scan memory: %w", scanErr)
+		}
+		r.MemoryType = memory.MemoryType(memType)
+		r.Status = memory.MemoryStatus(st)
+		r.TaskStatus = memory.TaskStatus(taskStatus)
+		r.CreatedAt = parseTime(createdAt)
+		r.CommittedAt = parseTimePtr(committedAt)
+		r.DeprecatedAt = parseTimePtr(deprecatedAt)
+		if parentHash != nil {
+			r.ParentHash = *parentHash
+		}
+		if decContent, decErr := s.decryptContent(r.Content); decErr == nil {
+			r.Content = decContent
+		}
+		results = append(results, &r)
+	}
+	return results, total, nil
 }

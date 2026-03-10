@@ -26,6 +26,7 @@ export async function fetchMemories(params = {}) {
     if (params.offset) q.set('offset', params.offset);
     if (params.sort) q.set('sort', params.sort);
     if (params.agent) q.set('agent', params.agent);
+    if (params.tag) q.set('tag', params.tag);
     const res = await fetch(`${API_BASE}/v1/dashboard/memory/list?${q}`);
     return res.json();
 }
@@ -230,6 +231,27 @@ export async function createPairingCode(agentId) {
 export async function rotateAgentKey(agentId) {
     const res = await fetch(`${API_BASE}/v1/dashboard/network/agents/${agentId}/rotate-key`, {
         method: 'POST',
+    });
+    return res.json();
+}
+
+// ─── Tags API ───
+
+export async function fetchTags() {
+    const res = await fetch(`${API_BASE}/v1/dashboard/tags`);
+    return res.json();
+}
+
+export async function fetchMemoryTags(id) {
+    const res = await fetch(`${API_BASE}/v1/dashboard/memory/${id}/tags`);
+    return res.json();
+}
+
+export async function setMemoryTags(id, tags) {
+    const res = await fetch(`${API_BASE}/v1/dashboard/memory/${id}/tags`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tags }),
     });
     return res.json();
 }

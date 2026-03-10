@@ -28,6 +28,7 @@ func (s *Server) registerTools() map[string]Tool {
 					"domain":     map[string]any{"type": "string", "description": "Domain tag (e.g. general, security, code)", "default": "general"},
 					"type":       map[string]any{"type": "string", "enum": []string{"fact", "observation", "inference", "task"}, "default": "observation"},
 					"confidence": map[string]any{"type": "number", "description": "Confidence score 0-1", "default": 0.8},
+					"tags":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "User-defined labels for this memory (e.g. 'important', 'project-x')"},
 				},
 				"required": []string{"content"},
 			},
@@ -63,11 +64,12 @@ func (s *Server) registerTools() map[string]Tool {
 		},
 		"sage_list": {
 			Name:        "sage_list",
-			Description: "Browse memories with filters. Use this to see what memories exist in a domain or with a specific status.",
+			Description: "Browse memories with filters. Use this to see what memories exist in a domain, with a specific status, or tagged with a label.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"domain": map[string]any{"type": "string", "description": "Filter by domain tag"},
+					"tag":    map[string]any{"type": "string", "description": "Filter by user-defined tag"},
 					"status": map[string]any{"type": "string", "description": "Filter by status (proposed, committed, deprecated)"},
 					"limit":  map[string]any{"type": "integer", "description": "Max results to return", "default": 20},
 					"offset": map[string]any{"type": "integer", "description": "Pagination offset", "default": 0},
@@ -231,14 +233,35 @@ func (s *Server) toolRemember(ctx context.Context, params map[string]any) (any, 
 		return nil, fmt.Errorf("submit memory: %w", err)
 	}
 
-	return map[string]any{
+	// Apply tags if provided.
+	var tags []string
+	if rawTags, ok := params["tags"]; ok {
+		if tagArr, ok := rawTags.([]any); ok {
+			for _, t := range tagArr {
+				if ts, ok := t.(string); ok && ts != "" {
+					tags = append(tags, ts)
+				}
+			}
+		}
+	}
+	if len(tags) > 0 && submitResp.MemoryID != "" {
+		tagReq, _ := json.Marshal(map[string]any{"tags": tags})
+		var tagResp map[string]any
+		_ = s.doSignedJSON(ctx, "PUT", "/v1/dashboard/memory/"+submitResp.MemoryID+"/tags", tagReq, &tagResp)
+	}
+
+	result := map[string]any{
 		"memory_id": submitResp.MemoryID,
 		"status":    submitResp.Status,
 		"tx_hash":   submitResp.TxHash,
 		"domain":    domain,
 		"type":      memType,
 		"provider":  s.provider,
-	}, nil
+	}
+	if len(tags) > 0 {
+		result["tags"] = tags
+	}
+	return result, nil
 }
 
 func (s *Server) toolRecall(ctx context.Context, params map[string]any) (any, error) {
@@ -327,6 +350,7 @@ func (s *Server) toolForget(ctx context.Context, params map[string]any) (any, er
 
 func (s *Server) toolList(ctx context.Context, params map[string]any) (any, error) {
 	domain := stringParam(params, "domain", "")
+	tag := stringParam(params, "tag", "")
 	status := stringParam(params, "status", "")
 	limit := intParam(params, "limit", 20)
 	offset := intParam(params, "offset", 0)
@@ -335,6 +359,9 @@ func (s *Server) toolList(ctx context.Context, params map[string]any) (any, erro
 	q := url.Values{}
 	if domain != "" {
 		q.Set("domain", domain)
+	}
+	if tag != "" {
+		q.Set("tag", tag)
 	}
 	if s.provider != "" {
 		q.Set("provider", s.provider)

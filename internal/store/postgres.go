@@ -1148,6 +1148,24 @@ func (s *PostgresStore) GetOpenTasks(ctx context.Context, domain string, provide
 	return records, rows.Err()
 }
 
+// ---- Tag operations (stubs — Postgres uses enterprise deployment, tags are SQLite/personal) ----
+
+func (s *PostgresStore) SetTags(_ context.Context, _ string, _ []string) error {
+	return nil
+}
+
+func (s *PostgresStore) GetTags(_ context.Context, _ string) ([]string, error) {
+	return nil, nil
+}
+
+func (s *PostgresStore) ListAllTags(_ context.Context) ([]TagCount, error) {
+	return nil, nil
+}
+
+func (s *PostgresStore) ListMemoriesByTag(_ context.Context, _ string, _, _ int) ([]*memory.MemoryRecord, int, error) {
+	return nil, 0, nil
+}
+
 func (s *PostgresStore) Close() error {
 	if s.pool != nil {
 		s.pool.Close()

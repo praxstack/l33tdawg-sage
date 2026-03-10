@@ -78,6 +78,7 @@ type QueryOptions struct {
 // ListOptions defines parameters for listing memories.
 type ListOptions struct {
 	DomainTag       string
+	Tag             string // filter by user-defined tag
 	Provider        string
 	Status          string
 	SubmittingAgent string // filter memories by agent_id
@@ -125,7 +126,18 @@ type MemoryStore interface {
 	LinkMemories(ctx context.Context, sourceID, targetID, linkType string) error
 	GetLinkedMemories(ctx context.Context, memoryID string) ([]memory.MemoryLink, error)
 	GetOpenTasks(ctx context.Context, domain string, provider string) ([]*memory.MemoryRecord, error)
+	// Tags
+	SetTags(ctx context.Context, memoryID string, tags []string) error
+	GetTags(ctx context.Context, memoryID string) ([]string, error)
+	ListAllTags(ctx context.Context) ([]TagCount, error)
+	ListMemoriesByTag(ctx context.Context, tag string, limit, offset int) ([]*memory.MemoryRecord, int, error)
 	Close() error
+}
+
+// TagCount represents a tag and how many memories use it.
+type TagCount struct {
+	Tag   string `json:"tag"`
+	Count int    `json:"count"`
 }
 
 // ValidatorScoreStore defines the interface for validator score storage.

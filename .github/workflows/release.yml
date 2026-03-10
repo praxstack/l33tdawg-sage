@@ -41,20 +41,18 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload stable-named Linux tarball for direct download links
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           cp "dist/sage-lite_${VERSION}_linux_amd64.tar.gz" "dist/sage-lite-linux-amd64.tar.gz"
+          gh release upload "${GITHUB_REF_NAME}" "dist/sage-lite-linux-amd64.tar.gz" --clobber
         shell: bash
-
-      - name: Upload stable-named asset
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/sage-lite-linux-amd64.tar.gz
 
   macos-dmg:
     name: macOS DMG (${{ matrix.arch }})
     runs-on: macos-latest
-    needs: test
+    needs: goreleaser
     strategy:
       matrix:
         arch: [arm64, amd64]
@@ -108,16 +106,18 @@ jobs:
              "dist/macos-${{ steps.arch.outputs.label }}/SAGE-macOS-${{ steps.arch.outputs.label }}.dmg"
 
       - name: Upload DMG to release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/macos-${{ steps.arch.outputs.label }}/SAGE-${{ github.ref_name }}-macOS-${{ steps.arch.outputs.label }}.dmg
-            dist/macos-${{ steps.arch.outputs.label }}/SAGE-macOS-${{ steps.arch.outputs.label }}.dmg
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.ref_name }}" \
+            "dist/macos-${{ steps.arch.outputs.label }}/SAGE-${{ github.ref_name }}-macOS-${{ steps.arch.outputs.label }}.dmg" \
+            "dist/macos-${{ steps.arch.outputs.label }}/SAGE-macOS-${{ steps.arch.outputs.label }}.dmg" \
+            --clobber
 
   windows-exe:
     name: Windows Installer
     runs-on: ubuntu-latest
-    needs: test
+    needs: goreleaser
     steps:
       - uses: actions/checkout@v4
         with:
@@ -147,8 +147,10 @@ jobs:
              "dist/windows-amd64/SAGE-Windows-Setup.exe"
 
       - name: Upload EXE to release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            dist/windows-amd64/SAGE-${{ github.ref_name }}-Windows-Setup.exe
-            dist/windows-amd64/SAGE-Windows-Setup.exe
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.ref_name }}" \
+            "dist/windows-amd64/SAGE-${{ github.ref_name }}-Windows-Setup.exe" \
+            "dist/windows-amd64/SAGE-Windows-Setup.exe" \
+            --clobber

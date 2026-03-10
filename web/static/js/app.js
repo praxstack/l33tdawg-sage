@@ -1,6 +1,6 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
-import { fetchStats, fetchGraph, fetchMemories, deleteMemory, fetchHealth, checkAuth, login, importMemories, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer } from './api.js';
+import { fetchStats, fetchGraph, fetchMemories, deleteMemory, fetchHealth, checkAuth, login, importMemories, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer } from './api.js';
 
 const { h, render, createContext } = preact;
 const { useState, useEffect, useRef, useCallback, useContext } = preactHooks;
@@ -649,6 +649,60 @@ function simulateForces(state, W, H) {
 // Memory Detail Panel
 // ============================================================================
 
+function TagEditor({ memoryId }) {
+    const [tags, setTags] = useState([]);
+    const [input, setInput] = useState('');
+    const [loading, setLoading] = useState(true);
+
+    useEffect(() => {
+        if (!memoryId) return;
+        fetchMemoryTags(memoryId).then(data => {
+            setTags(data.tags || []);
+            setLoading(false);
+        }).catch(() => setLoading(false));
+    }, [memoryId]);
+
+    async function addTag() {
+        const tag = input.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+        if (!tag || tags.includes(tag)) { setInput(''); return; }
+        const newTags = [...tags, tag];
+        setTags(newTags);
+        setInput('');
+        await setMemoryTags(memoryId, newTags);
+    }
+
+    async function removeTag(tag) {
+        const newTags = tags.filter(t => t !== tag);
+        setTags(newTags);
+        await setMemoryTags(memoryId, newTags);
+    }
+
+    function handleKeyDown(e) {
+        if (e.key === 'Enter') { e.preventDefault(); addTag(); }
+    }
+
+    if (loading) return html`<span style="font-size:12px;color:var(--text-dim);">Loading tags...</span>`;
+
+    return html`
+        <div class="tag-editor">
+            <div class="tag-chips">
+                ${tags.map(t => html`
+                    <span class="tag-chip">
+                        ${t}
+                        <span class="tag-chip-remove" onClick=${() => removeTag(t)}>x</span>
+                    </span>
+                `)}
+            </div>
+            <div class="tag-input-row">
+                <input class="tag-input" type="text" placeholder="Add tag..."
+                    value=${input} onInput=${e => setInput(e.target.value)}
+                    onKeyDown=${handleKeyDown} />
+                <button class="tag-add-btn" onClick=${addTag} disabled=${!input.trim()}>+</button>
+            </div>
+        </div>
+    `;
+}
+
 function MemoryDetail({ memory, onClose, onDelete, onNavigate }) {
     const [confirming, setConfirming] = useState(false);
     const [agentInfo, setAgentInfo] = useState(null);
@@ -754,6 +808,11 @@ function MemoryDetail({ memory, onClose, onDelete, onNavigate }) {
                     `}
                 </div>
 
+                <div class="detail-section" style="margin-top: 16px;">
+                    <label>Tags</label>
+                    ${html`<${TagEditor} memoryId=${memory.id || memory.memory_id} />`}
+                </div>
+
                 <div class="detail-section" style="margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border);">
                     <button class="btn btn-danger" onClick=${handleDelete}>
                         ${confirming ? 'Confirm Delete' : 'Forget Memory'}
@@ -778,19 +837,23 @@ function SearchPage({ onSelectMemory }) {
     const [agents, setAgents] = useState([]);
     const [domainFilter, setDomainFilter] = useState('');
     const [domains, setDomains] = useState([]);
+    const [tagFilter, setTagFilter] = useState('');
+    const [allTags, setAllTags] = useState([]);
 
     useEffect(() => {
         loadMemories();
         fetchAgents().then(data => setAgents(data.agents || [])).catch(() => {});
         fetchStats().then(data => { if (data.by_domain) setDomains(Object.keys(data.by_domain).sort()); }).catch(() => {});
+        fetchTags().then(data => setAllTags(data.tags || [])).catch(() => {});
     }, []);
 
-    async function loadMemories(search, agent, domain) {
+    async function loadMemories(search, agent, domain, tag) {
         setLoading(true);
         try {
             const params = { limit: 100, sort: 'newest' };
             if (agent) params.agent = agent;
             if (domain) params.domain = domain;
+            if (tag) params.tag = tag;
             const data = await fetchMemories(params);
             let memories = data.memories || [];
             if (search) {
@@ -811,19 +874,25 @@ function SearchPage({ onSelectMemory }) {
     function handleSearch(e) {
         const v = e.target.value;
         setQuery(v);
-        loadMemories(v, agentFilter, domainFilter);
+        loadMemories(v, agentFilter, domainFilter, tagFilter);
     }
 
     function handleAgentFilter(e) {
         const v = e.target.value;
         setAgentFilter(v);
-        loadMemories(query, v, domainFilter);
+        loadMemories(query, v, domainFilter, tagFilter);
     }
 
     function handleDomainFilter(e) {
         const v = e.target.value;
         setDomainFilter(v);
-        loadMemories(query, agentFilter, v);
+        loadMemories(query, agentFilter, v, tagFilter);
+    }
+
+    function handleTagFilter(e) {
+        const v = e.target.value;
+        setTagFilter(v);
+        loadMemories(query, agentFilter, domainFilter, v);
     }
 
     return html`
@@ -836,6 +905,12 @@ function SearchPage({ onSelectMemory }) {
                     <option value="">All domains</option>
                     ${domains.map(d => html`<option value=${d}>${d}</option>`)}
                 </select>
+                ${allTags.length > 0 && html`
+                    <select class="filter-select" value=${tagFilter} onChange=${handleTagFilter}>
+                        <option value="">All tags</option>
+                        ${allTags.map(t => html`<option value=${t.tag}>${t.tag} (${t.count})</option>`)}
+                    </select>
+                `}
                 ${agents.length > 0 && html`
                     <select class="filter-select" value=${agentFilter} onChange=${handleAgentFilter}>
                         <option value="">All agents</option>
