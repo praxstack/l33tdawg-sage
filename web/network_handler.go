@@ -304,7 +304,7 @@ func (h *DashboardHandler) handleUpdateAgent(agentStore store.AgentStore) http.H
 				if req.Name != nil || req.BootBio != nil {
 					updateTx := &tx.ParsedTx{
 						Type:      tx.TxTypeAgentUpdate,
-						Nonce:     uint64(time.Now().UnixNano()),
+						Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
 						Timestamp: time.Now(),
 						AgentUpdateTx: &tx.AgentUpdate{
 							AgentID: id,
@@ -324,11 +324,11 @@ func (h *DashboardHandler) handleUpdateAgent(agentStore store.AgentStore) http.H
 				}
 				// Permission changes go through AgentSetPermission
 				if req.Clearance != nil || req.DomainAccess != nil {
-					clearance := uint8(existing.Clearance)
+					clearance := uint8(existing.Clearance) // #nosec G115 -- clearance is 0-4
 					domainAccess := existing.DomainAccess
 					permTx := &tx.ParsedTx{
 						Type:      tx.TxTypeAgentSetPermission,
-						Nonce:     uint64(time.Now().UnixNano()),
+						Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
 						Timestamp: time.Now(),
 						AgentSetPermission: &tx.AgentSetPermission{
 							AgentID:      id,
@@ -675,14 +675,8 @@ func (h *DashboardHandler) handleTriggerRedeploy(w http.ResponseWriter, r *http.
 // keys that were never formally registered).
 func (h *DashboardHandler) handleUnregisteredAgents(agentStore store.AgentStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		memStore, ok := h.store.(store.MemoryStore)
-		if !ok {
-			writeError(w, http.StatusInternalServerError, "memory store not available")
-			return
-		}
-
 		// Get all agent IDs from memory data
-		stats, err := memStore.GetStats(r.Context())
+		stats, err := h.store.GetStats(r.Context())
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to get stats: "+err.Error())
 			return
@@ -804,7 +798,11 @@ func embedDashboardAgentProof(ptx *tx.ParsedTx, signingKey ed25519.PrivateKey) {
 	binary.BigEndian.PutUint64(tsBytes, uint64(ts)) // #nosec G115 -- timestamp conversion safe
 	message := append(h[:], tsBytes...)
 
-	ptx.AgentPubKey = signingKey.Public().(ed25519.PublicKey)
+	pubKey, ok := signingKey.Public().(ed25519.PublicKey)
+	if !ok {
+		return
+	}
+	ptx.AgentPubKey = pubKey
 	ptx.AgentSig = ed25519.Sign(signingKey, message)
 	ptx.AgentBodyHash = h[:]
 	ptx.AgentTimestamp = ts

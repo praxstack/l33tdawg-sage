@@ -172,8 +172,8 @@ func runMCPInstall() error {
 
 	// If --token provided, claim the pre-configured identity from the dashboard
 	if claimToken != "" {
-		if err := claimAgentIdentity(sageHome, claimToken, keyPath); err != nil {
-			return fmt.Errorf("claim agent identity: %w", err)
+		if claimErr := claimAgentIdentity(sageHome, claimToken, keyPath); claimErr != nil {
+			return fmt.Errorf("claim agent identity: %w", claimErr)
 		}
 	}
 
@@ -196,7 +196,7 @@ func runMCPInstall() error {
 		return fmt.Errorf("marshal config: %w", err)
 	}
 
-	if writeErr := os.WriteFile(mcpPath, append(data, '\n'), 0644); writeErr != nil {
+	if writeErr := os.WriteFile(mcpPath, append(data, '\n'), 0600); writeErr != nil {
 		return fmt.Errorf("write .mcp.json: %w", writeErr)
 	}
 
@@ -259,18 +259,18 @@ func claimAgentIdentity(sageHome, token, keyPath string) error {
 			Role string `json:"role"`
 		} `json:"agent"`
 	}
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return fmt.Errorf("parse response: %w", err)
+	if unmarshalErr := json.Unmarshal(respBody, &result); unmarshalErr != nil {
+		return fmt.Errorf("parse response: %w", unmarshalErr)
 	}
 
 	// Decode and save the key seed
-	seed, err := hex.DecodeString(result.KeySeed)
-	if err != nil || len(seed) != ed25519.SeedSize {
+	seed, decodeErr := hex.DecodeString(result.KeySeed)
+	if decodeErr != nil || len(seed) != ed25519.SeedSize {
 		return fmt.Errorf("invalid key seed from server")
 	}
 
-	if err := os.WriteFile(keyPath, seed, 0600); err != nil {
-		return fmt.Errorf("save agent key: %w", err)
+	if writeErr := os.WriteFile(keyPath, seed, 0600); writeErr != nil {
+		return fmt.Errorf("save agent key: %w", writeErr)
 	}
 
 	fmt.Printf("✓ Claimed agent identity: %s (%s)\n", result.Agent.Name, result.Agent.Role)
