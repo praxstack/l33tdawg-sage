@@ -28,6 +28,15 @@ func MigrateAgentsOnChain(ctx context.Context, agentStore store.AgentStore, badg
 		return
 	}
 
+	// Backfill first_seen for any agents that have NULL first_seen
+	for _, agent := range agents {
+		if agent.FirstSeen == nil && !agent.CreatedAt.IsZero() {
+			if updateErr := agentStore.BackfillFirstSeen(ctx, agent.AgentID, agent.CreatedAt); updateErr != nil {
+				logger.Warn().Err(updateErr).Str("agent", agent.AgentID[:16]).Msg("migrate: failed to backfill first_seen")
+			}
+		}
+	}
+
 	migrated := 0
 	skipped := 0
 	for _, agent := range agents {
@@ -35,8 +44,18 @@ func MigrateAgentsOnChain(ctx context.Context, agentStore store.AgentStore, badg
 			continue
 		}
 
-		// Skip if already registered on-chain
+		// If already registered on-chain but SQLite doesn't know, backfill
 		if badgerStore.IsAgentRegistered(agent.AgentID) {
+			if agent.OnChainHeight == 0 {
+				if onChain, getErr := badgerStore.GetRegisteredAgent(agent.AgentID); getErr == nil && onChain != nil {
+					agent.OnChainHeight = onChain.RegisteredAt
+					if updateErr := agentStore.UpdateAgent(ctx, agent); updateErr != nil {
+						logger.Warn().Err(updateErr).Str("agent", agent.AgentID[:16]).Msg("migrate: failed to backfill on_chain_height")
+					} else {
+						logger.Info().Str("agent", agent.AgentID[:16]).Int64("height", onChain.RegisteredAt).Msg("migrate: backfilled on_chain_height from BadgerDB")
+					}
+				}
+			}
 			skipped++
 			continue
 		}

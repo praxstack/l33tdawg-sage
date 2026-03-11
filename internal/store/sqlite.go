@@ -1826,15 +1826,25 @@ func (s *SQLiteStore) CreateAgent(ctx context.Context, agent *AgentEntry) error 
 		t := agent.ClaimExpiresAt.Format(time.RFC3339)
 		claimExpiry = &t
 	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	firstSeen := now
+	if agent.FirstSeen != nil {
+		firstSeen = agent.FirstSeen.Format(time.RFC3339Nano)
+	}
+	createdAt := now
+	if !agent.CreatedAt.IsZero() {
+		createdAt = agent.CreatedAt.Format(time.RFC3339Nano)
+	}
 	_, err := s.conn.ExecContext(ctx, `
 		INSERT INTO network_agents (agent_id, name, role, avatar, boot_bio, validator_pubkey,
 			node_id, p2p_address, status, clearance, org_id, dept_id, domain_access, bundle_path,
-			on_chain_height, visible_agents, provider, claim_token, claim_expires_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			on_chain_height, visible_agents, provider, claim_token, claim_expires_at,
+			first_seen, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		agent.AgentID, agent.Name, agent.Role, agent.Avatar, agent.BootBio, agent.ValidatorPubkey,
 		agent.NodeID, agent.P2PAddress, agent.Status, agent.Clearance, agent.OrgID, agent.DeptID,
 		agent.DomainAccess, agent.BundlePath, agent.OnChainHeight, agent.VisibleAgents, agent.Provider,
-		agent.ClaimToken, claimExpiry)
+		agent.ClaimToken, claimExpiry, firstSeen, createdAt)
 	if err != nil {
 		return fmt.Errorf("create agent: %w", err)
 	}
@@ -1886,6 +1896,15 @@ func (s *SQLiteStore) UpdateAgentLastSeen(ctx context.Context, agentID string, l
 	_, err := s.conn.ExecContext(ctx, `UPDATE network_agents SET last_seen=?, status='active' WHERE agent_id=?`, ts, agentID)
 	if err != nil {
 		return fmt.Errorf("update agent last seen: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) BackfillFirstSeen(ctx context.Context, agentID string, firstSeen time.Time) error {
+	ts := firstSeen.UTC().Format("2006-01-02T15:04:05.000Z")
+	_, err := s.conn.ExecContext(ctx, `UPDATE network_agents SET first_seen=? WHERE agent_id=? AND first_seen IS NULL`, ts, agentID)
+	if err != nil {
+		return fmt.Errorf("backfill first_seen: %w", err)
 	}
 	return nil
 }

@@ -1236,6 +1236,10 @@ func (s *PostgresStore) UpdateAgentLastSeen(_ context.Context, _ string, _ time.
 	return fmt.Errorf("UpdateAgentLastSeen not implemented for PostgresStore")
 }
 
+func (s *PostgresStore) BackfillFirstSeen(_ context.Context, _ string, _ time.Time) error {
+	return fmt.Errorf("BackfillFirstSeen not implemented for PostgresStore")
+}
+
 func (s *PostgresStore) RotateAgentKey(_ context.Context, _ string) (string, []byte, error) {
 	return "", nil, fmt.Errorf("RotateAgentKey not implemented for PostgresStore")
 }

@@ -337,6 +337,7 @@ type AgentStore interface {
 	RemoveAgent(ctx context.Context, agentID string) error
 	UpdateAgentStatus(ctx context.Context, agentID, status string) error
 	UpdateAgentLastSeen(ctx context.Context, agentID string, lastSeen time.Time) error
+	BackfillFirstSeen(ctx context.Context, agentID string, firstSeen time.Time) error
 	// RotateAgentKey generates a new Ed25519 keypair for the agent, updates the
 	// agent record and re-attributes all memories from oldAgentID to the new ID.
 	// Both operations run in a single transaction. Returns the new agent_id

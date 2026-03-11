@@ -641,6 +641,9 @@ func (m *mockAgentStore) UpdateAgentStatus(_ context.Context, _, _ string) error
 func (m *mockAgentStore) UpdateAgentLastSeen(_ context.Context, _ string, _ time.Time) error {
 	return nil
 }
+func (m *mockAgentStore) BackfillFirstSeen(_ context.Context, _ string, _ time.Time) error {
+	return nil
+}
 func (m *mockAgentStore) AcquireRedeployLock(_ context.Context, _, _ string, _ time.Duration) error {
 	return nil
 }
