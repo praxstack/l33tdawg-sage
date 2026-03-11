@@ -8,6 +8,12 @@ export async function checkAuth() {
     return res.json();
 }
 
+// Lock — invalidates session, returns to lock screen
+export async function lockSession() {
+    const res = await fetch(`${API_BASE}/v1/dashboard/auth/lock`, { method: 'POST' });
+    return res.json();
+}
+
 // Login — returns { ok, error? }
 export async function login(passphrase) {
     const res = await fetch(`${API_BASE}/v1/dashboard/auth/login`, {

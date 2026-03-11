@@ -1205,3 +1205,91 @@ func TestImport_ExtractMessageContent_NoContent(t *testing.T) {
 	msg := map[string]any{"role": "user"}
 	assert.Equal(t, "", extractMessageContent(msg))
 }
+
+// ---------------------------------------------------------------------------
+// SAGE backup JSONL tests
+// ---------------------------------------------------------------------------
+
+func TestImport_SAGEBackup_ValidJSONL(t *testing.T) {
+	lines := []string{
+		`{"memory_id":"m1","content":"First memory","memory_type":"observation","domain_tag":"general","confidence_score":0.85,"status":"committed","created_at":"2026-01-01T00:00:00Z"}`,
+		`{"memory_id":"m2","content":"Second memory","memory_type":"fact","domain_tag":"sage-dev","confidence_score":0.95,"status":"committed","created_at":"2026-01-02T00:00:00Z"}`,
+		`{"memory_id":"m3","content":"Third memory","memory_type":"inference","domain_tag":"general","confidence_score":0.70,"status":"deprecated","created_at":"2026-01-03T00:00:00Z"}`,
+	}
+	data := []byte(strings.Join(lines, "\n"))
+
+	records, source, errors, err := parseJSONL(data)
+	require.NoError(t, err)
+	assert.Equal(t, "sage-backup", source)
+	assert.Len(t, records, 3)
+	assert.Empty(t, errors)
+
+	// Verify metadata is preserved
+	assert.Equal(t, "First memory", records[0].Content)
+	assert.Equal(t, "general", records[0].DomainTag)
+	assert.Equal(t, "sage-dev", records[1].DomainTag)
+
+	// Memory IDs should be NEW (not the original ones)
+	assert.NotEqual(t, "m1", records[0].MemoryID)
+	assert.NotEqual(t, "m2", records[1].MemoryID)
+
+	// Status should be reset to proposed for re-consensus
+	for _, rec := range records {
+		assert.Equal(t, "proposed", string(rec.Status))
+		assert.Nil(t, rec.CommittedAt)
+	}
+}
+
+func TestImport_SAGEBackup_EmptyContent(t *testing.T) {
+	lines := []string{
+		`{"memory_id":"m1","content":"Valid","memory_type":"observation","domain_tag":"general","confidence_score":0.85,"status":"committed","created_at":"2026-01-01T00:00:00Z"}`,
+		`{"memory_id":"m2","content":"","memory_type":"fact","domain_tag":"general","confidence_score":0.95,"status":"committed","created_at":"2026-01-02T00:00:00Z"}`,
+	}
+	data := []byte(strings.Join(lines, "\n"))
+
+	records, source, _, err := parseJSONL(data)
+	require.NoError(t, err)
+	assert.Equal(t, "sage-backup", source)
+	assert.Len(t, records, 1) // Empty content line skipped
+}
+
+func TestImport_SAGEBackup_NotSAGEFormat(t *testing.T) {
+	// Claude Code JSONL — should NOT be detected as SAGE backup
+	lines := []string{
+		`{"type":"human","message":{"role":"user","content":"hello"},"sessionId":"s1","timestamp":"2026-01-01T00:00:00Z"}`,
+	}
+	data := []byte(strings.Join(lines, "\n"))
+
+	records, source, _, err := parseJSONL(data)
+	require.NoError(t, err)
+	assert.NotEqual(t, "sage-backup", source)
+	_ = records
+}
+
+func TestImport_SAGEBackup_RoundTrip(t *testing.T) {
+	// Simulate what the export endpoint produces
+	now := time.Now().UTC()
+	committed := now.Add(-time.Hour)
+	exportLines := []string{
+		`{"memory_id":"orig-1","submitting_agent":"agent-abc","content":"Architecture: SAGE uses CometBFT","memory_type":"fact","domain_tag":"sage-architecture","confidence_score":0.95,"status":"committed","created_at":"` + now.Format(time.RFC3339Nano) + `","committed_at":"` + committed.Format(time.RFC3339Nano) + `"}`,
+		`{"memory_id":"orig-2","submitting_agent":"agent-abc","content":"User prefers informal communication","memory_type":"observation","domain_tag":"user-prefs","confidence_score":0.80,"status":"committed","created_at":"` + now.Format(time.RFC3339Nano) + `"}`,
+	}
+	data := []byte(strings.Join(exportLines, "\n"))
+
+	records, source, errors, err := parseJSONL(data)
+	require.NoError(t, err)
+	assert.Equal(t, "sage-backup", source)
+	assert.Len(t, records, 2)
+	assert.Empty(t, errors)
+
+	// Original metadata preserved
+	assert.Equal(t, "Architecture: SAGE uses CometBFT", records[0].Content)
+	assert.Equal(t, "sage-architecture", records[0].DomainTag)
+	assert.Equal(t, "fact", string(records[0].MemoryType))
+	assert.Equal(t, 0.95, records[0].ConfidenceScore)
+	assert.Equal(t, "agent-abc", records[0].SubmittingAgent)
+
+	// But IDs regenerated and status reset
+	assert.NotEqual(t, "orig-1", records[0].MemoryID)
+	assert.Equal(t, "proposed", string(records[0].Status))
+}

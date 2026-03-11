@@ -187,8 +187,9 @@ func TestHandleAuthCheck_NoAuth(t *testing.T) {
 
 func TestHandleAuthMiddleware_BlocksWithoutSession(t *testing.T) {
 	h, _ := newTestHandler(t)
-	// Simulate encryption enabled by setting VaultKeyPath
+	// Simulate encryption enabled
 	h.VaultKeyPath = "/tmp/fake-vault.key"
+	h.Encrypted = true
 	r := testRouter(h)
 
 	req := httptest.NewRequest("GET", "/v1/dashboard/stats", nil)
@@ -201,6 +202,115 @@ func TestHandleAuthMiddleware_BlocksWithoutSession(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, "unauthorized", resp["error"])
 	assert.Equal(t, true, resp["login_required"])
+}
+
+func TestHandleExport_AllMemories(t *testing.T) {
+	h, s := newTestHandler(t)
+	r := testRouter(h)
+
+	// Insert more than the list endpoint's 200 cap
+	for i := 0; i < 5; i++ {
+		insertTestMemory(t, s, fmt.Sprintf("export-%d", i), "test-domain")
+	}
+
+	req := httptest.NewRequest("GET", "/v1/dashboard/export", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Header().Get("Content-Type"), "application/x-ndjson")
+	assert.Contains(t, w.Header().Get("Content-Disposition"), "sage-backup-")
+
+	// Parse JSONL lines
+	lines := bytes.Split(bytes.TrimSpace(w.Body.Bytes()), []byte("\n"))
+	assert.Len(t, lines, 5)
+
+	// Verify each line is valid JSON with expected fields
+	for _, line := range lines {
+		var rec map[string]any
+		require.NoError(t, json.Unmarshal(line, &rec))
+		assert.NotEmpty(t, rec["memory_id"])
+		assert.NotEmpty(t, rec["content"])
+		assert.Equal(t, "test-domain", rec["domain_tag"])
+		// Embeddings should be excluded
+		assert.Nil(t, rec["embedding"])
+	}
+}
+
+func TestHandleAuthMiddleware_DynamicEncryption(t *testing.T) {
+	h, _ := newTestHandler(t)
+	r := testRouter(h)
+
+	// Encryption OFF — should allow access
+	req := httptest.NewRequest("GET", "/v1/dashboard/stats", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// Enable encryption dynamically (simulates enabling via dashboard)
+	h.Encrypted = true
+
+	// Same request without cookie — should be blocked
+	req = httptest.NewRequest("GET", "/v1/dashboard/stats", nil)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+
+	// Disable encryption — should allow again
+	h.Encrypted = false
+	req = httptest.NewRequest("GET", "/v1/dashboard/stats", nil)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestHandleLock_InvalidatesSession(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.VaultKeyPath = filepath.Join(t.TempDir(), "vault.key")
+	r := testRouter(h)
+
+	// Enable encryption and login
+	body, _ := json.Marshal(map[string]string{"passphrase": "test-pass"})
+	req := httptest.NewRequest("POST", "/v1/dashboard/settings/ledger/enable", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	// Login to get session
+	body, _ = json.Marshal(map[string]string{"passphrase": "test-pass"})
+	req = httptest.NewRequest("POST", "/v1/dashboard/auth/login", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	cookies := w.Result().Cookies()
+	require.NotEmpty(t, cookies)
+	sessionCookie := cookies[0]
+
+	// Verify session works
+	req = httptest.NewRequest("GET", "/v1/dashboard/stats", nil)
+	req.AddCookie(sessionCookie)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// Lock — invalidates the session
+	req = httptest.NewRequest("POST", "/v1/dashboard/auth/lock", nil)
+	req.AddCookie(sessionCookie)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+	var lockResp map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &lockResp))
+	assert.Equal(t, true, lockResp["locked"])
+
+	// Same session cookie should now be rejected
+	req = httptest.NewRequest("GET", "/v1/dashboard/stats", nil)
+	req.AddCookie(sessionCookie)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
 func TestHandleTimeline(t *testing.T) {

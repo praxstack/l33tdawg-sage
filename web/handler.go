@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"net/http"
 	"strconv"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -43,9 +44,12 @@ type DashboardHandler struct {
 	Version   string
 	Encrypted bool
 
-	// Auth — only active when VaultKeyPath is set.
+	// Auth — only active when Encrypted is true.
 	VaultKeyPath string
 	sessions     sync.Map // token -> expiry time
+
+	// SaveEncryptionConfig persists encryption enabled/disabled state to config.yaml.
+	SaveEncryptionConfig func(enabled bool) error
 
 	// Redeployer — when set, write endpoints return 503 during active redeployment
 	// and the /redeploy endpoint can trigger chain redeployment.
@@ -100,6 +104,7 @@ const sessionTTL = 24 * time.Hour
 func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 	// Auth endpoints — always available (login page needs to load without auth).
 	r.Post("/v1/dashboard/auth/login", h.handleLogin)
+	r.Post("/v1/dashboard/auth/lock", h.handleLock)
 	r.Get("/v1/dashboard/auth/check", h.handleAuthCheck)
 
 	// Health is public (needed by CLI status command).
@@ -108,15 +113,14 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 	// Pairing redemption — unauthenticated (the code IS the auth).
 	h.RegisterPairingRoutes(r)
 
-	// Protected routes — wrapped in auth middleware when encryption is enabled.
+	// Protected routes — auth middleware checks dynamically whether encryption is active.
 	r.Group(func(r chi.Router) {
-		if h.VaultKeyPath != "" {
-			r.Use(h.authMiddleware)
-		}
+		r.Use(h.authMiddleware)
 		// Redeploy guard — returns 503 for write endpoints during active redeployment.
 		r.Use(redeployGuard(h.Redeployer))
 
 		r.Get("/v1/dashboard/memory/list", h.handleListMemories)
+		r.Get("/v1/dashboard/export", h.handleExport)
 		r.Get("/v1/dashboard/memory/timeline", h.handleTimeline)
 		r.Get("/v1/dashboard/memory/graph", h.handleGraph)
 		r.Get("/v1/dashboard/stats", h.handleStats)
@@ -210,9 +214,14 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 	})
 }
 
-// authMiddleware checks for a valid session cookie.
+// authMiddleware checks for a valid session cookie when encryption is active.
+// Always wired in the middleware chain — skips auth dynamically when encryption is off.
 func (h *DashboardHandler) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !h.Encrypted {
+			next.ServeHTTP(w, r)
+			return
+		}
 		cookie, err := r.Cookie(sessionCookieName)
 		if err != nil || !h.validSession(cookie.Value) {
 			w.Header().Set("Content-Type", "application/json")
@@ -226,7 +235,7 @@ func (h *DashboardHandler) authMiddleware(next http.Handler) http.Handler {
 
 // handleLogin verifies the vault passphrase and sets a session cookie.
 func (h *DashboardHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if h.VaultKeyPath == "" {
+	if !h.Encrypted {
 		writeJSONResp(w, http.StatusOK, map[string]any{"ok": true, "message": "no auth required"})
 		return
 	}
@@ -262,9 +271,34 @@ func (h *DashboardHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	writeJSONResp(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// handleLock invalidates the current session — like Cmd+L in 1Password.
+func (h *DashboardHandler) handleLock(w http.ResponseWriter, r *http.Request) {
+	if !h.Encrypted {
+		writeJSONResp(w, http.StatusOK, map[string]any{"ok": true, "message": "encryption not enabled"})
+		return
+	}
+
+	// Invalidate the session token.
+	if cookie, err := r.Cookie(sessionCookieName); err == nil {
+		h.sessions.Delete(cookie.Value)
+	}
+
+	// Clear the cookie.
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+	})
+
+	writeJSONResp(w, http.StatusOK, map[string]any{"ok": true, "locked": true})
+}
+
 // handleAuthCheck returns whether auth is required and if current session is valid.
 func (h *DashboardHandler) handleAuthCheck(w http.ResponseWriter, r *http.Request) {
-	if h.VaultKeyPath == "" {
+	if !h.Encrypted {
 		writeJSONResp(w, http.StatusOK, map[string]any{"auth_required": false, "authenticated": true})
 		return
 	}
@@ -329,6 +363,73 @@ func (h *DashboardHandler) handleListMemories(w http.ResponseWriter, r *http.Req
 		"limit":    limit,
 		"offset":   offset,
 	})
+}
+
+// handleExport streams ALL memories as JSONL (one JSON object per line).
+// This format can be re-imported via the import system for backup/restore.
+func (h *DashboardHandler) handleExport(w http.ResponseWriter, r *http.Request) {
+	// Export format: one MemoryRecord JSON per line (JSONL).
+	// Each line contains: memory_id, content, memory_type, domain_tag, confidence_score,
+	// status, provider, submitting_agent, created_at, committed_at, etc.
+	// Embeddings are excluded to keep export portable (re-generated on import).
+
+	format := r.URL.Query().Get("format")
+	if format == "" {
+		format = "jsonl"
+	}
+
+	// Page through all records to avoid loading everything in memory at once.
+	const pageSize = 500
+	offset := 0
+
+	filename := fmt.Sprintf("sage-backup-%s.jsonl", time.Now().Format("2006-01-02"))
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+
+	enc := json.NewEncoder(w)
+	exported := 0
+
+	for {
+		records, _, err := h.store.ListMemories(r.Context(), store.ListOptions{
+			Limit:  pageSize,
+			Offset: offset,
+			Sort:   "oldest",
+		})
+		if err != nil {
+			if exported == 0 {
+				writeError(w, http.StatusInternalServerError, err.Error())
+			}
+			return
+		}
+		if len(records) == 0 {
+			break
+		}
+
+		for _, rec := range records {
+			// Export record — strip embeddings (regenerated on import).
+			export := memory.MemoryRecord{
+				MemoryID:        rec.MemoryID,
+				SubmittingAgent: rec.SubmittingAgent,
+				Content:         rec.Content,
+				MemoryType:      rec.MemoryType,
+				DomainTag:       rec.DomainTag,
+				Provider:        rec.Provider,
+				ConfidenceScore: rec.ConfidenceScore,
+				Status:          rec.Status,
+				ParentHash:      rec.ParentHash,
+				TaskStatus:      rec.TaskStatus,
+				CreatedAt:       rec.CreatedAt,
+				CommittedAt:     rec.CommittedAt,
+				DeprecatedAt:    rec.DeprecatedAt,
+			}
+			if err := enc.Encode(export); err != nil {
+				return // client disconnected
+			}
+			exported++
+		}
+
+		offset += len(records)
+	}
 }
 
 // handleTimeline returns aggregated counts for the timeline bar.

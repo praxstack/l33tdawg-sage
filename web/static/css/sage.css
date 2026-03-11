@@ -136,6 +136,26 @@ body {
 .connection-dot.disconnected { background: var(--danger); box-shadow: 0 0 6px var(--danger); }
 
 /* Text Size Toggle */
+.lock-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg-elevated);
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all 0.2s;
+    margin-right: 8px;
+}
+.lock-btn:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: rgba(6, 182, 212, 0.1);
+}
+
 .text-size-toggle {
     display: flex;
     align-items: center;

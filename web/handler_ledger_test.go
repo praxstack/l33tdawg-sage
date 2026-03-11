@@ -12,6 +12,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// loginAfterEnable calls the login endpoint and returns the session cookie.
+func loginAfterEnable(t *testing.T, r http.Handler, passphrase string) *http.Cookie {
+	t.Helper()
+	body, _ := json.Marshal(map[string]string{"passphrase": passphrase})
+	req := httptest.NewRequest("POST", "/v1/dashboard/auth/login", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	cookies := w.Result().Cookies()
+	require.NotEmpty(t, cookies, "expected session cookie after login")
+	return cookies[0]
+}
+
 func TestHandleGetLedgerStatus_Disabled(t *testing.T) {
 	h, _ := newTestHandler(t)
 	r := testRouter(h)
@@ -29,7 +43,6 @@ func TestHandleGetLedgerStatus_Disabled(t *testing.T) {
 
 func TestHandleEnableLedger(t *testing.T) {
 	h, _ := newTestHandler(t)
-	// Register routes first (no auth middleware), then set VaultKeyPath for the handler logic.
 	r := testRouter(h)
 	h.VaultKeyPath = filepath.Join(t.TempDir(), "vault.key")
 
@@ -64,13 +77,26 @@ func TestHandleEnableLedger_MissingPassphrase(t *testing.T) {
 
 func TestHandleEnableLedger_AlreadyEnabled(t *testing.T) {
 	h, _ := newTestHandler(t)
-	h.Encrypted = true
 	r := testRouter(h)
+	h.VaultKeyPath = filepath.Join(t.TempDir(), "vault.key")
 
-	body, _ := json.Marshal(map[string]string{"passphrase": "test"})
+	// Enable first
+	body, _ := json.Marshal(map[string]string{"passphrase": "test-pass"})
 	req := httptest.NewRequest("POST", "/v1/dashboard/settings/ledger/enable", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	// Login to get session cookie
+	cookie := loginAfterEnable(t, r, "test-pass")
+
+	// Try to enable again — should get conflict
+	body, _ = json.Marshal(map[string]string{"passphrase": "test"})
+	req = httptest.NewRequest("POST", "/v1/dashboard/settings/ledger/enable", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	w = httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusConflict, w.Code)
@@ -89,8 +115,12 @@ func TestHandleGetLedgerStatus_Enabled(t *testing.T) {
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code)
 
+	// Login to get session cookie
+	cookie := loginAfterEnable(t, r, "test-pass")
+
 	// Check status
 	req = httptest.NewRequest("GET", "/v1/dashboard/settings/ledger", nil)
+	req.AddCookie(cookie)
 	w = httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -116,10 +146,14 @@ func TestHandleChangePassphrase(t *testing.T) {
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code)
 
+	// Login
+	cookie := loginAfterEnable(t, r, "old-pass")
+
 	// Change passphrase
 	body, _ = json.Marshal(map[string]string{"old_passphrase": "old-pass", "new_passphrase": "new-pass"})
 	req = httptest.NewRequest("POST", "/v1/dashboard/settings/ledger/change-passphrase", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
 	w = httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -143,10 +177,14 @@ func TestHandleChangePassphrase_WrongOld(t *testing.T) {
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code)
 
+	// Login
+	cookie := loginAfterEnable(t, r, "correct-pass")
+
 	// Wrong old passphrase
 	body, _ = json.Marshal(map[string]string{"old_passphrase": "wrong", "new_passphrase": "new-pass"})
 	req = httptest.NewRequest("POST", "/v1/dashboard/settings/ledger/change-passphrase", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
 	w = httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -166,10 +204,14 @@ func TestHandleDisableLedger(t *testing.T) {
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code)
 
+	// Login
+	cookie := loginAfterEnable(t, r, "my-pass")
+
 	// Disable
 	body, _ = json.Marshal(map[string]string{"passphrase": "my-pass"})
 	req = httptest.NewRequest("POST", "/v1/dashboard/settings/ledger/disable", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
 	w = httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -195,10 +237,14 @@ func TestHandleDisableLedger_WrongPassphrase(t *testing.T) {
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code)
 
+	// Login
+	cookie := loginAfterEnable(t, r, "my-pass")
+
 	// Disable with wrong passphrase
 	body, _ = json.Marshal(map[string]string{"passphrase": "wrong"})
 	req = httptest.NewRequest("POST", "/v1/dashboard/settings/ledger/disable", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
 	w = httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 

@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bufio"
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -880,6 +881,11 @@ func extractMessageContent(msg map[string]any) string {
 // Groups lines by sessionId and extracts user prompts + assistant responses.
 
 func parseJSONL(data []byte) ([]*memory.MemoryRecord, string, []string, error) {
+	// Peek at first non-empty line to detect SAGE backup format.
+	if records, source, errors, ok := tryParseSAGEBackup(data); ok {
+		return records, source, errors, nil
+	}
+
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024) // 1MB line buffer
 
@@ -1004,6 +1010,82 @@ func parseJSONL(data []byte) ([]*memory.MemoryRecord, string, []string, error) {
 	}
 
 	return records, "claude-code", errors, nil
+}
+
+// ---- SAGE backup JSONL parser ----
+// Parses JSONL exported by /v1/dashboard/export (SAGE native backup format).
+// Each line is a full MemoryRecord with memory_id, domain_tag, content, etc.
+
+func tryParseSAGEBackup(data []byte) ([]*memory.MemoryRecord, string, []string, bool) {
+	// Peek at first non-empty line to detect format.
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var obj map[string]any
+		if json.Unmarshal([]byte(line), &obj) != nil {
+			return nil, "", nil, false
+		}
+		// SAGE backup lines have memory_id and domain_tag
+		if _, hasMemoryID := obj["memory_id"]; !hasMemoryID {
+			return nil, "", nil, false
+		}
+		if _, hasDomain := obj["domain_tag"]; !hasDomain {
+			return nil, "", nil, false
+		}
+		break
+	}
+
+	// Parse all lines as MemoryRecords.
+	scanner = bufio.NewScanner(bytes.NewReader(data))
+	scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024)
+
+	var records []*memory.MemoryRecord
+	var errors []string
+	lineNum := 0
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		lineNum++
+
+		var rec memory.MemoryRecord
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			errors = append(errors, fmt.Sprintf("line %d: %s", lineNum, err.Error()))
+			continue
+		}
+		if rec.Content == "" {
+			continue
+		}
+
+		// Generate new ID for import to avoid collisions with existing memories.
+		rec.MemoryID = generateMemoryID()
+		// Reset status — imported memories go through consensus again.
+		rec.Status = memory.StatusProposed
+		rec.CommittedAt = nil
+		rec.DeprecatedAt = nil
+
+		records = append(records, &rec)
+	}
+
+	if len(records) == 0 {
+		return nil, "", errors, false
+	}
+
+	return records, "sage-backup", errors, true
+}
+
+func generateMemoryID() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return fmt.Sprintf("%x", b)
 }
 
 // parseFinetuningJSONL handles JSONL where each line is {"messages": [...]}.

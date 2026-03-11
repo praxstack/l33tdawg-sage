@@ -217,8 +217,10 @@ func runServe() error {
 	}
 	dashboard.SetEmbedder(embedProvider)
 	dashboard.Encrypted = cfg.Encryption.Enabled
-	if cfg.Encryption.Enabled {
-		dashboard.VaultKeyPath = filepath.Join(SageHome(), "vault.key")
+	dashboard.VaultKeyPath = filepath.Join(SageHome(), "vault.key")
+	dashboard.SaveEncryptionConfig = func(enabled bool) error {
+		cfg.Encryption.Enabled = enabled
+		return SaveConfig(cfg)
 	}
 
 	// Wire CometBFT consensus for dashboard agent operations (Step 7).

@@ -75,6 +75,14 @@ func (h *DashboardHandler) handleEnableLedger(w http.ResponseWriter, r *http.Req
 
 	h.Encrypted = true
 
+	// Persist encryption state to config.yaml so lock screen appears on restart.
+	if h.SaveEncryptionConfig != nil {
+		if err := h.SaveEncryptionConfig(true); err != nil {
+			writeError(w, http.StatusInternalServerError, "encryption enabled but failed to save config: "+err.Error())
+			return
+		}
+	}
+
 	// Recovery key: the raw data key, base64-encoded.
 	// This can re-initialize the vault with a new passphrase if the original is lost.
 	recoveryKey, _ := v.RecoveryKey()
@@ -158,6 +166,16 @@ func (h *DashboardHandler) handleDisableLedger(w http.ResponseWriter, r *http.Re
 	}
 
 	h.Encrypted = false
+
+	// Persist disabled state to config.yaml.
+	if h.SaveEncryptionConfig != nil {
+		if err := h.SaveEncryptionConfig(false); err != nil {
+			// Re-enable in memory since config didn't save.
+			h.Encrypted = true
+			writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+			return
+		}
+	}
 
 	writeJSONResp(w, http.StatusOK, map[string]any{
 		"ok":      true,

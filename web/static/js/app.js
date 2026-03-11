@@ -1,6 +1,6 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
-import { fetchStats, fetchGraph, fetchMemories, deleteMemory, fetchHealth, checkAuth, login, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchTasks, updateTaskStatus, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings } from './api.js';
+import { fetchStats, fetchGraph, fetchMemories, deleteMemory, fetchHealth, checkAuth, login, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchTasks, updateTaskStatus, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings } from './api.js';
 
 const { h, render, createContext } = preact;
 const { useState, useEffect, useRef, useCallback, useContext } = preactHooks;
@@ -1625,8 +1625,16 @@ function SynapticLedger() {
                     <button class="btn" onClick=${() => {
                         navigator.clipboard.writeText(recoveryKey);
                     }}>Copy to Clipboard</button>
-                    <button class="btn" onClick=${() => { setRecoveryKey(null); setView('status'); }}>
-                        I've saved it
+                    <button class="btn" onClick=${() => {
+                        setRecoveryKey(null);
+                        // After first-time encryption enable, send to lock screen
+                        if (window.__sageLock) {
+                            window.__sageLock();
+                        } else {
+                            setView('status');
+                        }
+                    }}>
+                        I've saved it — Lock Now
                     </button>
                 </div>
             </div>
@@ -2471,6 +2479,7 @@ function SettingsPage() {
     const tabs = [
         { id: 'overview', label: 'Overview', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><path d="M4 4h3v3H4zM9 4h3v3H9zM4 9h3v3H4zM9 9h3v3H9z" fill="currentColor" opacity="0.8"/><path d="M2 2h12v12H2z" stroke="currentColor" fill="none" stroke-width="1.5" rx="2"/></svg>` },
         { id: 'security', label: 'Security', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><path d="M8 1L2 4v4c0 4 3 6 6 7 3-1 6-3 6-7V4L8 1z" stroke="currentColor" fill="none" stroke-width="1.5"/></svg>` },
+        { id: 'data', label: 'Data', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><path d="M2 4h12v8H2z" stroke="currentColor" fill="none" stroke-width="1.5" rx="1"/><path d="M5 1v3M11 1v3M2 8h12" stroke="currentColor" stroke-width="1.5"/></svg>` },
         { id: 'config', label: 'Configuration', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><circle cx="8" cy="8" r="3" stroke="currentColor" fill="none" stroke-width="1.5"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M13 3l-1.5 1.5M4.5 11.5L3 13" stroke="currentColor" stroke-width="1.5"/></svg>` },
         { id: 'update', label: 'Update', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><path d="M8 2v8M5 7l3 3 3-3" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linecap="round"/><path d="M3 12h10" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linecap="round"/></svg>` },
     ];
@@ -2590,23 +2599,29 @@ function SettingsPage() {
                     <div class="settings-section ledger-section">
                         ${html`<${SynapticLedger} />`}
                     </div>
+                </div>
+            `}
+
+            ${settingsTab === 'data' && html`
+                <div class="settings-tab-content">
+                    <div class="settings-section">
+                        <h3>Export & Backup</h3>
+                        <p style="color:var(--text-muted);font-size:0.85rem;margin-bottom:16px;">
+                            Download a full backup of your memories in JSONL format. This file can be re-imported on a new machine via the Import page to restore your brain.
+                        </p>
+                        <div class="settings-row">
+                            <span class="label">Export all memories (JSONL — re-importable)</span>
+                            <button class="btn" onClick=${() => {
+                                window.open('/v1/dashboard/export', '_blank');
+                            }}>Download Backup</button>
+                        </div>
+                    </div>
 
                     <div class="settings-section" style="margin-top:16px">
-                        <h3>Export & Data</h3>
-                        <div class="settings-row">
-                            <span class="label">Export all memories</span>
-                            <button class="btn" onClick=${() => {
-                                fetchMemories({ limit: 10000 }).then(data => {
-                                    const blob = new Blob([JSON.stringify(data.memories, null, 2)], { type: 'application/json' });
-                                    const url = URL.createObjectURL(blob);
-                                    const a = document.createElement('a');
-                                    a.href = url;
-                                    a.download = 'sage-memories-export.json';
-                                    a.click();
-                                    URL.revokeObjectURL(url);
-                                });
-                            }}>Download JSON</button>
-                        </div>
+                        <h3>Restore</h3>
+                        <p style="color:var(--text-muted);font-size:0.85rem;margin-bottom:16px;">
+                            To restore from a backup, go to the <strong>Import</strong> page (sidebar) and upload your <code>.jsonl</code> backup file. All domains, types, and metadata will be preserved.
+                        </p>
                     </div>
                 </div>
             `}
@@ -2851,6 +2866,16 @@ function ImportPage({ sse }) {
                     <h3>Any AI / API</h3>
                     <p>Works with <strong>OpenAI API</strong>, <strong>Mistral</strong>, <strong>DeepSeek</strong>, browser extensions, and any <strong>role/content</strong> JSON format.</p>
                     <span class="provider-file-type">.json .jsonl</span>
+                </div>
+                <div class="provider-card" style="border-color: rgba(6,182,212,0.4)">
+                    <div class="provider-icon" style="color: var(--accent)">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="32" height="32">
+                            <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+                        </svg>
+                    </div>
+                    <h3>SAGE Backup</h3>
+                    <p><strong>Restore from backup.</strong> Upload a <strong>.jsonl</strong> export from Settings > Export. All domains, types, and metadata are preserved.</p>
+                    <span class="provider-file-type">.jsonl</span>
                 </div>
             </div>
 
@@ -4804,6 +4829,7 @@ function RemoveConfirmModal({ agent, onConfirm, onCancel }) {
 
 function App() {
     const [authState, setAuthState] = useState('loading'); // loading | login | ready
+    const [isEncrypted, setIsEncrypted] = useState(false);
     const [page, setPage] = useState('brain');
     const [selectedMemory, setSelectedMemory] = useState(null);
     const [sseConnected, setSseConnected] = useState(false);
@@ -4824,6 +4850,13 @@ function App() {
         try { localStorage.setItem('sage-text-size', size); } catch (e) {}
     };
 
+    // Expose lock function for SynapticLedger (called after enabling encryption)
+    window.__sageLock = async () => {
+        await lockSession();
+        setIsEncrypted(true);
+        setAuthState('login');
+    };
+
     // Expose tooltip toggle for SettingsPage
     window.__sageTooltips = { enabled: tooltipsEnabled, toggle: () => {
         setTooltipsEnabled(v => {
@@ -4836,6 +4869,7 @@ function App() {
     // Check auth on mount
     useEffect(() => {
         checkAuth().then(res => {
+            setIsEncrypted(!!res.auth_required);
             if (!res.auth_required || res.authenticated) {
                 setAuthState('ready');
             } else {
@@ -4843,6 +4877,27 @@ function App() {
             }
         }).catch(() => setAuthState('ready')); // if auth check fails, assume no auth
     }, []);
+
+    // Auto-lock after 30 minutes of inactivity when encrypted.
+    useEffect(() => {
+        if (!isEncrypted || authState !== 'ready') return;
+        const AUTO_LOCK_MS = 30 * 60 * 1000; // 30 minutes
+        let timer = setTimeout(() => {
+            lockSession().then(() => setAuthState('login'));
+        }, AUTO_LOCK_MS);
+        const resetTimer = () => {
+            clearTimeout(timer);
+            timer = setTimeout(() => {
+                lockSession().then(() => setAuthState('login'));
+            }, AUTO_LOCK_MS);
+        };
+        const events = ['mousedown', 'keydown', 'scroll', 'touchstart'];
+        events.forEach(e => window.addEventListener(e, resetTimer, { passive: true }));
+        return () => {
+            clearTimeout(timer);
+            events.forEach(e => window.removeEventListener(e, resetTimer));
+        };
+    }, [isEncrypted, authState]);
 
     useEffect(() => {
         if (authState !== 'ready') return;
@@ -4919,6 +4974,17 @@ function App() {
             <div class="top-bar">
                 <h1>CEREBRUM <span style="font-size:12px;font-weight:400;color:var(--text-muted);margin-left:6px">Your SAGE Brain</span></h1>
                 <div class="spacer"></div>
+                ${isEncrypted && html`
+                    <button class="lock-btn" title="Lock CEREBRUM" onClick=${async () => {
+                        await lockSession();
+                        setAuthState('login');
+                    }}>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="16" height="16">
+                            <rect x="3" y="11" width="18" height="11" rx="2"/>
+                            <path d="M7 11V7a5 5 0 0110 0v4"/>
+                        </svg>
+                    </button>
+                `}
                 <div class="text-size-toggle" title="Text size">
                     <button class="text-size-btn sz-s ${textSize === 'small' ? 'active' : ''}" onClick=${() => changeTextSize('small')}>A</button>
                     <button class="text-size-btn sz-m ${textSize === 'medium' ? 'active' : ''}" onClick=${() => changeTextSize('medium')}>A</button>

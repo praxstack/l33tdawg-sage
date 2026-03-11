@@ -118,7 +118,21 @@ func launchdPlistExists() bool {
 }
 
 func sageBinaryPath() string {
+	// First, use the currently running binary (works for DMG, dev builds, etc.)
+	if exe, err := os.Executable(); err == nil {
+		if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+			return resolved
+		}
+		return exe
+	}
+	// Fallback: check ~/.sage/bin for known binary names.
 	home, _ := os.UserHomeDir()
+	for _, name := range []string{"sage-gui", "sage-lite"} {
+		p := filepath.Join(home, ".sage", "bin", name)
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
 	return filepath.Join(home, ".sage", "bin", "sage-gui")
 }
 
