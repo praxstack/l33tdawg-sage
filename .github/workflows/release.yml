@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 jobs:
   test:
@@ -154,3 +156,20 @@ jobs:
             "dist/windows-amd64/SAGE-${{ github.ref_name }}-Windows-Setup.exe" \
             "dist/windows-amd64/SAGE-Windows-Setup.exe" \
             --clobber
+
+  deploy-pages:
+    name: Deploy Landing Page
+    runs-on: ubuntu-latest
+    needs: [goreleaser, macos-dmg, windows-exe]
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
