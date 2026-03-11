@@ -10,6 +10,9 @@ import (
 // EventType represents the type of SSE event.
 type EventType string
 
+// maxClients is the maximum number of concurrent SSE connections allowed.
+const maxClients = 50
+
 const (
 	EventRemember  EventType = "remember"
 	EventRecall    EventType = "recall"
@@ -43,11 +46,15 @@ func NewSSEBroadcaster() *SSEBroadcaster {
 }
 
 // Subscribe registers a new SSE client and returns its channel.
+// Returns nil if the maximum number of concurrent connections has been reached.
 func (b *SSEBroadcaster) Subscribe() chan []byte {
-	ch := make(chan []byte, 64)
 	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.clients) >= maxClients {
+		return nil
+	}
+	ch := make(chan []byte, 64)
 	b.clients[ch] = struct{}{}
-	b.mu.Unlock()
 	return ch
 }
 
@@ -89,9 +96,12 @@ func (b *SSEBroadcaster) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	ch := b.Subscribe()
+	if ch == nil {
+		http.Error(w, "too many connections", http.StatusServiceUnavailable)
+		return
+	}
 	defer b.Unsubscribe(ch)
 
 	// Send initial keepalive

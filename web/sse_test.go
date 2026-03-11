@@ -1,6 +1,8 @@
 package web
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -106,5 +108,54 @@ done:
 		// Broadcast completed without blocking
 	case <-time.After(time.Second):
 		t.Fatal("broadcast blocked on slow client")
+	}
+}
+
+func TestSSEBroadcaster_MaxClientsLimit(t *testing.T) {
+	b := NewSSEBroadcaster()
+
+	// Subscribe up to the limit — all should succeed.
+	channels := make([]chan []byte, 0, maxClients)
+	for i := 0; i < maxClients; i++ {
+		ch := b.Subscribe()
+		require.NotNil(t, ch, "Subscribe should succeed for connection %d", i)
+		channels = append(channels, ch)
+	}
+
+	// One more should return nil.
+	extra := b.Subscribe()
+	assert.Nil(t, extra, "Subscribe should return nil when maxClients is reached")
+
+	// After freeing a slot, subscribe should succeed again.
+	b.Unsubscribe(channels[0])
+	ch := b.Subscribe()
+	assert.NotNil(t, ch, "Subscribe should succeed after freeing a slot")
+	b.Unsubscribe(ch)
+
+	// Clean up.
+	for _, c := range channels[1:] {
+		b.Unsubscribe(c)
+	}
+}
+
+func TestServeHTTP_Returns503WhenFull(t *testing.T) {
+	b := NewSSEBroadcaster()
+
+	// Fill all slots.
+	channels := make([]chan []byte, 0, maxClients)
+	for i := 0; i < maxClients; i++ {
+		ch := b.Subscribe()
+		require.NotNil(t, ch)
+		channels = append(channels, ch)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/events", nil)
+	w := httptest.NewRecorder()
+	b.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+
+	for _, c := range channels {
+		b.Unsubscribe(c)
 	}
 }

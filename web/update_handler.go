@@ -3,6 +3,9 @@ package web
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -89,12 +92,21 @@ func (h *DashboardHandler) handleCheckUpdate(w http.ResponseWriter, r *http.Requ
 	assetName := findAssetName(latest)
 	var downloadURL string
 	var assetSize int64
+	var checksumsURL string
 	for _, a := range release.Assets {
 		if a.Name == assetName {
 			downloadURL = a.BrowserDownloadURL
 			assetSize = a.Size
-			break
 		}
+		if a.Name == "checksums.txt" {
+			checksumsURL = a.BrowserDownloadURL
+		}
+	}
+
+	// Fetch checksum for the asset from checksums.txt if available
+	var expectedChecksum string
+	if checksumsURL != "" && assetName != "" {
+		expectedChecksum = fetchChecksumForAsset(r.Context(), client, checksumsURL, assetName)
 	}
 
 	writeJSONResp(w, http.StatusOK, map[string]any{
@@ -106,6 +118,7 @@ func (h *DashboardHandler) handleCheckUpdate(w http.ResponseWriter, r *http.Requ
 		"release_url":      release.HTMLURL,
 		"download_url":     downloadURL,
 		"download_size":    assetSize,
+		"checksum":         expectedChecksum,
 		"platform":         runtime.GOOS + "/" + runtime.GOARCH,
 	})
 }
@@ -114,9 +127,16 @@ func (h *DashboardHandler) handleCheckUpdate(w http.ResponseWriter, r *http.Requ
 func (h *DashboardHandler) handleApplyUpdate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		DownloadURL string `json:"download_url"`
+		Checksum    string `json:"checksum"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.DownloadURL == "" {
 		writeError(w, http.StatusBadRequest, "download_url required")
+		return
+	}
+
+	// Reject path traversal in URL
+	if strings.Contains(body.DownloadURL, "..") {
+		writeError(w, http.StatusBadRequest, "invalid download URL")
 		return
 	}
 
@@ -138,8 +158,17 @@ func (h *DashboardHandler) handleApplyUpdate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Download the archive
-	client := &http.Client{Timeout: 5 * time.Minute}
+	// Download the archive with redirect restrictions
+	client := &http.Client{
+		Timeout: 5 * time.Minute,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			// Only allow redirects within GitHub
+			if !strings.HasPrefix(req.URL.String(), "https://github.com/") && !strings.HasPrefix(req.URL.String(), "https://objects.githubusercontent.com/") {
+				return fmt.Errorf("redirect to non-GitHub URL blocked")
+			}
+			return nil
+		},
+	}
 	dlReq, err := http.NewRequestWithContext(r.Context(), "GET", body.DownloadURL, nil)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid download URL")
@@ -157,8 +186,41 @@ func (h *DashboardHandler) handleApplyUpdate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// Read the full archive into a temp file so we can checksum it before extraction
+	archiveTmp, err := os.CreateTemp("", "sage-archive-*")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create temp file: "+err.Error())
+		return
+	}
+	defer os.Remove(archiveTmp.Name())
+
+	hasher := sha256.New()
+	if _, err := io.Copy(archiveTmp, io.TeeReader(io.LimitReader(resp.Body, 500<<20), hasher)); err != nil {
+		archiveTmp.Close()
+		writeError(w, http.StatusBadGateway, "download read failed: "+err.Error())
+		return
+	}
+	actualChecksum := hex.EncodeToString(hasher.Sum(nil))
+
+	// Verify SHA-256 checksum if provided
+	if body.Checksum != "" {
+		if !strings.EqualFold(actualChecksum, body.Checksum) {
+			archiveTmp.Close()
+			writeError(w, http.StatusBadRequest, "checksum mismatch: archive may be corrupted or tampered with")
+			return
+		}
+	}
+
+	// Seek back to the beginning for extraction
+	if _, err := archiveTmp.Seek(0, io.SeekStart); err != nil {
+		archiveTmp.Close()
+		writeError(w, http.StatusInternalServerError, "failed to seek archive: "+err.Error())
+		return
+	}
+
 	// Extract sage-gui binary from tar.gz
-	newBinary, err := extractBinaryFromTarGz(resp.Body, "sage-gui")
+	newBinary, err := extractBinaryFromTarGz(archiveTmp, "sage-gui")
+	archiveTmp.Close()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "extraction failed: "+err.Error())
 		return
@@ -314,6 +376,41 @@ func parseSemver(v string) [3]int {
 		}
 	}
 	return result
+}
+
+// fetchChecksumForAsset downloads checksums.txt and returns the SHA-256 checksum
+// for the given asset name. Returns empty string if not found.
+func fetchChecksumForAsset(ctx context.Context, client *http.Client, checksumsURL, assetName string) string {
+	req, err := http.NewRequestWithContext(ctx, "GET", checksumsURL, nil)
+	if err != nil {
+		return ""
+	}
+	resp, err := client.Do(req)
+	if err != nil || resp.StatusCode != 200 {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return ""
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1MB max
+	if err != nil {
+		return ""
+	}
+
+	// checksums.txt format: "<sha256>  <filename>" (two spaces)
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.Fields(line)
+		if len(parts) >= 2 && parts[1] == assetName {
+			return parts[0]
+		}
+	}
+	return ""
 }
 
 // updateAppBundle attempts to update the sage-gui binary inside the macOS .app bundle
