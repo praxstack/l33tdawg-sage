@@ -33,14 +33,6 @@ type importResult struct {
 	Source   string   `json:"source"`
 }
 
-// importPreviewResult is the JSON response for an import preview.
-type importPreviewResult struct {
-	Total    int              `json:"total"`
-	Source   string           `json:"source"`
-	Previews []importPreview  `json:"previews"`
-	Errors   []string         `json:"errors,omitempty"`
-}
-
 type importPreview struct {
 	Domain  string `json:"domain"`
 	Content string `json:"content"`
@@ -167,7 +159,7 @@ func (h *DashboardHandler) handleImportConfirm(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusNotFound, "import not found or expired — please re-upload")
 		return
 	}
-	pending := val.(*pendingImport)
+	pending, _ := val.(*pendingImport)
 
 	// Check expiry (10 min)
 	if time.Since(pending.createdAt) > 10*time.Minute {
@@ -739,7 +731,7 @@ func parseOpenAIMessagesJSON(data []byte) ([]*memory.MemoryRecord, []string, err
 		return nil, nil, fmt.Errorf("no role/content messages found")
 	}
 
-	var records []*memory.MemoryRecord
+	records := make([]*memory.MemoryRecord, 0, len(conversations))
 	var errors []string
 
 	for i, msgs := range conversations {
@@ -968,7 +960,7 @@ func parseJSONL(data []byte) ([]*memory.MemoryRecord, string, []string, error) {
 		return parseFinetuningJSONL(data)
 	}
 
-	var records []*memory.MemoryRecord
+	records := make([]*memory.MemoryRecord, 0, len(sessionOrder))
 	var errors []string
 
 	for _, sid := range sessionOrder {
@@ -982,7 +974,7 @@ func parseJSONL(data []byte) ([]*memory.MemoryRecord, string, []string, error) {
 			turns = append(turns, conversationTurn{Role: e.Role, Content: e.Content})
 		}
 
-		title := fmt.Sprintf("Claude Code Session")
+		title := "Claude Code Session"
 		if len(turns) > 0 {
 			first := turns[0].Content
 			if len(first) > 60 {
@@ -1123,7 +1115,7 @@ func parseGrokJSON(data []byte) ([]*memory.MemoryRecord, []string, error) {
 		return nil, nil, fmt.Errorf("no conversations found in Grok export")
 	}
 
-	var records []*memory.MemoryRecord
+	records := make([]*memory.MemoryRecord, 0, len(export.Conversations))
 	var errors []string
 
 	for i, entry := range export.Conversations {

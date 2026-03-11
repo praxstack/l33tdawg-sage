@@ -337,7 +337,7 @@ func updateAppBundle(newBinaryPath string) {
 		if err != nil {
 			continue
 		}
-		if err := os.WriteFile(appBin, src, 0755); err != nil { // #nosec G306 -- executable binary
+		if err := os.WriteFile(appBin, src, 0755); err != nil { //nolint:gosec // G306: executable binary needs 0755
 			continue
 		}
 	}

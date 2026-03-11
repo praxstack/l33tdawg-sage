@@ -52,9 +52,6 @@ func runSetup() error {
 		handleSaveConfig(w, r, cfg, home)
 	})
 	mux.HandleFunc("/api/mcp-config", handleMCPConfig)
-	mux.HandleFunc("/api/upload-history", func(w http.ResponseWriter, r *http.Request) {
-		handleUploadHistory(w, r, home)
-	})
 	mux.HandleFunc("/api/check-ollama", handleCheckOllama)
 	mux.HandleFunc("/api/pull-model", handlePullModel)
 	mux.HandleFunc("/api/install-mcp", handleInstallMCP)
@@ -296,85 +293,6 @@ func handleInstallMCP(w http.ResponseWriter, r *http.Request) {
 func writeWizardJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
-}
-
-func handleUploadHistory(w http.ResponseWriter, r *http.Request, home string) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// 50MB max
-	_ = r.ParseMultipartForm(50 << 20)
-	file, header, err := r.FormFile("file")
-	if err != nil {
-		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "no file uploaded"})
-		return
-	}
-	defer file.Close()
-
-	data, err := io.ReadAll(file)
-	if err != nil {
-		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "failed to read file"})
-		return
-	}
-
-	var memories []seedMemory
-	name := header.Filename
-
-	switch {
-	case strings.HasSuffix(name, ".zip"):
-		memories, err = parseChatGPTZip(data)
-	case strings.HasSuffix(name, ".json"):
-		memories, err = parseChatGPTJSON(data)
-	case strings.HasSuffix(name, ".md"):
-		memories = parseMarkdown(string(data), "imported")
-		err = nil
-	default:
-		memories = parseParagraphs(string(data), "imported")
-		err = nil
-	}
-
-	if err != nil {
-		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
-		return
-	}
-
-	if len(memories) == 0 {
-		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "no memories found in file"})
-		return
-	}
-
-	// Save for auto-import on first serve
-	importData, _ := json.MarshalIndent(memories, "", "  ")
-	importPath := filepath.Join(home, "pending-import.json")
-	if err := os.WriteFile(importPath, importData, 0600); err != nil {
-		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "failed to save import"})
-		return
-	}
-
-	// Return preview
-	previews := make([]map[string]string, 0, min(10, len(memories)))
-	for i, m := range memories {
-		if i >= 10 {
-			break
-		}
-		content := m.Content
-		if len(content) > 120 {
-			content = content[:120] + "..."
-		}
-		previews = append(previews, map[string]string{
-			"content": content,
-			"domain":  m.Domain,
-		})
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"ok":       true,
-		"total":    len(memories),
-		"previews": previews,
-	})
 }
 
 // parseChatGPTZip extracts conversations.json from a ChatGPT export zip.
@@ -771,6 +689,19 @@ label { display: block; margin-top: 1rem; color: #9ca3af; font-size: 0.9rem; }
 .actions { display: flex; justify-content: space-between; align-items: center; margin-top: 1.5rem; }
 
 /* Drop zone */
+.step-quote {
+  font-style: italic;
+  color: #6b7280;
+  font-size: 0.82rem;
+  text-align: center;
+  margin-bottom: 1.25rem;
+  padding: 0.75rem 1rem;
+  border-left: 2px solid rgba(6,182,212,0.3);
+  background: rgba(6,182,212,0.03);
+  border-radius: 0 8px 8px 0;
+  transition: opacity 1.2s ease-in-out;
+  line-height: 1.6;
+}
 .dropzone {
   border: 2px dashed #374151; border-radius: 12px;
   padding: 2.5rem 1.5rem; text-align: center;
@@ -881,18 +812,17 @@ label { display: block; margin-top: 1rem; color: #9ca3af; font-size: 0.9rem; }
   <div class="progress-dot"></div>
   <div class="progress-dot"></div>
   <div class="progress-dot"></div>
-  <div class="progress-dot"></div>
 </div>
 
 <!-- Step 1: Welcome -->
 <div class="step active" id="step1">
-  <h1><span>SAGE</span></h1>
+  <h1><span>(S)AGE</span></h1>
   <p class="subtitle">Give your AI a memory</p>
 
   <div style="color:#d1d5db; line-height:1.8; font-size:1rem; margin-bottom:1.5rem;">
-    <p style="margin-bottom:1rem">Right now, your AI forgets everything the moment you close a conversation. Every chat starts from scratch.</p>
-    <p style="margin-bottom:1rem">SAGE gives your AI <strong style="color:#06b6d4">persistent memory</strong> that lives on your computer. It remembers your projects, your preferences, your past conversations &mdash; and gets better over time.</p>
-    <p>No cloud accounts. No third-party access. <strong style="color:#06b6d4">Everything stays on your machine.</strong></p>
+    <p style="margin-bottom:1rem">Every time you close a conversation, your AI forgets everything. SAGE fixes that.</p>
+    <p style="margin-bottom:1rem">Your AI gets <strong style="color:#06b6d4">persistent memory</strong> that lives on your machine &mdash; projects, preferences, lessons learned, mistakes to avoid. It gets smarter over time.</p>
+    <p>No cloud. No accounts. <strong style="color:#06b6d4">100% local and private.</strong></p>
   </div>
 
   <div style="text-align:center">
@@ -900,57 +830,10 @@ label { display: block; margin-top: 1rem; color: #9ca3af; font-size: 0.9rem; }
   </div>
 </div>
 
-<!-- Step 2: Import History (Optional) -->
+<!-- Step 2: Ollama Setup -->
 <div class="step" id="step2">
-  <h2>Import your chat history</h2>
-  <p class="step-desc">Got months of conversations with ChatGPT or Claude? Import them so your AI starts with everything it already knows about you.</p>
-
-  <div class="dropzone" id="dropzone" onclick="document.getElementById('file-input').click()">
-    <div class="dropzone-icon">&#128196;</div>
-    <div class="dropzone-text">
-      <strong>Drop your export file here</strong> or click to browse<br>
-      <span style="font-size:0.8rem; color:#6b7280">Supports: ChatGPT export (.zip or .json), plain text, markdown</span>
-    </div>
-    <input type="file" id="file-input" accept=".zip,.json,.txt,.md">
-  </div>
-
-  <div id="export-help" style="margin-bottom:1rem">
-    <details style="color:#9ca3af; font-size:0.9rem">
-      <summary style="cursor:pointer; color:#06b6d4; margin-bottom:0.5rem">How do I export from ChatGPT?</summary>
-      <ol class="instructions" style="margin-top:0.5rem">
-        <li>Go to <strong>chatgpt.com</strong> and log in</li>
-        <li>Click your profile picture (bottom-left) &rarr; <strong>Settings</strong></li>
-        <li>Go to <strong>Data Controls</strong> &rarr; <strong>Export data</strong></li>
-        <li>Click <strong>Export</strong> &mdash; you'll get an email with a download link</li>
-        <li>Download the .zip file and drop it here</li>
-      </ol>
-    </details>
-    <details style="color:#9ca3af; font-size:0.9rem; margin-top:0.5rem">
-      <summary style="cursor:pointer; color:#06b6d4; margin-bottom:0.5rem">How do I export from Claude?</summary>
-      <ol class="instructions" style="margin-top:0.5rem">
-        <li>Go to <strong>claude.ai</strong> and log in</li>
-        <li>Click your profile icon &rarr; <strong>Settings</strong></li>
-        <li>Scroll to <strong>Account</strong> &rarr; <strong>Export Data</strong></li>
-        <li>Download the export and drop it here</li>
-      </ol>
-    </details>
-  </div>
-
-  <div id="import-result" style="display:none"></div>
-
-  <div class="actions">
-    <button class="btn btn-outline" onclick="goStep(1)">Back</button>
-    <div>
-      <button class="btn-ghost" onclick="goStep(3)" style="margin-right:0.5rem">Skip this step</button>
-      <button class="btn" id="import-next-btn" onclick="goStep(3)" disabled>Continue</button>
-    </div>
-  </div>
-</div>
-
-<!-- Step 3: Ollama Setup -->
-<div class="step" id="step3">
-  <h2>Set up smart memory search</h2>
-  <p class="step-desc">SAGE uses a small AI model on your computer to understand your memories. Everything stays private &mdash; nothing is sent to the cloud. Ever.</p>
+  <h2>Enable smart search</h2>
+  <p class="step-desc">A small AI model runs locally on your machine to understand meaning &mdash; so your AI finds the right memories even when you use different words. Nothing leaves your computer.</p>
 
   <!-- Auto-detect state -->
   <div id="ollama-checking" style="text-align:center; padding:2rem">
@@ -1023,15 +906,15 @@ label { display: block; margin-top: 1rem; color: #9ca3af; font-size: 0.9rem; }
   <input type="hidden" id="ollama-url" value="http://localhost:11434">
 
   <div class="actions">
-    <button class="btn btn-outline" onclick="goStep(2)">Back</button>
+    <button class="btn btn-outline" onclick="goStep(1)">Back</button>
     <button class="btn" id="provider-next-btn" onclick="saveAndContinue()" disabled>Continue</button>
   </div>
 </div>
 
-<!-- Step 4: Connect Your AI -->
-<div class="step" id="step4">
+<!-- Step 3: Connect Your AI -->
+<div class="step" id="step3">
   <h2>Connect your AI</h2>
-  <p class="step-desc">Tell your AI app where to find SAGE. This takes about 30 seconds.</p>
+  <p class="step-desc">Point your AI app to SAGE so it can read and write memories. One-click install or manual &mdash; takes 30 seconds.</p>
 
   <div class="tabs">
     <div class="tab active" onclick="switchPlatform('claude')">Claude Desktop</div>
@@ -1094,15 +977,15 @@ label { display: block; margin-top: 1rem; color: #9ca3af; font-size: 0.9rem; }
   <button class="btn copy-btn btn-sm" onclick="copyMCP()">Copy</button>
 
   <div class="actions">
-    <button class="btn btn-outline" onclick="goStep(3)">Back</button>
-    <button class="btn" onclick="goStep(5)">Continue</button>
+    <button class="btn btn-outline" onclick="goStep(2)">Back</button>
+    <button class="btn" onclick="goStep(4)">Continue</button>
   </div>
 </div>
 
-<!-- Step 5: Inception -->
-<div class="step" id="step5">
+<!-- Step 4: Inception -->
+<div class="step" id="step4">
   <h2>Wake up your AI</h2>
-  <p class="step-desc">After you start SAGE and reopen your AI app, send this message in a new conversation to activate its memory:</p>
+  <p class="step-desc">Start SAGE, reopen your AI app, and send this message to activate its memory:</p>
 
   <div class="prompt-box">
     <button class="btn copy-btn btn-sm" onclick="copyPrompt()">Copy</button>
@@ -1124,13 +1007,13 @@ label { display: block; margin-top: 1rem; color: #9ca3af; font-size: 0.9rem; }
   </div>
 
   <div class="actions">
-    <button class="btn btn-outline" onclick="goStep(4)">Back</button>
-    <button class="btn" onclick="goStep(6)">Got it!</button>
+    <button class="btn btn-outline" onclick="goStep(3)">Back</button>
+    <button class="btn" onclick="goStep(5)">Got it!</button>
   </div>
 </div>
 
-<!-- Step 6: Done! -->
-<div class="step" id="step6">
+<!-- Step 5: Done! -->
+<div class="step" id="step5">
   <div class="celebration">
     <div class="celebration-icon">&#129504;</div>
     <h2>SAGE is ready!</h2>
@@ -1159,14 +1042,13 @@ label { display: block; margin-top: 1rem; color: #9ca3af; font-size: 0.9rem; }
       </div>
     </div>
 
-    <p style="margin-top:1.25rem">Now start the SAGE server:</p>
+    <p style="margin-top:1.25rem">Start SAGE, then open your AI app and send the inception message.</p>
     <p style="margin-top:0.75rem"><code>sage-gui serve</code></p>
-    <p style="margin-top:1.25rem">Then open your AI app and send the inception message.</p>
-    <p style="margin-top:1.25rem; font-size:0.9rem">CEREBRUM will be at <strong style="color:#06b6d4">http://localhost:8080/ui/</strong></p>
+    <p style="margin-top:1.25rem; font-size:0.9rem">CEREBRUM dashboard: <strong style="color:#06b6d4">http://localhost:8080/ui/</strong></p>
 
-    <div id="import-reminder" style="display:none; margin-top:1.5rem; padding:1rem; background:#111827; border-radius:8px; text-align:left; border:1px solid #1f2937">
-      <p style="color:#10b981; font-weight:600; margin-bottom:0.25rem">&#10003; Chat history queued for import</p>
-      <p style="color:#9ca3af; font-size:0.9rem">Your conversations will be imported automatically when you run <code style="color:#06b6d4">sage-gui serve</code> for the first time.</p>
+    <div style="margin-top:1.5rem; padding:1rem; background:#111827; border-radius:8px; text-align:left; border:1px solid #1f2937">
+      <p style="color:#06b6d4; font-weight:600; margin-bottom:0.25rem">&#128161; Got chat history from ChatGPT or Claude?</p>
+      <p style="color:#9ca3af; font-size:0.9rem">Import it anytime from the CEREBRUM dashboard &mdash; go to <strong style="color:#d1d5db">Settings &rarr; Import Memories</strong>. Supports ChatGPT ZIP, Claude markdown, Gemini JSON, and more.</p>
     </div>
 
     <div style="margin-top:2rem">
@@ -1180,7 +1062,45 @@ label { display: block; margin-top: 1rem; color: #9ca3af; font-size: 0.9rem; }
 <script>
 let selectedProvider = '';
 let currentStep = 1;
-let hasImport = false;
+
+// Inspirational quotes — 5 per step, randomly picked on each visit
+const stepQuotes = {
+  1: [
+    '"The palest ink is better than the best memory." — Chinese Proverb',
+    '"Privacy is not something that I\'m merely entitled to, it\'s an absolute prerequisite." — Marlon Brando',
+    '"A people without the knowledge of their past history, origin and culture is like a tree without roots." — Marcus Garvey',
+    '"Learning without reflection is a waste. Reflection without learning is dangerous." — Confucius',
+    '"The more that you read, the more things you will know. The more that you learn, the more places you\'ll go." — Dr. Seuss'
+  ],
+  2: [
+    '"The key is not to prioritize what\'s on your schedule, but to schedule your priorities." — Stephen Covey',
+    '"Understanding is the first step to acceptance, and only with acceptance can there be recovery." — J.K. Rowling',
+    '"It is not that I\'m so smart. But I stay with the questions much longer." — Albert Einstein',
+    '"The real voyage of discovery consists not in seeking new landscapes, but in having new eyes." — Marcel Proust',
+    '"Search and you will find." — Matthew 7:7'
+  ],
+  3: [
+    '"Alone we can do so little; together we can do so much." — Helen Keller',
+    '"The best way to predict the future is to create it." — Peter Drucker',
+    '"Any sufficiently advanced technology is indistinguishable from magic." — Arthur C. Clarke',
+    '"We become what we behold. We shape our tools, and thereafter our tools shape us." — Marshall McLuhan',
+    '"Intelligence is the ability to adapt to change." — Stephen Hawking'
+  ],
+  4: [
+    '"I think, therefore I am." — Ren\u00e9 Descartes',
+    '"The mind is not a vessel to be filled, but a fire to be kindled." — Plutarch',
+    '"What we know is a drop, what we don\'t know is an ocean." — Isaac Newton',
+    '"Memory is the diary we all carry about with us." — Oscar Wilde',
+    '"Wake up. Time to live." — Anonymous'
+  ],
+  5: [
+    '"Every new beginning comes from some other beginning\'s end." — Seneca',
+    '"The secret of getting ahead is getting started." — Mark Twain',
+    '"Your memory is a monster; it summons with a will of its own." — Cormac McCarthy',
+    '"The only way to do great work is to love what you do." — Steve Jobs',
+    '"In the middle of difficulty lies opportunity." — Albert Einstein'
+  ]
+};
 
 function goStep(n) {
   currentStep = n;
@@ -1194,22 +1114,37 @@ function goStep(n) {
     if (i + 1 === n) dot.classList.add('active');
   });
 
-  if (n === 3) {
-    // Reset provider state when navigating to step 3 (fixes back-button bug)
+  // Show a random quote for this step
+  showQuote(n);
+
+  if (n === 2) {
+    // Reset provider state when navigating to step 2 (fixes back-button bug)
     selectedProvider = null;
     document.getElementById('provider-next-btn').disabled = true;
     checkOllama();
   }
 
-  if (n === 4) {
+  if (n === 3) {
     fetch('/api/mcp-config').then(r=>r.text()).then(t => {
       document.getElementById('mcp-json').textContent = t;
     });
   }
+}
 
-  if (n === 6 && hasImport) {
-    document.getElementById('import-reminder').style.display = 'block';
+function showQuote(step) {
+  const quotes = stepQuotes[step];
+  if (!quotes) return;
+  const quote = quotes[Math.floor(Math.random() * quotes.length)];
+  const el = document.getElementById('step' + step);
+  let quoteEl = el.querySelector('.step-quote');
+  if (!quoteEl) {
+    quoteEl = document.createElement('div');
+    quoteEl.className = 'step-quote';
+    el.insertBefore(quoteEl, el.firstChild);
   }
+  quoteEl.textContent = quote;
+  quoteEl.style.opacity = '0';
+  requestAnimationFrame(() => { quoteEl.style.opacity = '1'; });
 }
 
 // --- Ollama auto-detect & setup ---
@@ -1321,7 +1256,7 @@ function useHashFallback() {
   document.getElementById('ollama-fallback').style.display = 'none';
 
   // Show confirmation
-  const container = document.getElementById('step3');
+  const container = document.getElementById('step2');
   const notice = document.createElement('div');
   notice.style.cssText = 'background:#1a1a2e; border:1px solid #2d2d5e; border-radius:12px; padding:1.25rem; text-align:center; margin-top:1rem';
   notice.innerHTML = '<div style="font-size:1.5rem; margin-bottom:0.5rem">&#9989;</div><h3 style="color:#c4b5fd">Basic search selected</h3><p style="color:#9ca3af; margin-top:0.5rem; font-size:0.9rem">You can upgrade to smart search anytime by installing Ollama.</p>';
@@ -1341,58 +1276,7 @@ async function saveAndContinue() {
   }
 
   await fetch('/api/save-config', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
-  goStep(4);
-}
-
-// --- File upload / drag & drop ---
-const dropzone = document.getElementById('dropzone');
-const fileInput = document.getElementById('file-input');
-
-dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('dragover'); });
-dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
-dropzone.addEventListener('drop', (e) => {
-  e.preventDefault();
-  dropzone.classList.remove('dragover');
-  if (e.dataTransfer.files.length) uploadFile(e.dataTransfer.files[0]);
-});
-fileInput.addEventListener('change', () => { if (fileInput.files.length) uploadFile(fileInput.files[0]); });
-
-async function uploadFile(file) {
-  const resultEl = document.getElementById('import-result');
-  resultEl.style.display = 'block';
-  resultEl.innerHTML = '<p style="color:#9ca3af">Processing ' + file.name + '...</p>';
-
-  const formData = new FormData();
-  formData.append('file', file);
-
-  try {
-    const resp = await fetch('/api/upload-history', { method: 'POST', body: formData });
-    const data = await resp.json();
-
-    if (!data.ok) {
-      resultEl.innerHTML = '<p class="status err">' + data.error + '</p>';
-      return;
-    }
-
-    hasImport = true;
-    let html = '<p class="import-count">' + data.total + ' memories extracted from ' + file.name + '</p>';
-    html += '<div class="import-preview">';
-    for (const p of data.previews) {
-      html += '<div class="import-item"><span class="domain">' + p.domain + '</span> ' + p.content + '</div>';
-    }
-    if (data.total > 10) {
-      html += '<div class="import-item" style="color:#06b6d4">...and ' + (data.total - 10) + ' more</div>';
-    }
-    html += '</div>';
-    resultEl.innerHTML = html;
-    document.getElementById('import-next-btn').disabled = false;
-
-    // Hide export help, shrink dropzone
-    document.getElementById('export-help').style.display = 'none';
-    dropzone.style.display = 'none';
-  } catch(e) {
-    resultEl.innerHTML = '<p class="status err">Upload failed: ' + e.message + '</p>';
-  }
+  goStep(3);
 }
 
 // --- Platform tabs ---
@@ -1408,7 +1292,7 @@ function switchPlatform(platform) {
 function copyMCP() {
   const text = document.getElementById('mcp-json').textContent;
   navigator.clipboard.writeText(text).then(() => {
-    const btn = document.querySelector('#step4 .copy-btn');
+    const btn = document.querySelector('#step3 .copy-btn');
     btn.textContent = 'Copied!';
     setTimeout(() => btn.textContent = 'Copy', 2000);
   });
@@ -1534,6 +1418,9 @@ function finishSetup() {
     btn.textContent = 'Close Setup';
   });
 }
+
+// Show a quote on the welcome step
+showQuote(1);
 </script>
 </body>
 </html>`
