@@ -237,6 +237,50 @@ func TestHandleExport_AllMemories(t *testing.T) {
 	}
 }
 
+func TestHandleExport_PaginatesAcrossPages(t *testing.T) {
+	h, s := newTestHandler(t)
+	r := testRouter(h)
+
+	// Insert more than the internal page size (500) to force multiple pages.
+	totalRecords := 520
+	for i := 0; i < totalRecords; i++ {
+		insertTestMemory(t, s, fmt.Sprintf("page-%04d", i), "bulk-domain")
+	}
+
+	req := httptest.NewRequest("GET", "/v1/dashboard/export", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// Parse JSONL lines — should have ALL records, not capped at 500
+	lines := bytes.Split(bytes.TrimSpace(w.Body.Bytes()), []byte("\n"))
+	assert.Len(t, lines, totalRecords)
+
+	// Verify first and last records are valid JSON
+	var first, last map[string]any
+	require.NoError(t, json.Unmarshal(lines[0], &first))
+	require.NoError(t, json.Unmarshal(lines[totalRecords-1], &last))
+	assert.NotEmpty(t, first["memory_id"])
+	assert.NotEmpty(t, last["memory_id"])
+	assert.Equal(t, "bulk-domain", first["domain_tag"])
+	assert.Equal(t, "bulk-domain", last["domain_tag"])
+}
+
+func TestHandleExport_EmptyDB(t *testing.T) {
+	h, _ := newTestHandler(t)
+	r := testRouter(h)
+
+	req := httptest.NewRequest("GET", "/v1/dashboard/export", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Header().Get("Content-Type"), "application/x-ndjson")
+	// Body should be empty (no records)
+	assert.Empty(t, bytes.TrimSpace(w.Body.Bytes()))
+}
+
 func TestHandleAuthMiddleware_DynamicEncryption(t *testing.T) {
 	h, _ := newTestHandler(t)
 	r := testRouter(h)
