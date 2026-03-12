@@ -103,13 +103,121 @@ func migrateOnUpgrade(dataDir string) (migrated bool, err error) {
 		fmt.Fprintf(os.Stderr, "  Reset blockchain state (CometBFT)\n")
 	}
 
-	// Step 4: Stamp new version
+	// Step 4: Clean up low-quality and duplicate memories in SQLite
+	// v4.0.0 introduces memory quality validators — clean up existing noise
+	if _, statErr := os.Stat(sqlitePath); statErr == nil {
+		cleaned := cleanupNoisyMemories(sqlitePath)
+		if cleaned > 0 {
+			fmt.Fprintf(os.Stderr, "  Cleaned up %d low-quality/duplicate memories\n", cleaned)
+		}
+	}
+
+	// Step 5: Stamp new version
 	if stampErr := stampVersion(versionPath); stampErr != nil {
 		return false, stampErr
 	}
 
 	fmt.Fprintf(os.Stderr, "  Upgrade complete — your memories are safe, chain will rebuild\n\n")
 	return true, nil
+}
+
+// cleanupNoisyMemories deprecates duplicate boot safeguards, noise observations,
+// and empty reflections that accumulated before v4.0.0's quality validators.
+// Returns the number of memories deprecated.
+func cleanupNoisyMemories(sqlitePath string) int {
+	dsn := sqlitePath + "?_journal_mode=WAL&_busy_timeout=5000"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return 0
+	}
+	defer func() { _ = db.Close() }()
+
+	deprecated := 0
+
+	// 1. Deduplicate boot safeguard memories — keep only the newest one per agent
+	rows, err := db.Query(`
+		SELECT memory_id FROM memories
+		WHERE domain_tag = 'meta'
+		  AND status = 'committed'
+		  AND (content LIKE '%sage_inception%' OR content LIKE '%boot sequence%' OR content LIKE '%BOOT SAFEGUARD%')
+		ORDER BY created_at DESC`)
+	if err == nil {
+		var ids []string
+		for rows.Next() {
+			var id string
+			if scanErr := rows.Scan(&id); scanErr == nil {
+				ids = append(ids, id)
+			}
+		}
+		_ = rows.Close()
+		// Keep the first (newest), deprecate the rest
+		if len(ids) > 1 {
+			for _, id := range ids[1:] {
+				if _, execErr := db.Exec(`UPDATE memories SET status = 'deprecated' WHERE memory_id = ?`, id); execErr == nil {
+					deprecated++
+				}
+			}
+		}
+	}
+
+	// 2. Deprecate noise observations (short/low-value content)
+	noisePatterns := []string{
+		"%user said hi%", "%user greeted%", "%session started%",
+		"%brain online%", "%brain is awake%", "%no action taken%",
+		"%user said morning%", "%new session started%",
+		"%user said hello%", "%greeted the user%",
+	}
+	for _, pattern := range noisePatterns {
+		res, execErr := db.Exec(`UPDATE memories SET status = 'deprecated'
+			WHERE status = 'committed' AND LOWER(content) LIKE ?`, pattern)
+		if execErr == nil {
+			if n, _ := res.RowsAffected(); n > 0 {
+				deprecated += int(n)
+			}
+		}
+	}
+
+	// 3. Deprecate very short observations (< 20 chars content)
+	res, err := db.Exec(`UPDATE memories SET status = 'deprecated'
+		WHERE status = 'committed' AND memory_type = 'observation' AND LENGTH(content) < 20`)
+	if err == nil {
+		if n, _ := res.RowsAffected(); n > 0 {
+			deprecated += int(n)
+		}
+	}
+
+	// 4. Deduplicate — deprecate memories with identical content_hash, keep newest
+	dupRows, err := db.Query(`
+		SELECT content_hash FROM memories
+		WHERE status = 'committed' AND content_hash IS NOT NULL
+		GROUP BY content_hash HAVING COUNT(*) > 1`)
+	if err == nil {
+		var hashes [][]byte
+		for dupRows.Next() {
+			var h []byte
+			if scanErr := dupRows.Scan(&h); scanErr == nil {
+				hashes = append(hashes, h)
+			}
+		}
+		_ = dupRows.Close()
+		for _, h := range hashes {
+			// Keep the newest, deprecate the rest
+			res, execErr := db.Exec(`UPDATE memories SET status = 'deprecated'
+				WHERE content_hash = ? AND status = 'committed'
+				AND memory_id NOT IN (
+					SELECT memory_id FROM memories
+					WHERE content_hash = ? AND status = 'committed'
+					ORDER BY created_at DESC LIMIT 1
+				)`, h, h)
+			if execErr == nil {
+				if n, _ := res.RowsAffected(); n > 0 {
+					deprecated += int(n)
+				}
+			}
+		}
+	}
+
+	return deprecated
 }
 
 func stampVersion(path string) error {

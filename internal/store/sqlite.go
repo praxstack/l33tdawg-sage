@@ -1052,11 +1052,11 @@ func (s *SQLiteStore) GetStats(ctx context.Context) (*StoreStats, error) {
 		ByStatus: make(map[string]int),
 	}
 
-	if err := s.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM memories`).Scan(&stats.TotalMemories); err != nil {
+	if err := s.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM memories WHERE status != 'deprecated'`).Scan(&stats.TotalMemories); err != nil {
 		return nil, fmt.Errorf("count total: %w", err)
 	}
 
-	rows, err := s.conn.QueryContext(ctx, `SELECT domain_tag, COUNT(*) FROM memories GROUP BY domain_tag`)
+	rows, err := s.conn.QueryContext(ctx, `SELECT domain_tag, COUNT(*) FROM memories WHERE status != 'deprecated' GROUP BY domain_tag`)
 	if err != nil {
 		return nil, fmt.Errorf("count by domain: %w", err)
 	}
@@ -2323,6 +2323,23 @@ func (s *SQLiteStore) UpdateRedeployLog(ctx context.Context, id int64, status, e
 		UPDATE redeployment_log SET status=?, completed_at=?, error=? WHERE id=?`,
 		status, now, errorMsg, id)
 	return err
+}
+
+// FindByContentHash checks if a committed memory with this content hash exists.
+// The contentHash parameter is the hex-encoded SHA-256 hash of the content.
+func (s *SQLiteStore) FindByContentHash(ctx context.Context, contentHash string) (bool, error) {
+	hashBytes, err := hex.DecodeString(contentHash)
+	if err != nil {
+		return false, fmt.Errorf("decode content hash: %w", err)
+	}
+	var count int
+	err = s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM memories WHERE content_hash = ? AND status != 'deprecated'`,
+		hashBytes).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 // --- Close & Ping ---

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	abcitypes "github.com/cometbft/cometbft/abci/types"
@@ -252,6 +253,39 @@ func (app *SageApp) InitChain(_ context.Context, req *abcitypes.RequestInitChain
 	app.logger.Info().Int("validators", app.validators.Size()).Msg("chain initialized")
 
 	return &abcitypes.ResponseInitChain{}, nil
+}
+
+// RegisterAppValidators replaces the validator set with application-level validators.
+// This removes the genesis personal validator (which no longer votes) so that only
+// the 4 app validators participate in quorum. Called from startAppValidators.
+func (app *SageApp) RegisterAppValidators(validators map[string]int64) error {
+	// Remove existing genesis validators that are NOT in the new app validator set.
+	// This prevents phantom validators that never vote from blocking quorum.
+	for _, existing := range app.validators.GetAll() {
+		if _, isAppValidator := validators[existing.ID]; !isAppValidator {
+			_ = app.validators.RemoveValidator(existing.ID)
+			app.logger.Info().Str("id", existing.ID[:16]).Msg("removed genesis validator (replaced by app validators)")
+		}
+	}
+
+	for id, power := range validators {
+		info := &validator.ValidatorInfo{
+			ID:    id,
+			Power: power,
+		}
+		if err := app.validators.AddValidator(info); err != nil {
+			// Already exists is OK (restart case)
+			if !strings.Contains(err.Error(), "already exists") {
+				return fmt.Errorf("register app validator %s: %w", id[:16], err)
+			}
+		}
+	}
+	// Persist updated validator set (app validators only)
+	valMap := make(map[string]int64)
+	for _, v := range app.validators.GetAll() {
+		valMap[v.ID] = v.Power
+	}
+	return app.badgerStore.SaveValidators(valMap)
 }
 
 // CheckTx validates a transaction before it enters the mempool.

@@ -1171,6 +1171,10 @@ func (s *PostgresStore) ListMemoriesByTag(_ context.Context, _ string, _, _ int)
 	return nil, 0, nil
 }
 
+func (s *PostgresStore) FindByContentHash(_ context.Context, _ string) (bool, error) {
+	return false, nil // TODO: implement for postgres
+}
+
 func (s *PostgresStore) Close() error {
 	if s.pool != nil {
 		s.pool.Close()

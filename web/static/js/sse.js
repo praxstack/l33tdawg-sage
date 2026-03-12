@@ -26,7 +26,7 @@ export class SSEClient {
             this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30000);
         };
 
-        const eventTypes = ['remember', 'recall', 'forget', 'vote', 'consensus', 'agent'];
+        const eventTypes = ['remember', 'recall', 'forget', 'vote', 'consensus', 'agent', 'update'];
         for (const type of eventTypes) {
             this.es.addEventListener(type, (e) => {
                 try {

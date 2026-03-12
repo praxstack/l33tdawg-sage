@@ -18,13 +18,14 @@ Agent (Claude, ChatGPT, DeepSeek, Gemini, etc.)
   ▼
 sage-gui
   ├── ABCI App (validation, confidence, decay, Ed25519 sigs)
+  ├── App Validators (sentinel, dedup, quality, consistency — BFT 3/4 quorum)
   ├── CometBFT consensus (single-validator or multi-agent network)
   ├── SQLite + optional AES-256-GCM encryption
   ├── CEREBRUM Dashboard (SPA, real-time SSE)
   └── Network Agent Manager (add/remove agents, key rotation, LAN pairing)
 ```
 
-Personal mode runs a real single-validator CometBFT node — every memory write goes through the same `DeliverTx → Commit` pipeline as the full multi-node deployment. Add more agents from the dashboard when you're ready.
+Personal mode runs a real CometBFT node with 4 in-process application validators — every memory write goes through pre-validation, signed vote transactions, and BFT quorum before committing. Same consensus pipeline as multi-node deployments. Add more agents from the dashboard when you're ready.
 
 Full deployment guide (multi-agent networks, RBAC, federation, monitoring): **[Architecture docs](docs/ARCHITECTURE.md)**
 
@@ -51,7 +52,14 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What's New in v3.6
+## What's New in v4.0
+
+- **4 Application Validators** — Every memory now passes through 4 in-process validators before committing: **Sentinel** (baseline accept, ensures liveness), **Dedup** (rejects duplicate content by SHA-256 hash), **Quality** (rejects noise — greeting observations, short content, empty headers), **Consistency** (enforces confidence thresholds, required fields). Quorum requires 3/4 accept (BFT 2/3 threshold).
+- **Pre-Validation Endpoint** — `POST /v1/memory/pre-validate` dry-runs all 4 validators without submitting on-chain. Returns per-validator decisions and quorum result. MCP tools use this to reject low-quality memories before they hit the chain.
+- **Memory Quality Gates** — `sage_turn` filters low-value observations (greeting noise, short content). `sage_reflect` detects similar existing memories and skips duplicates. Boot safeguard dedup prevents the same inception reminder from accumulating across sessions.
+- **Upgrade Cleanup** — On upgrade from v3.x, automatically deprecates duplicate boot safeguards, noise observations, very short memories, and content-hash duplicates. SQLite is backed up first. ~25-30 noisy memories cleaned per typical install.
+
+### v3.6
 
 - **Brain Graph Click-to-Focus** — Click any memory bubble to focus its domain group. Others fade out while focused memories arrange in a timeline row sorted by creation date. Click again to view detail, click empty space to exit.
 - **Interactive Timeline** — Click time buckets at the bottom of the brain graph to filter memories by time range. Multi-select hours to narrow down. Clear button to reset.

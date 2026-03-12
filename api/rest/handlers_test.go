@@ -177,6 +177,9 @@ func (m *mockMemoryStore) ListAllTags(_ context.Context) ([]store.TagCount, erro
 func (m *mockMemoryStore) ListMemoriesByTag(_ context.Context, _ string, _, _ int) ([]*memory.MemoryRecord, int, error) {
 	return nil, 0, nil
 }
+func (m *mockMemoryStore) FindByContentHash(_ context.Context, _ string) (bool, error) {
+	return false, nil
+}
 func (m *mockMemoryStore) Close() error { return nil }
 
 type mockScoreStore struct {

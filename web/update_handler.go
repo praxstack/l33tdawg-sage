@@ -123,7 +123,8 @@ func (h *DashboardHandler) handleCheckUpdate(w http.ResponseWriter, r *http.Requ
 	})
 }
 
-// handleApplyUpdate downloads and replaces the sage-gui binary.
+// handleApplyUpdate kicks off an async download-and-replace of the sage-gui binary.
+// Progress is streamed to the dashboard via SSE events so the user sees each step.
 func (h *DashboardHandler) handleApplyUpdate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		DownloadURL string `json:"download_url"`
@@ -146,7 +147,7 @@ func (h *DashboardHandler) handleApplyUpdate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Get current binary path
+	// Get current binary path (validate before going async)
 	execPath, err := os.Executable()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "cannot determine binary path: "+err.Error())
@@ -158,113 +159,141 @@ func (h *DashboardHandler) handleApplyUpdate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Download the archive with redirect restrictions
+	// Return immediately — the heavy work happens in a goroutine with SSE progress
+	writeJSONResp(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"status":  "started",
+		"message": "Update started — follow progress in the dashboard.",
+	})
+
+	// Run download + install async, broadcasting progress via SSE
+	go h.performUpdate(body.DownloadURL, body.Checksum, execPath)
+}
+
+// sendUpdateProgress broadcasts an SSE update event with step/status info.
+func (h *DashboardHandler) sendUpdateProgress(step, status, message string) {
+	if h.SSE == nil {
+		return
+	}
+	h.SSE.Broadcast(SSEEvent{
+		Type: EventUpdate,
+		Data: map[string]string{
+			"step":    step,
+			"status":  status,
+			"message": message,
+		},
+	})
+}
+
+// performUpdate does the actual download, checksum, extraction, and binary replacement.
+// It broadcasts progress via SSE at each step.
+func (h *DashboardHandler) performUpdate(downloadURL, checksum, execPath string) {
+	// Step 1: Download
+	h.sendUpdateProgress("download", "active", "Downloading update from GitHub...")
+
 	client := &http.Client{
 		Timeout: 5 * time.Minute,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			// Only allow redirects within GitHub
 			if !strings.HasPrefix(req.URL.String(), "https://github.com/") && !strings.HasPrefix(req.URL.String(), "https://objects.githubusercontent.com/") {
 				return fmt.Errorf("redirect to non-GitHub URL blocked")
 			}
 			return nil
 		},
 	}
-	dlReq, err := http.NewRequestWithContext(r.Context(), "GET", body.DownloadURL, nil)
+	dlReq, err := http.NewRequestWithContext(context.Background(), "GET", downloadURL, nil)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid download URL")
+		h.sendUpdateProgress("download", "error", "Invalid download URL")
 		return
 	}
 	resp, err := client.Do(dlReq)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "download failed: "+err.Error())
+		h.sendUpdateProgress("download", "error", "Download failed: "+err.Error())
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		writeError(w, http.StatusBadGateway, fmt.Sprintf("download returned %d", resp.StatusCode))
+		h.sendUpdateProgress("download", "error", fmt.Sprintf("GitHub returned HTTP %d", resp.StatusCode))
 		return
 	}
 
-	// Read the full archive into a temp file so we can checksum it before extraction
+	// Save to temp file while computing checksum
 	archiveTmp, err := os.CreateTemp("", "sage-archive-*")
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to create temp file: "+err.Error())
+		h.sendUpdateProgress("download", "error", "Failed to create temp file")
 		return
 	}
 	defer os.Remove(archiveTmp.Name())
 
 	hasher := sha256.New()
-	if _, copyErr := io.Copy(archiveTmp, io.TeeReader(io.LimitReader(resp.Body, 500<<20), hasher)); copyErr != nil {
+	written, copyErr := io.Copy(archiveTmp, io.TeeReader(io.LimitReader(resp.Body, 500<<20), hasher))
+	if copyErr != nil {
 		_ = archiveTmp.Close()
-		writeError(w, http.StatusBadGateway, "download read failed: "+copyErr.Error())
+		h.sendUpdateProgress("download", "error", "Download interrupted: "+copyErr.Error())
 		return
 	}
-	actualChecksum := hex.EncodeToString(hasher.Sum(nil))
 
-	// Verify SHA-256 checksum if provided
-	if body.Checksum != "" {
-		if !strings.EqualFold(actualChecksum, body.Checksum) {
+	h.sendUpdateProgress("download", "done", fmt.Sprintf("Downloaded %s", formatBytes(written)))
+
+	// Step 2: Verify checksum
+	actualChecksum := hex.EncodeToString(hasher.Sum(nil))
+	if checksum != "" {
+		h.sendUpdateProgress("verify", "active", "Verifying SHA-256 checksum...")
+		if !strings.EqualFold(actualChecksum, checksum) {
 			_ = archiveTmp.Close()
-			writeError(w, http.StatusBadRequest, "checksum mismatch: archive may be corrupted or tampered with")
+			h.sendUpdateProgress("verify", "error", "Checksum mismatch — archive may be corrupted")
 			return
 		}
+		h.sendUpdateProgress("verify", "done", "Checksum verified")
 	}
 
-	// Seek back to the beginning for extraction
+	// Step 3: Extract
+	h.sendUpdateProgress("extract", "active", "Extracting sage-gui binary...")
 	if _, seekErr := archiveTmp.Seek(0, io.SeekStart); seekErr != nil {
 		_ = archiveTmp.Close()
-		writeError(w, http.StatusInternalServerError, "failed to seek archive: "+seekErr.Error())
+		h.sendUpdateProgress("extract", "error", "Failed to read archive")
 		return
 	}
 
-	// Extract sage-gui binary from tar.gz
 	newBinary, err := extractBinaryFromTarGz(archiveTmp, "sage-gui")
 	_ = archiveTmp.Close()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "extraction failed: "+err.Error())
+		h.sendUpdateProgress("extract", "error", "Extraction failed: "+err.Error())
 		return
 	}
 	defer os.Remove(newBinary)
 
-	// Replace the binary atomically
-	// On Unix, we can unlink the old file and rename the new one in place.
-	// The running process keeps the old inode open.
+	h.sendUpdateProgress("extract", "done", "Binary extracted")
+
+	// Step 4: Install
+	h.sendUpdateProgress("install", "active", "Installing new binary...")
+
 	backupPath := execPath + ".old"
-	os.Remove(backupPath) // remove any previous backup
+	os.Remove(backupPath)
 
-	// Rename current -> backup
 	if err := os.Rename(execPath, backupPath); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to backup current binary: "+err.Error())
+		h.sendUpdateProgress("install", "error", "Failed to backup current binary: "+err.Error())
 		return
 	}
 
-	// Move new -> current
 	if err := os.Rename(newBinary, execPath); err != nil {
-		// Rollback
-		_ = os.Rename(backupPath, execPath)
-		writeError(w, http.StatusInternalServerError, "failed to install new binary: "+err.Error())
+		_ = os.Rename(backupPath, execPath) // rollback
+		h.sendUpdateProgress("install", "error", "Failed to install: "+err.Error())
 		return
 	}
 
-	// Copy permissions from backup
 	if info, err := os.Stat(backupPath); err == nil {
 		_ = os.Chmod(execPath, info.Mode())
 	} else {
 		_ = os.Chmod(execPath, 0755)
 	}
-
-	// Clean up backup
 	os.Remove(backupPath)
 
-	// Also update the .app bundle on macOS so the launcher doesn't revert on relaunch
+	// Also update the .app bundle on macOS
 	updateAppBundle(execPath)
 
-	writeJSONResp(w, http.StatusOK, map[string]any{
-		"ok":               true,
-		"message":          "Update installed. Restart SAGE to apply.",
-		"restart_required": true,
-	})
+	h.sendUpdateProgress("install", "done", "Update installed — restart SAGE to apply")
+	h.sendUpdateProgress("complete", "done", "ready_to_restart")
 }
 
 // handleRestart gracefully restarts sage-gui by re-exec'ing itself.
@@ -411,6 +440,17 @@ func fetchChecksumForAsset(ctx context.Context, client *http.Client, checksumsUR
 		}
 	}
 	return ""
+}
+
+// formatBytes returns a human-readable byte count (e.g. "15.2 MB").
+func formatBytes(b int64) string {
+	if b < 1024 {
+		return fmt.Sprintf("%d B", b)
+	}
+	if b < 1048576 {
+		return fmt.Sprintf("%.0f KB", float64(b)/1024)
+	}
+	return fmt.Sprintf("%.1f MB", float64(b)/1048576)
 }
 
 // updateAppBundle attempts to update the sage-gui binary inside the macOS .app bundle

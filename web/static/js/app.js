@@ -344,6 +344,7 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
             }
 
             // Compute focus target positions (grid layout: L→R, old→new, wrapping rows)
+            // Grid is anchored at the cloud centroid; camera pans to center it in the visible area
             if (s.focusDomain && s.focusTransition > 0) {
                 if (s._focusCacheDomain !== s.focusDomain || s._focusCacheCount !== visibleNodes.length) {
                     const domainNodes = visibleNodes
@@ -353,9 +354,14 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
                             const tb = s._nodeTimestamps ? s._nodeTimestamps.get(b.id) || 0 : new Date(b.created_at || b.createdAt || 0).getTime();
                             return ta - tb;
                         });
+                    const zoom = s.camera?.zoom || 0.6;
+                    // Cloud centroid in world coords (stable anchor point)
+                    let cloudCx = 0, cloudCy = 0;
+                    for (const n of visibleNodes) { cloudCx += n.x; cloudCy += n.y; }
+                    cloudCx /= (visibleNodes.length || 1);
+                    cloudCy /= (visibleNodes.length || 1);
                     const spacing = 50;
-                    // Grid: fit as many columns as the viewport allows
-                    const viewW = W / (s.camera?.zoom || 0.6);
+                    const viewW = W / zoom;
                     const cols = Math.max(3, Math.floor(viewW * 0.7 / spacing));
                     const rows = Math.ceil(domainNodes.length / cols);
                     const gridW = (cols - 1) * spacing;
@@ -365,10 +371,25 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
                         const col = i % cols;
                         const row = Math.floor(i / cols);
                         s.focusTargetPositions.set(n.id, {
-                            x: -gridW / 2 + col * spacing,
-                            y: -gridH / 2 + row * spacing,
+                            x: cloudCx - gridW / 2 + col * spacing,
+                            y: cloudCy - gridH / 2 + row * spacing,
                         });
                     });
+                    // Pan camera so cloud centroid appears at the visible viewport center
+                    // (accounting for stats panel overlay on the left)
+                    const statsEl = document.querySelector('.stats-panel:not(.stats-dragged)');
+                    let visibleShiftPx = 0;
+                    if (statsEl) {
+                        const sr = statsEl.getBoundingClientRect();
+                        const cr = canvas.getBoundingClientRect();
+                        const overlapPx = Math.max(0, sr.right - cr.left);
+                        if (overlapPx > 0 && overlapPx < W * 0.5) visibleShiftPx = overlapPx / 2;
+                    }
+                    s._cameraTarget = {
+                        x: visibleShiftPx - cloudCx * zoom,
+                        y: -cloudCy * zoom,
+                        zoom: zoom,
+                    };
                     s._focusCacheDomain = s.focusDomain;
                     s._focusCacheCount = visibleNodes.length;
                 }
@@ -661,8 +682,7 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
                             s.focusTransition = 0;
                             s.focusTargetPositions.clear();
                             s._focusCacheDomain = null; // force recompute
-                            // Set camera target for smooth pan (lerped in tick)
-                            s._cameraTarget = { x: 80, y: 0, zoom: Math.max(0.5, Math.min(s.camera.zoom, 0.8)) };
+                            // Camera pan is handled in grid computation (centers on cloud centroid)
                             setFocusedDomain(clickedDomain);
                         }
                     } else {
@@ -1907,11 +1927,14 @@ function SynapticLedger() {
 function SoftwareUpdate() {
     const [updateInfo, setUpdateInfo] = useState(null);
     const [checking, setChecking] = useState(false);
-    const [downloading, setDownloading] = useState(false);
-    const [progress, setProgress] = useState('');
+    const [updating, setUpdating] = useState(false);
     const [error, setError] = useState(null);
     const [installed, setInstalled] = useState(false);
     const [restarting, setRestarting] = useState(false);
+
+    // Step-by-step progress from SSE
+    const [steps, setSteps] = useState([]);
+    const [currentStep, setCurrentStep] = useState(null);
 
     const doCheck = async () => {
         setChecking(true);
@@ -1928,55 +1951,98 @@ function SoftwareUpdate() {
 
     useEffect(() => { doCheck(); }, []);
 
+    // Listen for SSE update events when an update is in progress
+    useEffect(() => {
+        if (!updating) return;
+        const es = new EventSource('/v1/dashboard/events');
+        const handler = (e) => {
+            try {
+                const outer = JSON.parse(e.data);
+                const data = outer.data || outer;
+                const { step, status, message } = data;
+
+                if (step === 'complete' && status === 'done') {
+                    setInstalled(true);
+                    setUpdating(false);
+                    setCurrentStep(null);
+                    return;
+                }
+
+                setCurrentStep({ step, status, message });
+
+                if (status === 'error') {
+                    setError(message);
+                    setUpdating(false);
+                    return;
+                }
+
+                // Build step list for visual progress
+                setSteps(prev => {
+                    const existing = prev.findIndex(s => s.step === step);
+                    if (existing >= 0) {
+                        const updated = [...prev];
+                        updated[existing] = { step, status, message };
+                        return updated;
+                    }
+                    return [...prev, { step, status, message }];
+                });
+            } catch (err) { /* ignore parse errors */ }
+        };
+        es.addEventListener('update', handler);
+        return () => { es.removeEventListener('update', handler); es.close(); };
+    }, [updating]);
+
     const doUpdate = async () => {
-        if (!updateInfo?.download_url) return;
-        setDownloading(true);
-        setProgress('Downloading...');
+        if (!updateInfo?.download_url) {
+            setError('No download URL available for your platform');
+            return;
+        }
+        setUpdating(true);
         setError(null);
+        setSteps([]);
+        setCurrentStep(null);
         try {
             const res = await applyUpdate(updateInfo.download_url);
-            if (res.ok) {
-                setInstalled(true);
-                setProgress('Update installed!');
-            } else {
-                setError(res.error || 'Update failed');
-                setProgress('');
+            if (!res.ok) {
+                setError(res.error || 'Update failed to start');
+                setUpdating(false);
             }
+            // If ok, progress comes via SSE events
         } catch (e) {
             setError('Update failed: ' + e.message);
-            setProgress('');
+            setUpdating(false);
         }
-        setDownloading(false);
     };
 
     const doRestart = async () => {
         setRestarting(true);
-        try {
-            await restartServer();
-            // Server will restart — wait then reload
-            setTimeout(() => {
-                const poll = setInterval(() => {
-                    fetch('/health').then(r => {
-                        if (r.ok) { clearInterval(poll); window.location.reload(); }
-                    }).catch(() => {});
-                }, 1000);
-            }, 2000);
-        } catch (e) {
-            // Expected — server is restarting
-            setTimeout(() => {
-                const poll = setInterval(() => {
-                    fetch('/health').then(r => {
-                        if (r.ok) { clearInterval(poll); window.location.reload(); }
-                    }).catch(() => {});
-                }, 1000);
-            }, 2000);
-        }
+        try { await restartServer(); } catch (e) { /* expected */ }
+        // Server will restart — poll until back
+        setTimeout(() => {
+            const poll = setInterval(() => {
+                fetch('/health').then(r => {
+                    if (r.ok) { clearInterval(poll); window.location.reload(); }
+                }).catch(() => {});
+            }, 1000);
+        }, 2000);
     };
 
     const formatSize = (bytes) => {
         if (!bytes) return '';
         if (bytes < 1048576) return (bytes / 1024).toFixed(0) + ' KB';
         return (bytes / 1048576).toFixed(1) + ' MB';
+    };
+
+    const stepIcon = (status) => {
+        if (status === 'done') return html`<span style="color:var(--accent-green)">✓</span>`;
+        if (status === 'error') return html`<span style="color:var(--accent-red)">✗</span>`;
+        if (status === 'active') return html`<span class="spinner" style="width:12px;height:12px"></span>`;
+        return html`<span style="color:var(--text-dim)">·</span>`;
+    };
+
+    const stepLabel = (step) => {
+        const labels = { download: 'Download', verify: 'Verify checksum', extract: 'Extract binary', install: 'Install' };
+        return labels[step] || step;
     };
 
     return html`
@@ -2012,11 +2078,11 @@ function SoftwareUpdate() {
 
             ${error && html`<div class="update-error">${error}</div>`}
 
-            ${!updateInfo?.update_available && updateInfo?.latest_version && !error && html`
+            ${!updateInfo?.update_available && updateInfo?.latest_version && !error && !installed && html`
                 <div class="update-current">You're up to date.</div>
             `}
 
-            ${updateInfo?.update_available && !installed && html`
+            ${updateInfo?.update_available && !installed && !updating && html`
                 <div class="update-available">
                     <div class="update-release-name">${updateInfo.release_name || 'New version available'}</div>
                     ${updateInfo.download_size ? html`<span class="update-size">${formatSize(updateInfo.download_size)}</span>` : null}
@@ -2026,24 +2092,34 @@ function SoftwareUpdate() {
                 </div>
             `}
 
-            ${progress && html`<div class="update-progress">${progress}</div>`}
+            ${(updating || installed) && steps.length > 0 && html`
+                <div class="update-steps">
+                    ${steps.map(s => html`
+                        <div class="update-step ${s.status}" key=${s.step}>
+                            <span class="update-step-icon">${stepIcon(s.status)}</span>
+                            <span class="update-step-label">${stepLabel(s.step)}</span>
+                            <span class="update-step-msg">${s.message}</span>
+                        </div>
+                    `)}
+                </div>
+            `}
 
             <div class="update-actions">
-                ${!installed && !downloading && html`
+                ${!installed && !updating && html`
                     <button class="btn btn-secondary" onClick=${doCheck} disabled=${checking}>
                         ${checking ? 'Checking...' : 'Check for Updates'}
                     </button>
                 `}
 
-                ${updateInfo?.update_available && !installed && !downloading && html`
+                ${updateInfo?.update_available && !installed && !updating && html`
                     <button class="btn btn-primary" onClick=${doUpdate}>
                         Update Now
                     </button>
                 `}
 
-                ${downloading && html`
+                ${updating && html`
                     <button class="btn btn-primary" disabled>
-                        <span class="spinner"></span> Downloading...
+                        <span class="spinner"></span> Updating...
                     </button>
                 `}
 
@@ -3780,6 +3856,40 @@ function HelpOverlay({ onClose, initialSection }) {
                 </div>
                 <div class="guide-callout" style="border-color: var(--warning, #f59e0b);">
                     <strong>Important:</strong> If you lose your passphrase, your encrypted memories cannot be recovered. There is no backdoor. Write it down and store it safely.
+                </div>
+            `,
+        },
+        {
+            key: 'validators',
+            title: 'Quality & Validation',
+            icon: html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>`,
+            summary: '4 in-process validators enforce memory quality through BFT consensus.',
+            content: html`
+                <div class="guide-detail-grid">
+                    <div class="guide-detail-item">
+                        <div class="guide-detail-label">How it works</div>
+                        <div class="guide-detail-desc">Every memory passes through 4 application validators before committing. Each validator independently votes accept, reject, or abstain. A BFT quorum of 3/4 (meeting the 2/3 threshold) is required for a memory to be committed. Each validator signs its vote as a real transaction broadcast through CometBFT consensus.</div>
+                    </div>
+                    <div class="guide-detail-item">
+                        <div class="guide-detail-label">Sentinel</div>
+                        <div class="guide-detail-desc">Always accepts. Guarantees at least one positive vote for liveness -- ensures the system never deadlocks.</div>
+                    </div>
+                    <div class="guide-detail-item">
+                        <div class="guide-detail-label">Dedup</div>
+                        <div class="guide-detail-desc">Checks the SHA-256 content hash against all committed memories. Rejects exact duplicates. Abstains if the database lookup fails (fail-open).</div>
+                    </div>
+                    <div class="guide-detail-item">
+                        <div class="guide-detail-label">Quality</div>
+                        <div class="guide-detail-desc">Rejects low-value content: memories shorter than 20 characters, greeting noise patterns ("user said hi", "session started", "brain online"), empty reflection headers, and bare markdown headers.</div>
+                    </div>
+                    <div class="guide-detail-item">
+                        <div class="guide-detail-label">Consistency</div>
+                        <div class="guide-detail-desc">Enforces metadata rules: minimum confidence of 0.3 for all types, minimum 0.7 for facts, and requires a non-empty domain tag.</div>
+                    </div>
+                    <div class="guide-detail-item">
+                        <div class="guide-detail-label">Pre-validate API</div>
+                        <div class="guide-detail-desc">POST /v1/memory/pre-validate lets you dry-run the validators without submitting on-chain. Returns per-validator decisions and quorum result. MCP tools use this automatically to reject low-quality memories before they hit the chain.</div>
+                    </div>
                 </div>
             `,
         },

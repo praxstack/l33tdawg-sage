@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"io/fs"
@@ -70,6 +71,10 @@ type DashboardHandler struct {
 
 	// pendingImports holds parsed records from preview, keyed by import ID.
 	pendingImports sync.Map // string -> *pendingImport
+
+	// PreValidateFunc runs the 4 app validators against proposed content without
+	// submitting it on-chain. Set during node startup to share validator logic.
+	PreValidateFunc func(content, contentHash, domain, memType string, confidence float64) []PreValidateVote
 }
 
 // RedeployOrchestrator extends RedeployChecker with deploy/status methods
@@ -78,6 +83,13 @@ type RedeployOrchestrator interface {
 	RedeployChecker
 	DeployOp(ctx context.Context, op, agentID string) error
 	GetRedeployStatus(ctx context.Context) (active bool, operation, agentID string, err error)
+}
+
+// PreValidateVote represents a single validator's vote result from pre-validation.
+type PreValidateVote struct {
+	Validator string `json:"validator"`
+	Decision  string `json:"decision"`
+	Reason    string `json:"reason"`
 }
 
 // NewDashboardHandler creates a new dashboard handler.
@@ -98,6 +110,48 @@ func NewDashboardHandler(memStore store.MemoryStore, version string) *DashboardH
 // SetEmbedder configures the embedding provider for import operations.
 func (h *DashboardHandler) SetEmbedder(e Embedder) {
 	h.embedder = e
+}
+
+// handlePreValidate runs the 4 app validators against proposed content
+// without actually submitting it on-chain. Returns per-validator results
+// and quorum outcome.
+func (h *DashboardHandler) handlePreValidate(w http.ResponseWriter, r *http.Request) {
+	if h.PreValidateFunc == nil {
+		http.Error(w, `{"error":"pre-validation not configured"}`, http.StatusServiceUnavailable)
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB limit
+	var req struct {
+		Content    string  `json:"content"`
+		Domain     string  `json:"domain"`
+		Type       string  `json:"type"`
+		Confidence float64 `json:"confidence"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Compute content hash (same as memory submission)
+	hash := sha256.Sum256([]byte(req.Content))
+	contentHash := hex.EncodeToString(hash[:])
+
+	votes := h.PreValidateFunc(req.Content, contentHash, req.Domain, req.Type, req.Confidence)
+
+	acceptCount := 0
+	for _, v := range votes {
+		if v.Decision == "accept" {
+			acceptCount++
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"accepted": acceptCount >= 3, // BFT quorum: 3 of 4
+		"votes":    votes,
+		"quorum":   fmt.Sprintf("%d/4", acceptCount),
+	})
 }
 
 const sessionCookieName = "sage_session"
@@ -181,6 +235,9 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 		r.Post("/v1/dashboard/settings/ledger/enable", h.handleEnableLedger)
 		r.Post("/v1/dashboard/settings/ledger/change-passphrase", h.handleChangePassphrase)
 		r.Post("/v1/dashboard/settings/ledger/disable", h.handleDisableLedger)
+
+		// Pre-validate endpoint — dry-run the 4 app validators
+		r.Post("/v1/memory/pre-validate", h.handlePreValidate)
 
 		// Network agent management routes
 		h.RegisterNetworkRoutes(r)

@@ -22,6 +22,7 @@ const (
 	EventConsensus EventType = "consensus"
 	EventAgent     EventType = "agent"
 	EventImport    EventType = "import"
+	EventUpdate    EventType = "update"
 )
 
 // SSEEvent is an event sent to connected dashboard clients.

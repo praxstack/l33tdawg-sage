@@ -585,6 +585,46 @@ func (s *Server) handleGetMemory(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handlePreValidate handles POST /v1/memory/pre-validate.
+// Runs the 4 app validators against proposed content without submitting on-chain.
+func (s *Server) handlePreValidate(w http.ResponseWriter, r *http.Request) {
+	if s.PreValidateFunc == nil {
+		writeProblem(w, http.StatusServiceUnavailable, "Not configured", "Pre-validation not configured on this node.")
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB limit
+	var req struct {
+		Content    string  `json:"content"`
+		Domain     string  `json:"domain"`
+		Type       string  `json:"type"`
+		Confidence float64 `json:"confidence"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
+		return
+	}
+
+	// Compute content hash (same as memory submission)
+	hash := sha256.Sum256([]byte(req.Content))
+	contentHash := hex.EncodeToString(hash[:])
+
+	votes := s.PreValidateFunc(req.Content, contentHash, req.Domain, req.Type, req.Confidence)
+
+	acceptCount := 0
+	for _, v := range votes {
+		if v.Decision == "accept" {
+			acceptCount++
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"accepted": acceptCount >= 3, // BFT quorum: 3 of 4
+		"votes":    votes,
+		"quorum":   fmt.Sprintf("%d/4", acceptCount),
+	})
+}
+
 // --- Helpers -----------------------------------------------------------------
 
 // broadcastTx sends a transaction to CometBFT via broadcast_tx_sync RPC.

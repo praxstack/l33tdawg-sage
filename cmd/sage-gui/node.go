@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -11,10 +13,9 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
-
-	"bufio"
 
 	"github.com/cometbft/cometbft/config"
 	cmtlog "github.com/cometbft/cometbft/libs/log"
@@ -34,6 +35,7 @@ import (
 	"github.com/l33tdawg/sage/internal/metrics"
 	"github.com/l33tdawg/sage/internal/orchestrator"
 	"github.com/l33tdawg/sage/internal/store"
+	"github.com/l33tdawg/sage/internal/tx"
 	"github.com/l33tdawg/sage/internal/vault"
 	"github.com/l33tdawg/sage/web"
 )
@@ -254,6 +256,68 @@ func runServe() error {
 		}
 	}()
 
+	// Wire pre-validate function into both dashboard and REST API.
+	// This shares the same 4 validator checks used by startAppValidators.
+	preValidate := func(content, contentHash, domain, memType string, confidence float64) []web.PreValidateVote {
+		type checker struct {
+			name     string
+			validate func() (string, string)
+		}
+		checks := []checker{
+			{"sentinel", func() (string, string) { return "accept", "baseline accept" }},
+			{"dedup", func() (string, string) {
+				exists, err := sqliteStore.FindByContentHash(ctx, contentHash)
+				if err == nil && exists {
+					return "reject", fmt.Sprintf("duplicate content (hash: %s)", contentHash[:8])
+				}
+				return "accept", "content is unique"
+			}},
+			{"quality", func() (string, string) {
+				if len(content) < 20 {
+					return "reject", fmt.Sprintf("content too short (%d chars, minimum 20)", len(content))
+				}
+				lower := strings.ToLower(content)
+				for _, p := range []string{"user said hi", "user greeted", "session started", "brain online", "brain is awake", "no action taken", "user said morning", "new session started"} {
+					if strings.Contains(lower, p) {
+						return "reject", "low-value observation: matches noise pattern"
+					}
+				}
+				if strings.HasPrefix(content, "[Task Reflection]") && len(content) < 60 {
+					return "reject", "empty reflection header without substance"
+				}
+				return "accept", "content passes quality check"
+			}},
+			{"consistency", func() (string, string) {
+				if confidence < 0.3 {
+					return "reject", fmt.Sprintf("confidence too low (%.2f)", confidence)
+				}
+				if memType == "fact" && confidence < 0.7 {
+					return "reject", fmt.Sprintf("facts require confidence >= 0.7 (got %.2f)", confidence)
+				}
+				if domain == "" {
+					return "reject", "domain required"
+				}
+				return "accept", "passes consistency check"
+			}},
+		}
+
+		votes := make([]web.PreValidateVote, len(checks))
+		for i, c := range checks {
+			decision, reason := c.validate()
+			votes[i] = web.PreValidateVote{Validator: c.name, Decision: decision, Reason: reason}
+		}
+		return votes
+	}
+	dashboard.PreValidateFunc = preValidate
+	restServer.PreValidateFunc = func(content, contentHash, domain, memType string, confidence float64) []rest.PreValidateResult {
+		webVotes := preValidate(content, contentHash, domain, memType, confidence)
+		results := make([]rest.PreValidateResult, len(webVotes))
+		for i, v := range webVotes {
+			results[i] = rest.PreValidateResult{Validator: v.Validator, Decision: v.Decision, Reason: v.Reason}
+		}
+		return results
+	}
+
 	// Build combined router
 	r := chi.NewRouter()
 	r.Use(cors.Handler(cors.Options{
@@ -300,10 +364,14 @@ func runServe() error {
 		}
 	}()
 
-	// Start auto-validator goroutine
-	// In quorum mode, auto-validator still runs locally (memories auto-commit on each node).
-	// Full cross-node vote exchange is a Phase 2 feature.
-	go autoValidator(ctx, sqliteStore, logger)
+	// Start app-level validators (4 in-process validators with BFT consensus)
+	// Derive deterministic seed from the node's signing key for reproducible validator keys.
+	var validatorSeed [32]byte
+	if sk := loadNodeSigningKey(cometCfg.PrivValidatorKeyFile(), logger); sk != nil {
+		h := sha256.Sum256(sk.Seed())
+		copy(validatorSeed[:], h[:])
+	}
+	go startAppValidators(ctx, app, sqliteStore, cometRPC, validatorSeed, logger)
 	if cfg.Quorum.Enabled {
 		logger.Info().Msg("quorum mode — P2P consensus active, blocks validated by both nodes")
 	}
@@ -451,13 +519,124 @@ func handleEmbedPersonal(provider embedding.Provider) http.HandlerFunc {
 	}
 }
 
-// autoValidator auto-votes "accept" on all proposed memories.
-// This simulates permissive governance for the personal single-validator mode.
-// It directly updates memory status in the store (skips the vote tx pipeline).
-func autoValidator(ctx context.Context, memStore store.MemoryStore, logger zerolog.Logger) {
-	// Wait for the node to start producing blocks
+// voteDecisionFromString converts a decision string to a tx.VoteDecision uint8.
+func voteDecisionFromString(s string) tx.VoteDecision {
+	switch s {
+	case "accept":
+		return tx.VoteDecisionAccept
+	case "reject":
+		return tx.VoteDecisionReject
+	case "abstain":
+		return tx.VoteDecisionAbstain
+	default:
+		return tx.VoteDecisionAccept
+	}
+}
+
+// broadcastVoteTx sends an encoded vote transaction to CometBFT via broadcast_tx_sync.
+func broadcastVoteTx(cometRPC string, encoded []byte, logger zerolog.Logger) {
+	txHex := hex.EncodeToString(encoded)
+	url := fmt.Sprintf("%s/broadcast_tx_sync?tx=0x%s", cometRPC, txHex)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil) //nolint:gosec
+	if err != nil {
+		logger.Debug().Err(err).Msg("failed to create broadcast request")
+		return
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		logger.Debug().Err(err).Msg("failed to broadcast vote tx")
+		return
+	}
+	resp.Body.Close()
+}
+
+// startAppValidators runs 4 in-process application validators (sentinel, dedup,
+// quality, consistency) that vote on proposed memories through CometBFT consensus.
+// Each validator has a deterministic Ed25519 key derived from the node's seed.
+func startAppValidators(ctx context.Context, app *sageabci.SageApp, memStore store.MemoryStore,
+	cometRPC string, seed [32]byte, logger zerolog.Logger) {
+
+	// Generate 4 validator keys deterministically from the node seed
+	type valConfig struct {
+		name     string
+		key      ed25519.PrivateKey
+		validate func(content, hash, domain, memType string, conf float64) (string, string) // decision, reason
+	}
+
+	validators := make([]valConfig, 4)
+	names := []string{"sentinel", "dedup", "quality", "consistency"}
+
+	for i, name := range names {
+		keySeed := sha256.Sum256(append(seed[:], []byte("sage-validator-"+name)...))
+		key := ed25519.NewKeyFromSeed(keySeed[:])
+		validators[i] = valConfig{name: name, key: key}
+	}
+
+	// Sentinel — baseline accept (permissive, ensures liveness)
+	validators[0].validate = func(_, _, _, _ string, _ float64) (string, string) {
+		return "accept", "baseline accept"
+	}
+
+	// Dedup — reject duplicate content
+	validators[1].validate = func(_, hash, _, _ string, _ float64) (string, string) {
+		exists, err := memStore.FindByContentHash(ctx, hash)
+		if err == nil && exists {
+			return "reject", fmt.Sprintf("duplicate content (hash: %s)", hash[:8])
+		}
+		return "accept", "content is unique"
+	}
+
+	// Quality — reject low-quality or noise memories
+	validators[2].validate = func(content, _, _, _ string, _ float64) (string, string) {
+		if len(content) < 20 {
+			return "reject", fmt.Sprintf("content too short (%d chars, minimum 20)", len(content))
+		}
+		lower := strings.ToLower(content)
+		noisePatterns := []string{
+			"user said hi", "user greeted", "session started",
+			"brain online", "brain is awake", "no action taken",
+			"user said morning", "new session started",
+		}
+		for _, p := range noisePatterns {
+			if strings.Contains(lower, p) {
+				return "reject", "low-value observation: matches noise pattern"
+			}
+		}
+		if strings.HasPrefix(content, "[Task Reflection]") && len(content) < 60 {
+			return "reject", "empty reflection header without substance"
+		}
+		return "accept", "content passes quality check"
+	}
+
+	// Consistency — reject inconsistent metadata
+	validators[3].validate = func(_, _, domain, memType string, conf float64) (string, string) {
+		if conf < 0.3 {
+			return "reject", fmt.Sprintf("confidence too low (%.2f)", conf)
+		}
+		if memType == "fact" && conf < 0.7 {
+			return "reject", fmt.Sprintf("facts require confidence >= 0.7 (got %.2f)", conf)
+		}
+		if domain == "" {
+			return "reject", "domain required"
+		}
+		return "accept", "passes consistency check"
+	}
+
+	// Register all 4 in ABCI validator set
+	valMap := make(map[string]int64)
+	for _, v := range validators {
+		pubKey := v.key.Public().(ed25519.PublicKey)
+		agentID := hex.EncodeToString(pubKey)
+		valMap[agentID] = 10
+	}
+	if err := app.RegisterAppValidators(valMap); err != nil {
+		logger.Error().Err(err).Msg("failed to register app validators")
+		return
+	}
+
+	// Wait for node startup
 	time.Sleep(3 * time.Second)
-	logger.Info().Msg("auto-validator started — will auto-commit proposed memories")
+	logger.Info().Int("count", 4).Msg("app validators started — BFT memory consensus active")
 
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
@@ -472,11 +651,35 @@ func autoValidator(ctx context.Context, memStore store.MemoryStore, logger zerol
 				continue
 			}
 			for _, mem := range pending {
-				now := time.Now()
-				if updateErr := memStore.UpdateStatus(ctx, mem.MemoryID, "committed", now); updateErr != nil {
-					logger.Debug().Err(updateErr).Str("memory_id", mem.MemoryID).Msg("auto-commit failed")
-				} else {
-					logger.Info().Str("memory_id", mem.MemoryID).Str("domain", mem.DomainTag).Msg("auto-committed memory")
+				contentHash := hex.EncodeToString(mem.ContentHash)
+				for _, v := range validators {
+					decision, rationale := v.validate(mem.Content, contentHash, mem.DomainTag, string(mem.MemoryType), mem.ConfidenceScore)
+
+					// Create and sign vote transaction
+					voteTx := &tx.ParsedTx{
+						Type:      tx.TxTypeMemoryVote,
+						Nonce:     uint64(time.Now().UnixNano()), //nolint:gosec
+						Timestamp: time.Now(),
+						MemoryVote: &tx.MemoryVote{
+							MemoryID:  mem.MemoryID,
+							Decision:  voteDecisionFromString(decision),
+							Rationale: rationale,
+						},
+					}
+
+					if signErr := tx.SignTx(voteTx, v.key); signErr != nil {
+						logger.Debug().Err(signErr).Msg("failed to sign vote tx")
+						continue
+					}
+
+					encoded, encErr := tx.EncodeTx(voteTx)
+					if encErr != nil {
+						logger.Debug().Err(encErr).Msg("failed to encode vote tx")
+						continue
+					}
+
+					// Broadcast to CometBFT
+					broadcastVoteTx(cometRPC, encoded, logger)
 				}
 			}
 		}

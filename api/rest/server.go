@@ -43,6 +43,17 @@ type Server struct {
 	signingKey  ed25519.PrivateKey      // Node-level key for signing on-chain txs
 	embedder    *embedding.Client       // Local Ollama embedding client
 	OnEvent     EventCallback           // Optional: called when notable events occur
+
+	// PreValidateFunc runs the 4 app validators without on-chain submission.
+	// Set during node startup. Returns per-validator results.
+	PreValidateFunc func(content, contentHash, domain, memType string, confidence float64) []PreValidateResult
+}
+
+// PreValidateResult holds one validator's pre-validation result.
+type PreValidateResult struct {
+	Validator string `json:"validator"`
+	Decision  string `json:"decision"`
+	Reason    string `json:"reason"`
 }
 
 // NewServer creates a new REST API server.
@@ -176,6 +187,7 @@ func (s *Server) setupRouter() chi.Router {
 		r.Put("/v1/memory/{memory_id}/task-status", s.handleUpdateTaskStatus)
 		r.Post("/v1/memory/link", s.handleLinkMemories)
 		r.Get("/v1/memory/tasks", s.handleGetOpenTasks)
+		r.Post("/v1/memory/pre-validate", s.handlePreValidate)
 
 		// Agent endpoints
 		r.Get("/v1/agent/me", s.handleGetAgent)

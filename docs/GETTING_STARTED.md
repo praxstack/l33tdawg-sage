@@ -324,13 +324,30 @@ sage-gui serve  # Reinitializes automatically
 
 ## How It Works
 
-Under the hood, SAGE Personal runs a real BFT consensus engine (CometBFT) with a single validator. Every memory goes through the full governance pipeline:
+Under the hood, SAGE Personal runs a real BFT consensus engine (CometBFT) with 4 in-process application validators. Every memory goes through the full governance pipeline:
 
 1. **Propose** — memory submitted via MCP or REST API
-2. **Validate** — auto-validator accepts the memory
-3. **Commit** — memory written to SQLite with on-chain hash in BadgerDB
+2. **Pre-Validate** — 4 application validators vote independently:
+   - **Sentinel** — baseline accept (ensures liveness)
+   - **Dedup** — rejects duplicate content by SHA-256 hash
+   - **Quality** — rejects noise (greeting observations, short content, empty headers)
+   - **Consistency** — enforces confidence thresholds and required fields
+3. **BFT Quorum** — 3 of 4 validators must accept (meets 2/3 BFT threshold)
+4. **Commit** — each validator signs a vote transaction broadcast through CometBFT, memory written to SQLite with on-chain hash in BadgerDB
 
-This means your personal SAGE instance uses the exact same protocol as a multi-validator production deployment. If you later want to upgrade to a team setup with multiple validators, your data and tooling are already compatible.
+This means your personal SAGE instance uses the exact same consensus protocol as a multi-validator production deployment, with real quality gates preventing noise from accumulating. If you later want to upgrade to a team setup with additional validators, your data and tooling are already compatible.
+
+### Upgrading from v3.x
+
+On first launch after upgrading, SAGE automatically:
+- **Backs up** your SQLite database to `~/.sage/backups/`
+- **Resets** chain state (BadgerDB + CometBFT) for the new validator architecture
+- **Cleans up** noisy memories accumulated before quality gates existed:
+  - Duplicate boot safeguards (keeps newest)
+  - Greeting/session observations ("user said hi", "brain online", etc.)
+  - Very short observations (< 20 characters)
+  - Duplicate content hashes (keeps newest)
+- All your substantive memories are preserved. The chain rebuilds automatically.
 
 ---
 

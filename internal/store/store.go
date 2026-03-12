@@ -132,6 +132,8 @@ type MemoryStore interface {
 	GetTags(ctx context.Context, memoryID string) ([]string, error)
 	ListAllTags(ctx context.Context) ([]TagCount, error)
 	ListMemoriesByTag(ctx context.Context, tag string, limit, offset int) ([]*memory.MemoryRecord, int, error)
+	// FindByContentHash checks if a committed memory with this content hash exists.
+	FindByContentHash(ctx context.Context, contentHash string) (bool, error)
 	Close() error
 }
 

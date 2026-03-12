@@ -679,16 +679,16 @@ footer a:hover { text-decoration: underline; }
         <p class="section-desc" style="margin:0 auto;">Not just a key-value store. SAGE is governed institutional memory &mdash; validated, scored, and evolving.</p>
       </div>
 
-      <!-- What's New in v3.7 -->
+      <!-- What's New in v4.0 -->
       <div class="whats-new reveal">
         <h3>What's new in <span id="whats-new-version">the latest release</span></h3>
         <div class="new-features">
-          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Import Preview &amp; Confirm</h4><p>Preview detected memories before importing. See a sample of what will be created, then confirm or cancel. No more blind imports.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>JSONL Import Support</h4><p>Import JSONL conversation exports alongside existing ChatGPT ZIP, Claude markdown, and Gemini JSON formats.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Recall Settings</h4><p>Configure how many memories agents retrieve per query and minimum confidence threshold. Tune recall from the dashboard.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>MCP Recall Defaults</h4><p>sage_recall and sage_turn now respect your dashboard recall settings. Cached for performance, no extra config needed.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Smarter Version Checks</h4><p>Proper semver comparison for updates. App bundle sync on macOS so the launcher doesn't revert after upgrading.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>DMG Installer Fixes</h4><p>Improved macOS DMG build script for cleaner installs and upgrades.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>4 Application Validators</h4><p>Every memory passes through Sentinel, Dedup, Quality, and Consistency validators. BFT quorum (3/4) required to commit. Real signed vote transactions through CometBFT consensus.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Memory Quality Gates</h4><p>No more noise accumulation. Greeting observations, short content, empty headers, and low-confidence facts are automatically rejected before hitting the chain.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Duplicate Detection</h4><p>SHA-256 content hash dedup catches exact duplicates. Similar-memory detection in reflections prevents near-duplicate accumulation across sessions.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Pre-Validation API</h4><p>Dry-run validators without submitting on-chain. MCP tools use this to give agents immediate feedback on why a memory was rejected.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Upgrade Cleanup</h4><p>Automatic noise cleanup on upgrade from v3.x. Deduplicates boot safeguards, deprecates greeting noise, removes short observations. Your good memories are preserved.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Step-by-Step Updates</h4><p>Software update UI now shows real-time progress via SSE &mdash; download, verify, extract, install &mdash; with per-step status indicators.</p></div></div>
         </div>
       </div>
 

@@ -2990,6 +2990,24 @@ input[type="range"]::-moz-range-thumb {
 .update-progress {
     color: var(--primary); font-size: 13px; padding: 8px 0;
 }
+.update-steps {
+    display: flex; flex-direction: column; gap: 6px;
+    padding: 12px; background: var(--bg-elevated); border-radius: 8px;
+    border: 1px solid var(--border); margin-bottom: 12px;
+}
+.update-step {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 13px; color: var(--text-muted);
+    transition: color 0.2s;
+}
+.update-step.active { color: var(--text); }
+.update-step.done { color: var(--text-dim); }
+.update-step.error { color: var(--danger); }
+.update-step-icon { width: 16px; text-align: center; flex-shrink: 0; }
+.update-step-label { font-weight: 500; min-width: 110px; }
+.update-step-msg { color: var(--text-muted); font-size: 12px; }
+.update-step.active .update-step-msg { color: var(--primary); }
+.update-step.done .update-step-label { color: var(--accent-green, var(--accent)); }
 .update-actions { display: flex; gap: 8px; margin-top: 8px; }
 .update-restart-btn { animation: pulse-glow 2s infinite; }
 @keyframes pulse-glow {

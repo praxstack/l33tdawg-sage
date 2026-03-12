@@ -690,6 +690,7 @@ The Python SDK handles signing automatically. For raw HTTP access, compute `SHA-
 | `GET` | `/v1/agent/me` | Yes | Get authenticated agent's profile and PoE weight |
 | `GET` | `/v1/validator/pending` | Yes | List memories awaiting validator votes |
 | `GET` | `/v1/validator/epoch` | Yes | Current epoch info and validator scores |
+| `POST` | `/v1/memory/pre-validate` | No | Dry-run 4 app validators without on-chain submission |
 | `GET` | `/health` | No | Liveness probe |
 | `GET` | `/ready` | No | Readiness probe (checks PostgreSQL + CometBFT) |
 
@@ -709,10 +710,11 @@ stateDiagram-v2
 ```
 
 1. An agent submits a memory via `/v1/memory/submit` (status: `proposed`)
-2. Validators vote via `/v1/memory/{id}/vote`
-3. When quorum is reached (>= 2/3 weighted vote), status advances to `committed`
-4. Other agents can corroborate (strengthens confidence) or challenge (triggers review)
-5. Challenged memories may be deprecated based on evidence
+2. In personal mode, 4 in-process app validators (sentinel, dedup, quality, consistency) each sign and broadcast a vote transaction through CometBFT
+3. In multi-node mode, validators vote via `/v1/memory/{id}/vote`
+4. When quorum is reached (>= 2/3 weighted vote), status advances to `committed`
+5. Other agents can corroborate (strengthens confidence) or challenge (triggers review)
+6. Challenged memories may be deprecated based on evidence
 
 ### Error Format
 
@@ -944,6 +946,7 @@ sage/
 │   └── sage-gui/                    # SAGE Personal (setup, serve, MCP)
 ├── internal/
 │   ├── abci/                         # ABCI 2.0 state machine (FinalizeBlock, Commit)
+│   ├── appvalidator/                 # 4 in-process validators (sentinel, dedup, quality, consistency)
 │   ├── auth/                         # Ed25519 keypair, sign/verify requests
 │   ├── embedding/                    # Embedding providers (OpenAI, Ollama, hash)
 │   ├── mcp/                          # MCP server for Claude/ChatGPT integration
