@@ -12,6 +12,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 VERSION="${SAGE_VERSION:-dev}"
+VERSION="${VERSION#v}"  # Strip leading 'v' if present
 
 BUILD_DIR="${PROJECT_ROOT}/dist/linux-amd64"
 STAGING_DIR="${BUILD_DIR}/sage-${VERSION}-linux-amd64"
