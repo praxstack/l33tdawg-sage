@@ -464,38 +464,21 @@ p code, li code {
   <div id="claude-code" class="tab-content">
     <div class="step">
       <span class="step-num">1</span>
-      <h3>Find your sage-gui path</h3>
-      <p>If you installed from the DMG, it's inside the app bundle. If you built from source, it's wherever you put it.</p>
+      <h3>Run the installer in your project</h3>
+      <p>Open a terminal in your project directory and run:</p>
       <pre><code># macOS (DMG install):
-/Applications/SAGE.app/Contents/MacOS/sage-gui
+/Applications/SAGE.app/Contents/MacOS/sage-gui mcp install
 
-# Built from source:
-which sage-gui</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
-    </div>
-
-    <div class="step">
-      <span class="step-num">2</span>
-      <h3>Add MCP config to your project</h3>
-      <p>Create a <code>.mcp.json</code> file in your project root:</p>
-      <pre><code>{
-  "mcpServers": {
-    "sage": {
-      "command": "/Applications/SAGE.app/Contents/MacOS/sage-gui",
-      "args": ["mcp"],
-      "env": {
-        "SAGE_HOME": "~/.sage",
-        "SAGE_PROVIDER": "claude-code"
-      }
-    }
-  }
-}</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+# Built from source / Linux:
+sage-gui mcp install</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+      <p>This creates a <code>.mcp.json</code> in your project, installs Claude Code hooks for reliable memory persistence, and sets up tool permissions automatically.</p>
       <div class="info-box">
-        <strong>Tip:</strong> Put this in your home directory for global config, or in each project root for per-project setup. Claude Code picks it up automatically.
+        <strong>Tip:</strong> Run this in each project where you want SAGE memory. Each project gets its own agent identity with isolated permissions.
       </div>
     </div>
 
     <div class="step">
-      <span class="step-num">3</span>
+      <span class="step-num">2</span>
       <h3>Start a new session</h3>
       <p>Close and reopen Claude Code (or start a new terminal session). SAGE tools will appear automatically.</p>
     </div>

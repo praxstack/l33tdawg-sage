@@ -576,7 +576,7 @@ footer a:hover { text-decoration: underline; }
       <div class="free-prompt">
         <div class="free-prompt-label">Or just tell your AI</div>
         <div class="free-prompt-box" onclick="copyPrompt(this)" title="Click to copy">
-          <div class="free-prompt-text">Download and install SAGE from https://l33tdawg.github.io/sage/ &mdash; then take the red pill. <em>Free your mind.</em></div>
+          <div class="free-prompt-text">Install SAGE persistent memory for this project. Run <code>sage-gui mcp install</code> in this directory (if sage-gui isn't in PATH, check /Applications/SAGE.app/Contents/MacOS/sage-gui on macOS). If SAGE isn't installed yet, download it from https://github.com/l33tdawg/sage/releases/latest &mdash; then take the red pill. <em>Free your mind.</em></div>
           <button class="free-prompt-copy" onclick="event.stopPropagation(); copyPrompt(this.parentElement)">Copy</button>
         </div>
       </div>
@@ -1101,7 +1101,7 @@ document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
 
 // ─── Copy Prompt ───
 function copyPrompt(box) {
-  const text = 'Download and install SAGE from https://l33tdawg.github.io/sage/ — then take the red pill. Free your mind.';
+  const text = 'Install SAGE persistent memory for this project. Run `sage-gui mcp install` in this directory (if sage-gui isn\'t in PATH, check /Applications/SAGE.app/Contents/MacOS/sage-gui on macOS). If SAGE isn\'t installed yet, download it from https://github.com/l33tdawg/sage/releases/latest — then take the red pill. Free your mind.';
   navigator.clipboard.writeText(text).then(() => {
     const btn = box.querySelector('.free-prompt-copy');
     if (btn) { btn.textContent = 'Copied!'; setTimeout(() => { btn.textContent = 'Copy'; }, 2000); }
