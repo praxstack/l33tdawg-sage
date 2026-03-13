@@ -230,7 +230,12 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
         });
         const unsub4 = sse.on('forget', (data) => {
             stateRef.current.pulseNodes.set(data.memory_id, { start: performance.now(), type: 'forget' });
-            setTimeout(loadData, 500);
+            // Remove node from local state after fade (or immediately if tab was backgrounded)
+            setTimeout(() => {
+                const s = stateRef.current;
+                s.nodes = s.nodes.filter(n => n.id !== data.memory_id);
+                s.pulseNodes.delete(data.memory_id);
+            }, 2200);
         });
         return () => { unsub1(); unsub2(); unsub3(); unsub4(); };
     }, [sse]);
@@ -241,6 +246,7 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
         if (!canvas) return;
         const ctx = canvas.getContext('2d');
         let animFrame;
+        let lastFrameTime = performance.now();
 
         function resize() {
             const rect = canvas.parentElement.getBoundingClientRect();
@@ -258,6 +264,11 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
             const W = canvas.width / devicePixelRatio;
             const H = canvas.height / devicePixelRatio;
             const now = performance.now();
+            const frameDelta = now - lastFrameTime;
+            lastFrameTime = now;
+
+            // Skip physics if tab was backgrounded (>200ms gap) — just redraw current state
+            const skipPhysics = frameDelta > 200;
             s.animTime = now;
 
             // Update filter state from React
@@ -266,8 +277,8 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
             s.agentFilter = agentFilter;
             s.timelineFilter = timelineFilter;
 
-            // Force simulation
-            simulateForces(s, W, H);
+            // Force simulation — skip if returning from backgrounded tab
+            if (!skipPhysics) simulateForces(s, W, H);
 
             // Clear
             ctx.save();
@@ -277,7 +288,7 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
 
             // Smooth camera pan (lerp toward target if set)
             const cam = s.camera;
-            if (s._cameraTarget) {
+            if (s._cameraTarget && !skipPhysics) {
                 const lerpSpeed = 0.08;
                 cam.x += (s._cameraTarget.x - cam.x) * lerpSpeed;
                 cam.y += (s._cameraTarget.y - cam.y) * lerpSpeed;
@@ -345,8 +356,40 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
             // Focus mode: animate transition (linear progress, eased in draw)
             if (s.focusDomain) {
                 s.focusTransition = Math.min(1, s.focusTransition + 0.035);
+                s._wasInFocus = true;
             } else {
-                s.focusTransition = Math.max(0, s.focusTransition - 0.05);
+                // Snap-back: when exiting focus, give returning nodes a velocity kick
+                if (s._wasInFocus && s.focusTransition > 0.3) {
+                    s._wasInFocus = false;
+                    s._settled = false;
+                    s._forceFrame = 0;
+                    // Compute cloud centroid from ALL nodes
+                    let cx = 0, cy = 0;
+                    for (const n of s.nodes) { cx += n.x; cy += n.y; }
+                    cx /= (s.nodes.length || 1);
+                    cy /= (s.nodes.length || 1);
+                    // Kick ALL nodes — focused ones snap back from grid, others scatter
+                    for (const n of s.nodes) {
+                        const target = s.focusTargetPositions.get(n.id);
+                        if (target) {
+                            // Focused node: start from grid position, spring toward center
+                            n.x = target.x;
+                            n.y = target.y;
+                        }
+                        // Give every node a velocity impulse
+                        const dx = cx - n.x;
+                        const dy = cy - n.y;
+                        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+                        const speed = target ? (6 + Math.random() * 4) : (1 + Math.random() * 2);
+                        n.vx = (dx / dist) * speed + (Math.random() - 0.5) * 3;
+                        n.vy = (dy / dist) * speed + (Math.random() - 0.5) * 3;
+                    }
+                }
+                s.focusTransition = Math.max(0, s.focusTransition - 0.08);
+                // Clean up target positions once transition is fully done
+                if (s.focusTransition === 0) {
+                    s.focusTargetPositions.clear();
+                }
             }
 
             // Compute focus target positions (grid layout: L→R, old→new, wrapping rows)
@@ -453,7 +496,9 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
                 let fadeOut = 1;
 
                 if (pulse) {
-                    const elapsed = now - pulse.start;
+                    // Use wall-clock elapsed, capped to avoid jumps when tab is backgrounded
+                    const rawElapsed = now - pulse.start;
+                    const elapsed = Math.min(rawElapsed, pulse.type === 'forget' ? 2200 : 3000);
                     if (elapsed > 3000) {
                         s.pulseNodes.delete(n.id);
                     } else if (pulse.type === 'remember') {
@@ -462,6 +507,7 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
                         extraGlow = Math.max(0, 1 - elapsed / 2000) * 15;
                     } else if (pulse.type === 'forget') {
                         fadeOut = Math.max(0, 1 - elapsed / 2000);
+                        if (rawElapsed > 2200) fadeOut = 0; // Snap to gone if tab was backgrounded
                     }
                 }
 
@@ -732,30 +778,9 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
                     if (s.mouse.hoveredNode) {
                         const clickedDomain = s.mouse.hoveredNode.domain;
                         if (s.focusDomain === clickedDomain) {
-                            // In focus mode: detect double-click vs single-click
+                            // In focus mode: single-click opens/refreshes detail panel
                             const node = s.mouse.hoveredNode;
-                            if (clickTimer && lastClickNode === node.id) {
-                                // Double-click: open detail
-                                clearTimeout(clickTimer);
-                                clickTimer = null;
-                                lastClickNode = null;
-                                onSelectMemory(node);
-                            } else {
-                                // Single-click: toggle selection (with 250ms delay to detect double)
-                                lastClickNode = node.id;
-                                clickTimer = setTimeout(() => {
-                                    clickTimer = null;
-                                    lastClickNode = null;
-                                    const nodeId = node.id || node.memory_id;
-                                    setSelectedMemories(prev => {
-                                        const next = new Set(prev);
-                                        if (next.has(nodeId)) next.delete(nodeId);
-                                        else next.add(nodeId);
-                                        selectedRef.current = next;
-                                        return next;
-                                    });
-                                }, 250);
-                            }
+                            onSelectMemory(node);
                         } else {
                             // First click on different domain: enter focus mode
                             s.focusDomain = clickedDomain;
@@ -770,7 +795,7 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
                         // Clicked empty space: exit focus mode and clear selection
                         if (s.focusDomain) {
                             s.focusDomain = null;
-                            s.focusTargetPositions.clear();
+                            // Don't clear focusTargetPositions here — snap-back animation needs them
                             setFocusedDomain(null);
                             setSelectedMemories(new Set());
                             selectedRef.current = new Set();
@@ -978,11 +1003,12 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
                     `}
                     <button class="focus-exit-btn" onClick=${() => {
                         stateRef.current.focusDomain = null;
-                        stateRef.current.focusTargetPositions.clear();
+                        // Don't clear focusTargetPositions — snap-back animation needs them
                         setFocusedDomain(null);
                         setSelectedMemories(new Set());
                         selectedRef.current = new Set();
                         setBulkAction(null);
+                        onSelectMemory(null);
                     }}>Exit Focus</button>
                     <span class="focus-hint">${selectedMemories.size > 0 ? 'Choose an action above' : 'Click bubbles to select · Double-click for details'}</span>
                 </div>
@@ -2632,8 +2658,14 @@ function CleanupSettings() {
         setCleanupRunning(false);
     };
 
+    const [confirmCleanup, setConfirmCleanup] = useState(false);
     const handleCleanup = async () => {
-        if (!confirm('This will permanently deprecate stale memories. Continue?')) return;
+        if (!confirmCleanup) {
+            setConfirmCleanup(true);
+            setTimeout(() => setConfirmCleanup(false), 5000);
+            return;
+        }
+        setConfirmCleanup(false);
         setCleanupRunning(true);
         setCleanupResult(null);
         try {
@@ -2683,10 +2715,41 @@ function CleanupSettings() {
                 </div>
                 <label class="toggle-switch">
                     <input type="checkbox" checked=${config.enabled}
-                        onChange=${(e) => updateField('enabled', e.target.checked)} />
+                        onChange=${(e) => {
+                            const newVal = e.target.checked;
+                            updateField('enabled', newVal);
+                            saveCleanupSettings({ ...config, enabled: newVal }).catch(() => {});
+                        }} />
                     <span class="toggle-slider"></span>
                 </label>
             </div>
+
+            <!-- Quick actions — always visible -->
+            <div style="display:flex;gap:8px;padding:12px 0;flex-wrap:wrap;align-items:center">
+                <button class="btn ${confirmCleanup ? '' : 'btn-danger'}" onClick=${handleCleanup} disabled=${cleanupRunning}
+                    style="font-size:12px;${confirmCleanup ? 'background:var(--danger);color:#fff;animation:pulse 1s infinite' : ''}">
+                    ${cleanupRunning ? 'Cleaning...' : confirmCleanup ? 'Click again to confirm' : 'Clean Synaptic Ledger'}
+                </button>
+                <button class="btn" onClick=${handleDryRun} disabled=${cleanupRunning} style="font-size:12px">
+                    ${cleanupRunning ? 'Running...' : 'Preview'}
+                </button>
+                ${lastRun && html`<span style="font-size:11px;color:var(--text-muted)">Last run: ${new Date(lastRun).toLocaleString()}</span>`}
+            </div>
+
+            <!-- Cleanup result — always visible -->
+            ${cleanupResult && html`
+                <div class="cleanup-result" style="margin-bottom:12px;padding:12px;background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius)">
+                    ${cleanupResult.error ? html`
+                        <span style="color:var(--danger)">${cleanupResult.error}</span>
+                    ` : html`
+                        <div style="font-size:13px;color:var(--text-dim)">
+                            <strong>${cleanupResult.dry_run ? 'Preview' : 'Done'}:</strong>
+                            ${cleanupResult.deprecated || 0} memories ${cleanupResult.dry_run ? 'would be' : ''} deprecated
+                            (${cleanupResult.checked || 0} checked)
+                        </div>
+                    `}
+                </div>
+            `}
 
             ${expanded && html`
                 <!-- Observation TTL -->

@@ -154,7 +154,7 @@ func TestHandleGraph(t *testing.T) {
 	insertTestMemory(t, s, "m2", "general")
 	insertTestMemory(t, s, "m3", "security")
 
-	req := httptest.NewRequest("GET", "/v1/dashboard/memory/graph", nil)
+	req := httptest.NewRequest("GET", "/v1/dashboard/memory/graph?status=proposed", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 

@@ -709,8 +709,13 @@ func (h *DashboardHandler) handleGraph(w http.ResponseWriter, r *http.Request) {
 	}
 
 	opts := store.ListOptions{
-		Limit: limit,
-		Sort:  "newest",
+		Limit:  limit,
+		Sort:   "newest",
+		Status: q.Get("status"), // Allow frontend to filter by status
+	}
+	// Default: exclude deprecated memories from graph view
+	if opts.Status == "" {
+		opts.Status = "committed"
 	}
 	// On-chain RBAC: if request comes from an MCP agent, enforce agent isolation.
 	if allowedAgents, seeAll := h.resolveAgentRBAC(r); !seeAll {
