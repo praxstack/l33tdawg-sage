@@ -252,15 +252,16 @@ func (h *DashboardHandler) handleUpdateAgent(agentStore store.AgentStore) http.H
 		}
 
 		var req struct {
-			Name         *string `json:"name"`
-			Role         *string `json:"role"`
-			Avatar       *string `json:"avatar"`
-			BootBio      *string `json:"boot_bio"`
-			Clearance    *int    `json:"clearance"`
-			OrgID        *string `json:"org_id"`
-			DeptID       *string `json:"dept_id"`
-			DomainAccess *string `json:"domain_access"`
-			P2PAddress   *string `json:"p2p_address"`
+			Name          *string `json:"name"`
+			Role          *string `json:"role"`
+			Avatar        *string `json:"avatar"`
+			BootBio       *string `json:"boot_bio"`
+			Clearance     *int    `json:"clearance"`
+			OrgID         *string `json:"org_id"`
+			DeptID        *string `json:"dept_id"`
+			DomainAccess  *string `json:"domain_access"`
+			P2PAddress    *string `json:"p2p_address"`
+			VisibleAgents *string `json:"visible_agents"`
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -294,6 +295,9 @@ func (h *DashboardHandler) handleUpdateAgent(agentStore store.AgentStore) http.H
 		}
 		if req.P2PAddress != nil {
 			existing.P2PAddress = *req.P2PAddress
+		}
+		if req.VisibleAgents != nil {
+			existing.VisibleAgents = *req.VisibleAgents
 		}
 
 		if err := agentStore.UpdateAgent(r.Context(), existing); err != nil {
