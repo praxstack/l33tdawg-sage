@@ -436,16 +436,22 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Network agent domain access enforcement (read side)
+	// checkDomainAccess verifies the agent's DomainAccess policy (explicit allowlist).
+	// If the agent passes this check (no restrictions or explicit read permission),
+	// we skip the multi-org gate — the two systems are alternatives, not stacked AND.
+	domainAccessApproved := false
 	if req.DomainTag != "" {
 		agentID := middleware.ContextAgentID(r.Context())
 		if accessErr := checkDomainAccess(r.Context(), s.agentStore, s.badgerStore, agentID, req.DomainTag, "read"); accessErr != nil {
 			writeProblem(w, http.StatusForbidden, "Access denied", accessErr.Error())
 			return
 		}
+		domainAccessApproved = true
 	}
 
 	// Multi-org access control gate — only enforce when domain has a registered owner
-	if req.DomainTag != "" && s.badgerStore != nil {
+	// AND the agent wasn't already approved by the DomainAccess policy above.
+	if req.DomainTag != "" && !domainAccessApproved && s.badgerStore != nil {
 		domainOwner, domainErr := s.badgerStore.GetDomainOwner(req.DomainTag)
 		if domainErr == nil && domainOwner != "" {
 			agentID := middleware.ContextAgentID(r.Context())
