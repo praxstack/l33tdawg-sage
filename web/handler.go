@@ -1,12 +1,14 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
@@ -21,6 +23,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/l33tdawg/sage/internal/auth"
 	"github.com/l33tdawg/sage/internal/memory"
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tx"
@@ -348,9 +351,16 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 
 // authMiddleware checks for a valid session cookie when encryption is active.
 // Always wired in the middleware chain — skips auth dynamically when encryption is off.
+// MCP agents authenticate via Ed25519 signatures (X-Agent-ID + X-Signature + X-Timestamp)
+// and bypass the session cookie requirement.
 func (h *DashboardHandler) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !h.Encrypted.Load() {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Allow MCP agents with valid Ed25519 signatures to bypass cookie auth.
+		if h.validAgentSignature(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -363,6 +373,46 @@ func (h *DashboardHandler) authMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// validAgentSignature checks if the request carries valid Ed25519 agent auth headers.
+// Reads and re-buffers the body so downstream handlers can still access it.
+func (h *DashboardHandler) validAgentSignature(r *http.Request) bool {
+	agentID := strings.TrimSpace(r.Header.Get("X-Agent-ID"))
+	sigHex := strings.TrimSpace(r.Header.Get("X-Signature"))
+	tsStr := strings.TrimSpace(r.Header.Get("X-Timestamp"))
+	if agentID == "" || sigHex == "" || tsStr == "" {
+		return false
+	}
+	tsUnix, err := strconv.ParseInt(tsStr, 10, 64)
+	if err != nil {
+		return false
+	}
+	diff := time.Now().Unix() - tsUnix
+	if diff < 0 {
+		diff = -diff
+	}
+	if time.Duration(diff)*time.Second > 5*time.Minute {
+		return false
+	}
+	pubKey, err := auth.AgentIDToPublicKey(agentID)
+	if err != nil {
+		return false
+	}
+	sig, err := hex.DecodeString(sigHex)
+	if err != nil {
+		return false
+	}
+	// Read body for signature verification, then put it back.
+	var body []byte
+	if r.Body != nil {
+		body, err = io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if err != nil {
+			return false
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+	}
+	return auth.VerifyRequest(pubKey, r.Method, r.URL.Path, body, tsUnix, sig)
 }
 
 // handleLogin verifies the vault passphrase and sets a session cookie.
