@@ -41,7 +41,7 @@ type Server struct {
 	logger      zerolog.Logger
 	httpServer  *http.Server
 	signingKey  ed25519.PrivateKey      // Node-level key for signing on-chain txs
-	embedder    *embedding.Client       // Local Ollama embedding client
+	embedder    embedding.Provider       // Embedding provider (Ollama or hash)
 	OnEvent     EventCallback           // Optional: called when notable events occur
 
 	// PreValidateFunc runs the 4 app validators without on-chain submission.
@@ -60,10 +60,8 @@ type PreValidateResult struct {
 // It loads the node's signing key from VALIDATOR_KEY_FILE env var (CometBFT priv_validator_key.json format)
 // so that vote transactions are signed by the same identity as the CometBFT validator.
 // Falls back to a random key if the env var is not set.
-func NewServer(cometbftRPC string, memStore store.MemoryStore, scoreStore store.ValidatorScoreStore, badgerStore *store.BadgerStore, health *metrics.HealthChecker, logger zerolog.Logger) *Server {
+func NewServer(cometbftRPC string, memStore store.MemoryStore, scoreStore store.ValidatorScoreStore, badgerStore *store.BadgerStore, health *metrics.HealthChecker, logger zerolog.Logger, embedProvider embedding.Provider) *Server {
 	signingKey := loadValidatorSigningKey(logger)
-	embedder := embedding.NewClient("", "") // Reads OLLAMA_URL from env
-	logger.Info().Str("ollama_url", os.Getenv("OLLAMA_URL")).Msg("initialized Ollama embedding client")
 
 	// Type-assert memStore to AccessStore if possible (PostgresStore implements both)
 	var accessStore store.AccessStore
@@ -94,7 +92,7 @@ func NewServer(cometbftRPC string, memStore store.MemoryStore, scoreStore store.
 		health:      health,
 		logger:      logger,
 		signingKey:  signingKey,
-		embedder:    embedder,
+		embedder:    embedProvider,
 	}
 	s.router = s.setupRouter()
 	return s

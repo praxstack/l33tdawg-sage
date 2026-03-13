@@ -21,6 +21,7 @@ import (
 
 	"github.com/l33tdawg/sage/api/rest"
 	sageabci "github.com/l33tdawg/sage/internal/abci"
+	"github.com/l33tdawg/sage/internal/embedding"
 	"github.com/l33tdawg/sage/internal/metrics"
 )
 
@@ -189,7 +190,7 @@ func startServices(app *sageabci.SageApp, restAddr, metricsAddr, cometRPC string
 	// REST API server
 	pgStore := app.GetOffchainStore()
 	badgerStore := app.GetBadgerStore()
-	restServer := rest.NewServer(cometRPC, pgStore, pgStore, badgerStore, health, logger)
+	restServer := rest.NewServer(cometRPC, pgStore, pgStore, badgerStore, health, logger, embedding.NewClient("", ""))
 	go func() {
 		logger.Info().Str("addr", restAddr).Str("comet_rpc", cometRPC).Msg("starting REST server")
 		if err := restServer.Start(restAddr); err != nil && err != http.ErrServerClosed {

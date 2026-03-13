@@ -230,7 +230,7 @@ func runServe() error {
 	sageabci.MigrateAgentsOnChain(ctx, sqliteStore, badgerStore, cometRPC, signingKeyForMigrate, logger)
 
 	// Create REST server
-	restServer := rest.NewServer(cometRPC, sqliteStore, sqliteStore, badgerStore, health, logger)
+	restServer := rest.NewServer(cometRPC, sqliteStore, sqliteStore, badgerStore, health, logger, embedProvider)
 
 	// Create dashboard handler
 	dashboard := web.NewDashboardHandler(sqliteStore, version)

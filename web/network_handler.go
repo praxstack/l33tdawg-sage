@@ -331,7 +331,7 @@ func (h *DashboardHandler) handleUpdateAgent(agentStore store.AgentStore) http.H
 					broadcastTxSync(h.CometBFTRPC, encoded)
 				}
 				// Permission changes go through AgentSetPermission
-				if req.Clearance != nil || req.DomainAccess != nil {
+				if req.Clearance != nil || req.DomainAccess != nil || req.VisibleAgents != nil {
 					clearance := uint8(existing.Clearance) // #nosec G115 -- clearance is 0-4
 					domainAccess := existing.DomainAccess
 					permTx := &tx.ParsedTx{
@@ -339,11 +339,12 @@ func (h *DashboardHandler) handleUpdateAgent(agentStore store.AgentStore) http.H
 						Nonce:     uint64(time.Now().UnixNano()), //nolint:gosec // G115: UnixNano is always positive // #nosec G115 -- nonce from timestamp
 						Timestamp: time.Now(),
 						AgentSetPermission: &tx.AgentSetPermission{
-							AgentID:      id,
-							Clearance:    clearance,
-							DomainAccess: domainAccess,
-							OrgID:        existing.OrgID,
-							DeptID:       existing.DeptID,
+							AgentID:       id,
+							Clearance:     clearance,
+							DomainAccess:  domainAccess,
+							VisibleAgents: existing.VisibleAgents,
+							OrgID:         existing.OrgID,
+							DeptID:        existing.DeptID,
 						},
 					}
 					embedDashboardAgentProof(permTx, h.SigningKey)

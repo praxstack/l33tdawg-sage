@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/l33tdawg/sage/internal/auth"
+	"github.com/l33tdawg/sage/internal/embedding"
 	"github.com/l33tdawg/sage/internal/memory"
 	"github.com/l33tdawg/sage/internal/metrics"
 	"github.com/l33tdawg/sage/internal/store"
@@ -237,7 +238,7 @@ func newTestServer(t *testing.T, cometbftURL string) (*Server, *mockMemoryStore,
 	health.SetCometBFTHealth(true)
 	logger := zerolog.Nop()
 
-	srv := NewServer(cometbftURL, memStore, scoreStore, nil, health, logger)
+	srv := NewServer(cometbftURL, memStore, scoreStore, nil, health, logger, embedding.NewClient("", ""))
 	return srv, memStore, scoreStore
 }
 
