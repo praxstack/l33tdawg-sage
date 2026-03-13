@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"fmt"
 	"strings"
@@ -47,6 +48,7 @@ type DashboardHandler struct {
 	embedder  Embedder
 	SSE       *SSEBroadcaster
 	Version   string
+	ExecPath  string // path to sage-gui binary, used by /v1/mcp-config
 	Encrypted   atomic.Bool
 	VaultLocked atomic.Bool // true when encryption is enabled but vault hasn't been unlocked yet
 
@@ -220,6 +222,9 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 
 		// Health is public (needed by CLI status command).
 		r.Get("/v1/dashboard/health", h.handleHealth)
+
+		// MCP config — public so AI agents can self-configure.
+		r.Get("/v1/mcp-config", h.handleMCPConfig)
 
 		// Pairing redemption — unauthenticated (the code IS the auth).
 		h.RegisterPairingRoutes(r)
@@ -1069,6 +1074,47 @@ func (h *DashboardHandler) handleCreateTaskDashboard(w http.ResponseWriter, r *h
 }
 
 // handleHealth returns system health including Ollama status.
+// handleMCPConfig returns the .mcp.json content for AI agents to self-configure.
+// The server knows its own binary path, so agents don't need to find it.
+func (h *DashboardHandler) handleMCPConfig(w http.ResponseWriter, _ *http.Request) {
+	execPath := h.ExecPath
+	if execPath == "" {
+		execPath = "sage-gui" // fallback
+	}
+
+	sageHome := h.sageHome()
+
+	config := map[string]any{
+		"mcpServers": map[string]any{
+			"sage": map[string]any{
+				"command": execPath,
+				"args":    []string{"mcp"},
+				"env": map[string]string{
+					"SAGE_HOME":     sageHome,
+					"SAGE_PROVIDER": "claude-code",
+				},
+			},
+		},
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(config)
+}
+
+// sageHome returns the SAGE data directory path.
+func (h *DashboardHandler) sageHome() string {
+	if v := os.Getenv("SAGE_HOME"); v != "" {
+		return v
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "~/.sage"
+	}
+	return home + "/.sage"
+}
+
 func (h *DashboardHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	health := map[string]any{
 		"sage":         "running",

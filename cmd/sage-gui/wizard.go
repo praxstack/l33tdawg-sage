@@ -246,14 +246,10 @@ func handleInstallMCP(w http.ResponseWriter, r *http.Request) {
 			configPath = filepath.Join(home, ".config", "claude", "claude_desktop_config.json")
 		}
 	case "claude-code":
-		// Claude Code uses .mcp.json in the current working directory or home
+		// Claude Code reads MCP config from project-level .mcp.json files.
+		// Write to home directory as a reasonable default.
 		home, _ := os.UserHomeDir()
-		configPath = filepath.Join(home, ".claude", "mcp.json")
-		// Also check for .mcp.json in home
-		altPath := filepath.Join(home, ".mcp.json")
-		if _, err := os.Stat(altPath); err == nil {
-			configPath = altPath
-		}
+		configPath = filepath.Join(home, ".mcp.json")
 	default:
 		writeWizardJSON(w, map[string]any{"ok": false, "error": "unsupported platform, please configure manually"})
 		return

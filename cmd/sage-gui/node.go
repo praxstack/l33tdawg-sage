@@ -247,6 +247,9 @@ func runServe() error {
 		})
 	}
 	dashboard.SetEmbedder(embedProvider)
+	if ep, epErr := os.Executable(); epErr == nil {
+		dashboard.ExecPath = ep
+	}
 	dashboard.Encrypted.Store(cfg.Encryption.Enabled)
 	dashboard.VaultLocked.Store(cfg.Encryption.Enabled && !vaultUnlocked)
 	dashboard.VaultKeyPath = filepath.Join(SageHome(), "vault.key")
