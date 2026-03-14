@@ -1110,11 +1110,14 @@ function copyPrompt(box) {
 
 // ─── Download Counter + Latest Version ───
 (function() {
+  // Baseline: total downloads from releases no longer returned by the first API page
+  // Snapshot taken 2026-03-14 — 331 total across 42 releases, API default page returns 153
+  const BASELINE = 178;
   fetch('https://api.github.com/repos/l33tdawg/sage/releases')
     .then(r => r.json())
     .then(releases => {
       if (!Array.isArray(releases)) return;
-      let total = 0;
+      let total = BASELINE;
       for (const rel of releases) for (const asset of (rel.assets || [])) total += asset.download_count || 0;
       if (total > 0) {
         document.getElementById('download-count').textContent = total.toLocaleString();
