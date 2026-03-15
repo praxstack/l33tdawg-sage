@@ -745,8 +745,10 @@ func (s *SQLiteStore) QuerySimilar(ctx context.Context, embedding []float32, opt
 		query += " AND domain_tag = ?"
 		args = append(args, opts.DomainTag)
 	}
-	if opts.Provider != "" {
+	if opts.Provider != "" && opts.DomainTag == "" {
 		// Provider scoping: show memories from this provider OR facts (shared cross-provider).
+		// Skip when domain is explicitly specified — the domain filter IS the relevance filter,
+		// and cross-provider memories in the same domain should be visible.
 		query += " AND (provider = ? OR provider = '' OR memory_type = 'fact')"
 		args = append(args, opts.Provider)
 	}
