@@ -295,14 +295,10 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 		h.RegisterNetworkRoutes(r)
 	})
 
-	// Launch endpoint — opens CEREBRUM in a named window for tab reuse across all browsers.
-	// The dock/tray app opens this URL; the named target ensures only one tab ever exists.
+	// Launch endpoint — redirects to CEREBRUM dashboard.
+	// The dock/tray app opens this URL; simple redirect avoids popup-blocker issues on macOS Tahoe+.
 	r.Get("/ui/launch", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write([]byte(`<!DOCTYPE html><html><head><title>Launching CEREBRUM…</title></head><body>
-<script>window.open('/ui/', 'cerebrum'); window.close();</script>
-<noscript><meta http-equiv="refresh" content="0;url=/ui/"></noscript>
-</body></html>`)) //nolint:errcheck
+		http.Redirect(w, r, "/ui/", http.StatusFound)
 	})
 
 	// SPA — serve static files, fallback to index.html

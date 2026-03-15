@@ -240,6 +240,11 @@ echo "        Installed successfully."
 
 # --- Step 3: Launch SAGE ---
 echo "  [3/3] Launching SAGE..."
+
+# Clear quarantine attributes — prevents Gatekeeper from blocking the app
+# on macOS Tahoe+ which is stricter about unsigned/non-notarized binaries.
+xattr -cr "$DEST" 2>/dev/null || true
+
 open "$DEST"
 
 echo ""
