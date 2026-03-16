@@ -1112,11 +1112,18 @@ function copyPrompt(box) {
 
 // ─── Download Counter + Latest Version ───
 (function() {
-  // Baseline: cumulative downloads from re-tagged releases whose counts were reset.
-  // Snapshot taken 2026-03-14.
-  const BASELINE = 363;
+  // HWM_FLOOR: the highest total ever observed, committed to the repo.
+  // GitHub download counts reset when releases are re-tagged/deleted.
+  // This floor guarantees the counter NEVER drops below the known peak,
+  // regardless of browser, device, or localStorage state.
+  // To update: set to the current counter value at time of commit.
+  // Last updated: 2026-03-16 (v5.0.5)
+  const HWM_FLOOR = 734;
 
-  // Paginate all releases (GitHub default is only 30 — we need them all)
+  // GITHUB_AT_FLOOR: what GitHub reported when HWM_FLOOR was recorded.
+  // New downloads = github_now - GITHUB_AT_FLOOR (only if positive).
+  const GITHUB_AT_FLOOR = 361;
+
   async function fetchAllReleases() {
     const all = [];
     let page = 1;
@@ -1133,11 +1140,12 @@ function copyPrompt(box) {
 
   fetchAllReleases().then(releases => {
     if (!releases.length) return;
-    let total = BASELINE;
-    for (const rel of releases) for (const asset of (rel.assets || [])) total += asset.download_count || 0;
-    // High-water mark: never show fewer minds freed than previously seen.
-    // GitHub download counts reset when releases are re-tagged, causing
-    // the counter to temporarily dip. This ensures it only goes up.
+    let githubNow = 0;
+    for (const rel of releases) for (const asset of (rel.assets || [])) githubNow += asset.download_count || 0;
+    // New downloads since the floor was recorded (clamped to 0 — re-tags can make this negative)
+    const newDownloads = Math.max(0, githubNow - GITHUB_AT_FLOOR);
+    let total = HWM_FLOOR + newDownloads;
+    // localStorage HWM as a per-browser safety net (covers mid-session re-tags)
     const hwmKey = 'sage_minds_freed_hwm';
     const prevHWM = parseInt(localStorage.getItem(hwmKey) || '0', 10);
     if (total > prevHWM) { localStorage.setItem(hwmKey, total); }
