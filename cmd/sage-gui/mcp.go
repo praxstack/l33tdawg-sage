@@ -65,6 +65,8 @@ func runMCP() error {
 			return fmt.Errorf("get home dir: %w", err)
 		}
 		home = filepath.Join(userHome, ".sage")
+	} else {
+		home = expandTilde(home)
 	}
 
 	if err := os.MkdirAll(home, 0700); err != nil { //nolint:gosec // home is ~/.sage, not user input
@@ -227,6 +229,8 @@ func runMCPInstall() error {
 			return fmt.Errorf("get home dir: %w", homeErr)
 		}
 		sageHome = filepath.Join(userHome, ".sage")
+	} else {
+		sageHome = expandTilde(sageHome)
 	}
 
 	// Determine the per-project agent key directory

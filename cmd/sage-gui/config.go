@@ -4,9 +4,21 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
+
+// expandTilde replaces a leading "~" or "~/" with the actual home directory.
+// This is needed because shells expand ~ but Go's os.MkdirAll does not.
+func expandTilde(path string) string {
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		if h, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(h, path[1:])
+		}
+	}
+	return path
+}
 
 // Config holds the sage-gui configuration.
 type Config struct {
@@ -57,7 +69,7 @@ func DefaultConfig(home string) *Config {
 func SageHome() string {
 	home := os.Getenv("SAGE_HOME")
 	if home != "" {
-		return home
+		return expandTilde(home)
 	}
 	userHome, err := os.UserHomeDir()
 	if err != nil {
