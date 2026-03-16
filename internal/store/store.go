@@ -367,6 +367,39 @@ type AgentStore interface {
 	UpdateRedeployLog(ctx context.Context, id int64, status, errorMsg string) error
 }
 
+// PipelineMessage represents an ephemeral agent-to-agent work item.
+// These are NOT memories — they are transient messages that auto-expire.
+type PipelineMessage struct {
+	PipeID       string     `json:"pipe_id"`
+	FromAgent    string     `json:"from_agent"`
+	FromProvider string     `json:"from_provider"`
+	ToAgent      string     `json:"to_agent,omitempty"`
+	ToProvider   string     `json:"to_provider"`
+	Intent       string     `json:"intent"`
+	Payload      string     `json:"payload"`
+	Result       string     `json:"result,omitempty"`
+	Status       string     `json:"status"` // pending, claimed, completed, expired, failed
+	CreatedAt    time.Time  `json:"created_at"`
+	ClaimedAt    *time.Time `json:"claimed_at,omitempty"`
+	CompletedAt  *time.Time `json:"completed_at,omitempty"`
+	ExpiresAt    time.Time  `json:"expires_at"`
+	JournalID    string     `json:"journal_id,omitempty"`
+}
+
+// PipelineStore defines the interface for agent-to-agent pipeline storage.
+type PipelineStore interface {
+	InsertPipeline(ctx context.Context, msg *PipelineMessage) error
+	GetPipeline(ctx context.Context, pipeID string) (*PipelineMessage, error)
+	GetInbox(ctx context.Context, agentID, provider string, limit int) ([]*PipelineMessage, error)
+	ClaimPipeline(ctx context.Context, pipeID, agentID string) error
+	CompletePipeline(ctx context.Context, pipeID, result, journalID string) error
+	GetCompletedForSender(ctx context.Context, agentID string, limit int) ([]*PipelineMessage, error)
+	ListPipelines(ctx context.Context, status string, limit int) ([]*PipelineMessage, error)
+	PipelineStats(ctx context.Context) (map[string]int, error)
+	ExpirePipelines(ctx context.Context) (int, error)
+	PurgePipelines(ctx context.Context, olderThan time.Time) (int, error)
+}
+
 // OffchainStore is the combined interface for all off-chain storage operations.
 // Both PostgresStore and SQLiteStore implement this interface, allowing the ABCI
 // app to work with either backend.
@@ -376,6 +409,7 @@ type OffchainStore interface {
 	AccessStore
 	OrgStore
 	AgentStore
+	PipelineStore
 	Ping(ctx context.Context) error
 	// RunInTx executes fn within a database transaction. If fn returns an error,
 	// the transaction is rolled back; otherwise it is committed. The OffchainStore

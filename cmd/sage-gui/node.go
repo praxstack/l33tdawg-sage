@@ -417,6 +417,24 @@ func runServe() error {
 	// Auto-import pending chat history (from setup wizard)
 	go autoImport(cfg, embedProvider, logger)
 
+	// Pipeline TTL cleanup — expire and purge stale pipeline messages every 5 minutes
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				expired, _ := sqliteStore.ExpirePipelines(ctx)
+				purged, _ := sqliteStore.PurgePipelines(ctx, time.Now().Add(-24*time.Hour))
+				if expired > 0 || purged > 0 {
+					logger.Debug().Int("expired", expired).Int("purged", purged).Msg("pipeline cleanup")
+				}
+			}
+		}
+	}()
+
 	// Wait for shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)

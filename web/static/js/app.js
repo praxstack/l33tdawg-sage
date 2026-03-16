@@ -1,6 +1,6 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
-import { fetchStats, fetchGraph, fetchMemories, deleteMemory, fetchHealth, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchTasks, updateTaskStatus, createTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode } from './api.js';
+import { fetchStats, fetchGraph, fetchMemories, deleteMemory, fetchHealth, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchTasks, updateTaskStatus, createTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats } from './api.js';
 
 const { h, render, createContext } = preact;
 const { useState, useEffect, useRef, useCallback, useContext } = preactHooks;
@@ -111,6 +111,7 @@ const icons = {
     help: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`,
     network: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="5" r="3"/><circle cx="5" cy="19" r="3"/><circle cx="19" cy="19" r="3"/><line x1="12" y1="8" x2="5" y2="16"/><line x1="12" y1="8" x2="19" y2="16"/><line x1="5" y1="19" x2="19" y2="19" opacity="0.3"/></svg>`,
     tasks: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>`,
+    pipeline: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12h4"/><path d="M16 12h4"/><rect x="8" y="8" width="8" height="8" rx="2"/><path d="M12 4v4"/><path d="M12 16v4"/><circle cx="2" cy="12" r="1" fill="currentColor"/><circle cx="22" cy="12" r="1" fill="currentColor"/><circle cx="12" cy="2" r="1" fill="currentColor"/><circle cx="12" cy="22" r="1" fill="currentColor"/></svg>`,
 };
 
 // ============================================================================
@@ -4311,6 +4312,52 @@ function HelpOverlay({ onClose, initialSection }) {
             `,
         },
         {
+            key: 'pipeline',
+            title: 'Pipeline',
+            icon: html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12h4"/><path d="M16 12h4"/><rect x="8" y="8" width="8" height="8" rx="2"/><path d="M12 4v4"/><path d="M12 16v4"/><circle cx="2" cy="12" r="1" fill="currentColor"/><circle cx="22" cy="12" r="1" fill="currentColor"/><circle cx="12" cy="2" r="1" fill="currentColor"/><circle cx="12" cy="22" r="1" fill="currentColor"/></svg>`,
+            summary: 'Route work between AI agents — SAGE as a message bus.',
+            content: html`
+                <p>The Pipeline turns SAGE into an agent-to-agent message bus. Instead of copy-pasting between Claude, Perplexity, and ChatGPT, agents can send work to each other through SAGE. The pipeline is ephemeral — messages auto-expire, and only a journal summary persists as a memory.</p>
+                <div class="guide-detail-grid">
+                    <div class="guide-detail-item">
+                        <div class="guide-detail-label">Sending work</div>
+                        <div class="guide-detail-desc">From any connected agent, call <code>sage_pipe(to="perplexity", intent="research", payload="...")</code>. The <strong>to</strong> field accepts a provider name (e.g. "perplexity", "chatgpt") or a specific agent_id hex string. The message is stored in SAGE and waits for the target agent to pick it up.</div>
+                    </div>
+                    <div class="guide-detail-item">
+                        <div class="guide-detail-label">Receiving work</div>
+                        <div class="guide-detail-desc">Agents discover pipeline items automatically on their next <code>sage_turn</code> call — no extra action needed. Items appear in the <code>pipe_inbox</code> field of the turn response. Agents can also explicitly call <code>sage_inbox</code> to check for work.</div>
+                    </div>
+                    <div class="guide-detail-item">
+                        <div class="guide-detail-label">Returning results</div>
+                        <div class="guide-detail-desc">After processing a pipeline item, the receiving agent calls <code>sage_pipe_result(pipe_id="...", result="...")</code>. This marks the pipe as completed and auto-creates a journal memory summarizing the exchange. The sending agent sees the result on their next <code>sage_turn</code>.</div>
+                    </div>
+                    <div class="guide-detail-item">
+                        <div class="guide-detail-label">Routing</div>
+                        <div class="guide-detail-desc"><strong>By provider:</strong> Address by name (e.g. "perplexity") — any agent with that provider can claim it. First-come-first-served for same-provider agents. <strong>By agent_id:</strong> Address with the 64-character hex ID — only that specific agent sees it.</div>
+                    </div>
+                    <div class="guide-detail-item">
+                        <div class="guide-detail-label">Auto-claiming</div>
+                        <div class="guide-detail-desc">When an agent views items via <code>sage_inbox</code>, they are automatically claimed — preventing other agents of the same provider from double-processing. This is atomic at the database level.</div>
+                    </div>
+                    <div class="guide-detail-item">
+                        <div class="guide-detail-label">TTL & expiry</div>
+                        <div class="guide-detail-desc">Pipeline messages have a time-to-live (default: 60 minutes, max: 24 hours). Expired messages are automatically cleaned up. Completed messages are purged after 24 hours — only the journal summary persists as a committed memory.</div>
+                    </div>
+                    <div class="guide-detail-item">
+                        <div class="guide-detail-label">Dashboard</div>
+                        <div class="guide-detail-desc">The Pipeline page in CEREBRUM shows all messages with status filters (pending, claimed, completed, expired, failed). Click any message to expand and see the full payload, result, and metadata. Auto-refreshes every 10 seconds.</div>
+                    </div>
+                    <div class="guide-detail-item">
+                        <div class="guide-detail-label">Auto-journal</div>
+                        <div class="guide-detail-desc">When a pipe completes, SAGE automatically creates a one-line observation memory in the "agent-pipeline" domain summarizing who asked whom to do what, and a preview of the result. This gives you a persistent audit trail without storing the full payload.</div>
+                    </div>
+                </div>
+                <div class="guide-callout">
+                    <strong>Key difference from Tasks:</strong> Pipeline messages are ephemeral work routing between machines. Tasks are your persistent backlog tracked across sessions. Pipeline auto-expires; tasks persist until you mark them done.
+                </div>
+            `,
+        },
+        {
             key: 'settings',
             title: 'Settings & Maintenance',
             icon: html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`,
@@ -5631,6 +5678,195 @@ function RemoveConfirmModal({ agent, onConfirm, onCancel }) {
 }
 
 // ============================================================================
+// Pipeline Page — Agent-to-Agent Message Bus
+// ============================================================================
+
+function PipelinePage() {
+    const [items, setItems] = useState([]);
+    const [stats, setStats] = useState({});
+    const [total, setTotal] = useState(0);
+    const [filter, setFilter] = useState('');
+    const [loading, setLoading] = useState(true);
+    const [expanded, setExpanded] = useState(null);
+
+    const loadData = useCallback(async () => {
+        setLoading(true);
+        try {
+            const [pipeData, statsData] = await Promise.all([
+                fetchPipeline({ status: filter || undefined, limit: 100 }),
+                fetchPipelineStats(),
+            ]);
+            setItems(pipeData.items || []);
+            setStats(statsData.stats || {});
+            setTotal(statsData.total || 0);
+        } catch (e) {
+            console.error('Pipeline load error:', e);
+        }
+        setLoading(false);
+    }, [filter]);
+
+    useEffect(() => { loadData(); }, [loadData]);
+
+    // Auto-refresh every 10 seconds
+    useEffect(() => {
+        const interval = setInterval(loadData, 10000);
+        return () => clearInterval(interval);
+    }, [loadData]);
+
+    const statusColor = (s) => {
+        switch (s) {
+            case 'pending': return '#f59e0b';
+            case 'claimed': return '#3b82f6';
+            case 'completed': return '#10b981';
+            case 'expired': return '#6b7280';
+            case 'failed': return '#ef4444';
+            default: return '#64748b';
+        }
+    };
+
+    const statusIcon = (s) => {
+        switch (s) {
+            case 'pending': return '\u23F3';
+            case 'claimed': return '\u26A1';
+            case 'completed': return '\u2713';
+            case 'expired': return '\u23F0';
+            case 'failed': return '\u2717';
+            default: return '\u2022';
+        }
+    };
+
+    const truncate = (s, n) => s && s.length > n ? s.slice(0, n) + '...' : s;
+
+    return html`
+        <div class="tasks-page" style="padding:24px;">
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px;">
+                <h2 style="margin:0;font-size:20px;">Pipeline</h2>
+                <span style="color:var(--text-muted);font-size:13px;">Agent-to-Agent Message Bus</span>
+                <div style="flex:1"></div>
+                <button class="btn" onClick=${loadData}>\u21BB Refresh</button>
+            </div>
+
+            <div style="display:flex;gap:10px;margin-bottom:24px;flex-wrap:wrap;align-items:center;">
+                ${['pending', 'claimed', 'completed', 'expired', 'failed'].map(s => html`
+                    <button key=${s}
+                        style="display:inline-flex;align-items:center;gap:6px;padding:7px 16px;border-radius:8px;
+                               border:1px solid ${filter === s ? statusColor(s) : 'var(--border)'};
+                               background:${filter === s ? statusColor(s) + '20' : 'var(--card-bg)'};
+                               color:${filter === s ? statusColor(s) : 'var(--text-muted)'};
+                               cursor:pointer;font-size:13px;font-weight:500;transition:all 0.15s;"
+                        onClick=${() => setFilter(filter === s ? '' : s)}>
+                        <span>${statusIcon(s)}</span>
+                        <span style="text-transform:capitalize">${s}</span>
+                        <span style="font-weight:700;margin-left:2px;">${stats[s] || 0}</span>
+                    </button>
+                `)}
+                <span style="margin-left:auto;color:var(--text-muted);font-size:12px;">
+                    ${total} total
+                </span>
+            </div>
+
+            ${loading && items.length === 0 && html`
+                <div style="text-align:center;padding:60px;color:var(--text-muted);">Loading pipeline...</div>
+            `}
+
+            ${!loading && items.length === 0 && html`
+                <div style="text-align:center;padding:80px 20px;">
+                    <div style="margin-bottom:16px;opacity:0.25;">${icons.pipeline}</div>
+                    <p style="color:var(--text-muted);font-size:14px;margin:0 0 8px;">
+                        No pipeline messages${filter ? html` with status <strong>"${filter}"</strong>` : ''}.
+                    </p>
+                    <p style="color:var(--text-muted);font-size:12px;margin:0;max-width:500px;margin:0 auto;">
+                        Use <code style="background:var(--code-bg);padding:2px 6px;border-radius:4px;font-size:11px;">sage_pipe(to="perplexity", intent="research", payload="...")</code> from any connected agent to route work between AI providers.
+                    </p>
+                </div>
+            `}
+
+            ${items.length > 0 && html`
+                <div style="display:flex;flex-direction:column;gap:10px;">
+                    ${items.map(item => {
+                        const isExpanded = expanded === item.pipe_id;
+                        const from = item.from_provider || (item.from_agent ? item.from_agent.slice(0, 12) + '...' : 'unknown');
+                        const to = item.to_provider || (item.to_agent ? item.to_agent.slice(0, 12) + '...' : 'any');
+                        return html`
+                            <div key=${item.pipe_id}
+                                style="background:var(--card-bg);border:1px solid ${isExpanded ? 'var(--accent)' : 'var(--border)'};
+                                       border-radius:10px;padding:14px 18px;cursor:pointer;
+                                       transition:border-color 0.15s,box-shadow 0.15s;
+                                       ${isExpanded ? 'box-shadow:0 0 0 1px var(--accent);' : ''}"
+                                onClick=${() => setExpanded(isExpanded ? null : item.pipe_id)}>
+
+                                <div style="display:flex;align-items:center;gap:12px;">
+                                    <span style="color:${statusColor(item.status)};font-size:18px;min-width:24px;text-align:center;">
+                                        ${statusIcon(item.status)}
+                                    </span>
+                                    <div style="flex:1;min-width:0;">
+                                        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                                            <span style="font-weight:600;font-size:14px;color:var(--text);">${from}</span>
+                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+                                            <span style="font-weight:600;font-size:14px;color:var(--text);">${to}</span>
+                                            ${item.intent && html`
+                                                <span style="background:var(--accent-bg,rgba(59,130,246,0.1));color:var(--accent,#3b82f6);
+                                                             padding:2px 10px;border-radius:12px;font-size:11px;font-weight:600;">
+                                                    ${item.intent}
+                                                </span>
+                                            `}
+                                        </div>
+                                        <div style="font-size:12px;color:var(--text-muted);margin-top:4px;display:flex;gap:8px;align-items:center;">
+                                            <code style="font-size:11px;opacity:0.7;">${item.pipe_id.slice(0, 24)}...</code>
+                                            <span>\u00B7</span>
+                                            <span>${timeAgo(item.created_at)}</span>
+                                            ${item.completed_at ? html`<span>\u00B7</span><span>completed ${timeAgo(item.completed_at)}</span>` : ''}
+                                        </div>
+                                    </div>
+                                    <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;">
+                                        <span style="color:${statusColor(item.status)};font-size:11px;font-weight:700;
+                                                     text-transform:uppercase;letter-spacing:0.5px;">
+                                            ${item.status}
+                                        </span>
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2"
+                                             style="transform:rotate(${isExpanded ? '180' : '0'}deg);transition:transform 0.2s;opacity:0.5;">
+                                            <path d="M6 9l6 6 6-6"/>
+                                        </svg>
+                                    </div>
+                                </div>
+
+                                ${isExpanded && html`
+                                    <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border);">
+                                        <div style="margin-bottom:12px;">
+                                            <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;">Payload</div>
+                                            <pre style="background:var(--code-bg);padding:12px 14px;border-radius:8px;
+                                                        font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;
+                                                        max-height:200px;overflow-y:auto;margin:0;color:var(--text);
+                                                        border:1px solid var(--border);">${item.payload || '(no payload)'}</pre>
+                                        </div>
+                                        ${item.result && html`
+                                            <div style="margin-bottom:12px;">
+                                                <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;">Result</div>
+                                                <pre style="background:var(--code-bg);padding:12px 14px;border-radius:8px;
+                                                            font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;
+                                                            max-height:200px;overflow-y:auto;margin:0;color:var(--text);
+                                                            border:1px solid var(--border);">${item.result}</pre>
+                                            </div>
+                                        `}
+                                        <div style="display:flex;gap:20px;font-size:11px;color:var(--text-muted);flex-wrap:wrap;padding-top:4px;">
+                                            <span><strong>Pipe ID:</strong> <code style="font-size:10px;">${item.pipe_id}</code></span>
+                                            <span><strong>From:</strong> <code style="font-size:10px;">${item.from_agent ? item.from_agent.slice(0, 16) + '...' : 'n/a'}</code></span>
+                                            <span><strong>To:</strong> <code style="font-size:10px;">${item.to_agent ? item.to_agent.slice(0, 16) + '...' : item.to_provider || 'any'}</code></span>
+                                            <span><strong>Expires:</strong> ${new Date(item.expires_at).toLocaleString()}</span>
+                                            ${item.journal_id ? html`<span><strong>Journal:</strong> <code style="font-size:10px;">${item.journal_id.slice(0, 16)}...</code></span>` : ''}
+                                        </div>
+                                    </div>
+                                `}
+                            </div>
+                        `;
+                    })}
+                </div>
+            `}
+        </div>
+    `;
+}
+
+// ============================================================================
 // Root App
 // ============================================================================
 
@@ -5722,6 +5958,7 @@ function App() {
             else if (hash === '/settings') setPage('settings');
             else if (hash === '/import') setPage('import');
             else if (hash === '/network') setPage('network');
+            else if (hash === '/pipeline') setPage('pipeline');
             else setPage('brain');
         }
         window.addEventListener('hashchange', onHash);
@@ -5770,6 +6007,9 @@ function App() {
             <button class="sidebar-btn ${page === 'network' ? 'active' : ''}" onClick=${() => navigate('network')} title="Network">
                 ${icons.network}
             </button>
+            <button class="sidebar-btn ${page === 'pipeline' ? 'active' : ''}" onClick=${() => navigate('pipeline')} title="Pipeline">
+                ${icons.pipeline}
+            </button>
             <button class="sidebar-btn ${page === 'settings' ? 'active' : ''}" onClick=${() => navigate('settings')} title="Settings">
                 ${icons.settings}
             </button>
@@ -5815,6 +6055,7 @@ function App() {
             ${page === 'tasks' && html`<${TasksPage} />`}
             ${page === 'import' && html`<${ImportPage} sse=${sseRef.current} />`}
             ${page === 'network' && html`<${NetworkPage} />`}
+            ${page === 'pipeline' && html`<${PipelinePage} />`}
             ${page === 'settings' && html`<${SettingsPage} />`}
 
             <${MemoryDetail}

@@ -436,6 +436,9 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 		_, _ = s.conn.ExecContext(ctx, m) // Ignore "duplicate column" errors for idempotency
 	}
 
+	// Migration: add pipeline_messages table.
+	s.migratePipeline(ctx)
+
 	// Seed default domains
 	seeds := []struct {
 		tag  string
@@ -2798,6 +2801,8 @@ func (s *SQLiteStore) ListAllTags(ctx context.Context) ([]TagCount, error) {
 }
 
 // ListMemoriesByTag returns memories that have a specific tag.
+//
+//nolint:dupl
 func (s *SQLiteStore) ListMemoriesByTag(ctx context.Context, tag string, limit, offset int) ([]*memory.MemoryRecord, int, error) {
 	if limit <= 0 {
 		limit = 50
@@ -2848,4 +2853,237 @@ func (s *SQLiteStore) ListMemoriesByTag(ctx context.Context, tag string, limit, 
 		results = append(results, &r)
 	}
 	return results, total, nil
+}
+
+// --- Pipeline Store ---
+
+// migratePipeline creates the pipeline_messages table if it doesn't exist.
+func (s *SQLiteStore) migratePipeline(ctx context.Context) {
+	_, _ = s.conn.ExecContext(ctx, `
+	CREATE TABLE IF NOT EXISTS pipeline_messages (
+		pipe_id       TEXT PRIMARY KEY,
+		from_agent    TEXT NOT NULL,
+		from_provider TEXT NOT NULL DEFAULT '',
+		to_agent      TEXT NOT NULL DEFAULT '',
+		to_provider   TEXT NOT NULL DEFAULT '',
+		intent        TEXT NOT NULL DEFAULT '',
+		payload       TEXT NOT NULL,
+		result        TEXT,
+		status        TEXT NOT NULL DEFAULT 'pending'
+		              CHECK (status IN ('pending','claimed','completed','expired','failed')),
+		created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+		claimed_at    TEXT,
+		completed_at  TEXT,
+		expires_at    TEXT NOT NULL,
+		journal_id    TEXT
+	)`)
+	_, _ = s.conn.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_to_provider ON pipeline_messages(to_provider, status)`)
+	_, _ = s.conn.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_to_agent ON pipeline_messages(to_agent, status)`)
+	_, _ = s.conn.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_from_agent ON pipeline_messages(from_agent, status)`)
+	_, _ = s.conn.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_expires ON pipeline_messages(status, expires_at)`)
+}
+
+func (s *SQLiteStore) InsertPipeline(ctx context.Context, msg *PipelineMessage) error {
+	_, err := s.conn.ExecContext(ctx,
+		`INSERT INTO pipeline_messages (pipe_id, from_agent, from_provider, to_agent, to_provider, intent, payload, status, created_at, expires_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		msg.PipeID, msg.FromAgent, msg.FromProvider, msg.ToAgent, msg.ToProvider,
+		msg.Intent, msg.Payload, msg.Status, formatTime(msg.CreatedAt), formatTime(msg.ExpiresAt))
+	return err
+}
+
+func (s *SQLiteStore) GetPipeline(ctx context.Context, pipeID string) (*PipelineMessage, error) {
+	row := s.conn.QueryRowContext(ctx,
+		`SELECT pipe_id, from_agent, from_provider, to_agent, to_provider, intent, payload,
+		        COALESCE(result, ''), status, created_at, claimed_at, completed_at, expires_at, COALESCE(journal_id, '')
+		 FROM pipeline_messages WHERE pipe_id = ?`, pipeID)
+
+	var m PipelineMessage
+	var createdAt, expiresAt string
+	var claimedAt, completedAt *string
+	if err := row.Scan(&m.PipeID, &m.FromAgent, &m.FromProvider, &m.ToAgent, &m.ToProvider,
+		&m.Intent, &m.Payload, &m.Result, &m.Status, &createdAt, &claimedAt, &completedAt,
+		&expiresAt, &m.JournalID); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("pipeline message not found: %s", pipeID)
+		}
+		return nil, err
+	}
+	m.CreatedAt = parseTime(createdAt)
+	m.ExpiresAt = parseTime(expiresAt)
+	m.ClaimedAt = parseTimePtr(claimedAt)
+	m.CompletedAt = parseTimePtr(completedAt)
+	return &m, nil
+}
+
+func (s *SQLiteStore) GetInbox(ctx context.Context, agentID, provider string, limit int) ([]*PipelineMessage, error) {
+	rows, err := s.conn.QueryContext(ctx,
+		`SELECT pipe_id, from_agent, from_provider, to_agent, to_provider, intent, payload, status, created_at, expires_at
+		 FROM pipeline_messages
+		 WHERE status = 'pending'
+		   AND (to_agent = ? OR (to_agent = '' AND to_provider = ?))
+		   AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+		 ORDER BY created_at ASC LIMIT ?`,
+		agentID, provider, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []*PipelineMessage
+	for rows.Next() {
+		var m PipelineMessage
+		var createdAt, expiresAt string
+		if err := rows.Scan(&m.PipeID, &m.FromAgent, &m.FromProvider, &m.ToAgent, &m.ToProvider,
+			&m.Intent, &m.Payload, &m.Status, &createdAt, &expiresAt); err != nil {
+			return nil, err
+		}
+		m.CreatedAt = parseTime(createdAt)
+		m.ExpiresAt = parseTime(expiresAt)
+		items = append(items, &m)
+	}
+	return items, nil
+}
+
+func (s *SQLiteStore) ClaimPipeline(ctx context.Context, pipeID, agentID string) error {
+	res, err := s.conn.ExecContext(ctx,
+		`UPDATE pipeline_messages SET status = 'claimed', claimed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+		 WHERE pipe_id = ? AND status = 'pending'`, pipeID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("pipeline message %s not available for claiming", pipeID)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) CompletePipeline(ctx context.Context, pipeID, result, journalID string) error {
+	res, err := s.conn.ExecContext(ctx,
+		`UPDATE pipeline_messages SET status = 'completed', result = ?, journal_id = ?,
+		        completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+		 WHERE pipe_id = ? AND status = 'claimed'`, result, journalID, pipeID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("pipeline message %s not available for completion (must be claimed first)", pipeID)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) GetCompletedForSender(ctx context.Context, agentID string, limit int) ([]*PipelineMessage, error) {
+	rows, err := s.conn.QueryContext(ctx,
+		`SELECT pipe_id, from_agent, from_provider, to_agent, to_provider, intent,
+		        COALESCE(result, ''), status, created_at, completed_at, expires_at, COALESCE(journal_id, '')
+		 FROM pipeline_messages
+		 WHERE from_agent = ? AND status = 'completed'
+		 ORDER BY completed_at DESC LIMIT ?`,
+		agentID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []*PipelineMessage
+	for rows.Next() {
+		var m PipelineMessage
+		var createdAt, expiresAt string
+		var completedAt *string
+		if err := rows.Scan(&m.PipeID, &m.FromAgent, &m.FromProvider, &m.ToAgent, &m.ToProvider,
+			&m.Intent, &m.Result, &m.Status, &createdAt, &completedAt, &expiresAt, &m.JournalID); err != nil {
+			return nil, err
+		}
+		m.CreatedAt = parseTime(createdAt)
+		m.ExpiresAt = parseTime(expiresAt)
+		m.CompletedAt = parseTimePtr(completedAt)
+		items = append(items, &m)
+	}
+	return items, nil
+}
+
+func (s *SQLiteStore) ListPipelines(ctx context.Context, status string, limit int) ([]*PipelineMessage, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	query := `SELECT pipe_id, from_agent, from_provider, to_agent, to_provider, intent, payload,
+	                 COALESCE(result, ''), status, created_at, claimed_at, completed_at, expires_at, COALESCE(journal_id, '')
+	          FROM pipeline_messages`
+	var args []any
+	if status != "" {
+		query += ` WHERE status = ?`
+		args = append(args, status)
+	}
+	query += ` ORDER BY created_at DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := s.conn.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []*PipelineMessage
+	for rows.Next() {
+		var m PipelineMessage
+		var createdAt, expiresAt string
+		var claimedAt, completedAt *string
+		if err := rows.Scan(&m.PipeID, &m.FromAgent, &m.FromProvider, &m.ToAgent, &m.ToProvider,
+			&m.Intent, &m.Payload, &m.Result, &m.Status, &createdAt, &claimedAt, &completedAt,
+			&expiresAt, &m.JournalID); err != nil {
+			return nil, err
+		}
+		m.CreatedAt = parseTime(createdAt)
+		m.ExpiresAt = parseTime(expiresAt)
+		m.ClaimedAt = parseTimePtr(claimedAt)
+		m.CompletedAt = parseTimePtr(completedAt)
+		items = append(items, &m)
+	}
+	return items, nil
+}
+
+func (s *SQLiteStore) PipelineStats(ctx context.Context) (map[string]int, error) {
+	rows, err := s.conn.QueryContext(ctx,
+		`SELECT status, COUNT(*) FROM pipeline_messages GROUP BY status`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	stats := make(map[string]int)
+	for rows.Next() {
+		var status string
+		var count int
+		if err := rows.Scan(&status, &count); err != nil {
+			return nil, err
+		}
+		stats[status] = count
+	}
+	return stats, nil
+}
+
+func (s *SQLiteStore) ExpirePipelines(ctx context.Context) (int, error) {
+	res, err := s.conn.ExecContext(ctx,
+		`UPDATE pipeline_messages SET status = 'expired'
+		 WHERE status IN ('pending', 'claimed')
+		   AND expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+func (s *SQLiteStore) PurgePipelines(ctx context.Context, olderThan time.Time) (int, error) {
+	res, err := s.conn.ExecContext(ctx,
+		`DELETE FROM pipeline_messages
+		 WHERE status IN ('completed', 'expired', 'failed')
+		   AND created_at < ?`, formatTime(olderThan))
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
 }

@@ -294,6 +294,10 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 		// Pre-validate endpoint — dry-run the 4 app validators
 		r.Post("/v1/memory/pre-validate", h.handlePreValidate)
 
+		// Pipeline — agent-to-agent message bus
+		r.Get("/v1/dashboard/pipeline", h.handlePipelineList)
+		r.Get("/v1/dashboard/pipeline/stats", h.handlePipelineStats)
+
 		// Network agent management routes
 		h.RegisterNetworkRoutes(r)
 	})

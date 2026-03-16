@@ -440,3 +440,17 @@ export async function createTask(content, domain) {
     });
     return res.json();
 }
+
+// Pipeline
+export async function fetchPipeline(params = {}) {
+    const q = new URLSearchParams();
+    if (params.status) q.set('status', params.status);
+    if (params.limit) q.set('limit', params.limit);
+    const res = await fetch(`${API_BASE}/v1/dashboard/pipeline?${q}`);
+    return res.json();
+}
+
+export async function fetchPipelineStats() {
+    const res = await fetch(`${API_BASE}/v1/dashboard/pipeline/stats`);
+    return res.json();
+}

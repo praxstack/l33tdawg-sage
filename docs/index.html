@@ -679,16 +679,16 @@ footer a:hover { text-decoration: underline; }
         <p class="section-desc" style="margin:0 auto;">Not just a key-value store. SAGE is governed institutional memory &mdash; validated, scored, and evolving.</p>
       </div>
 
-      <!-- What's New in v4.0 -->
+      <!-- What's New in v5.0 -->
       <div class="whats-new reveal">
-        <h3>What's new in <span id="whats-new-version">the latest release</span></h3>
+        <h3>What's new in <span id="whats-new-version">v5.0</span></h3>
         <div class="new-features">
-          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>4 Application Validators</h4><p>Every memory passes through Sentinel, Dedup, Quality, and Consistency validators. BFT quorum (3/4) required to commit. Real signed vote transactions through CometBFT consensus.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Memory Quality Gates</h4><p>No more noise accumulation. Greeting observations, short content, empty headers, and low-confidence facts are automatically rejected before hitting the chain.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Duplicate Detection</h4><p>SHA-256 content hash dedup catches exact duplicates. Similar-memory detection in reflections prevents near-duplicate accumulation across sessions.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Pre-Validation API</h4><p>Dry-run validators without submitting on-chain. MCP tools use this to give agents immediate feedback on why a memory was rejected.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Upgrade Cleanup</h4><p>Automatic noise cleanup on upgrade from v3.x. Deduplicates boot safeguards, deprecates greeting noise, removes short observations. Your good memories are preserved.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Step-by-Step Updates</h4><p>Software update UI now shows real-time progress via SSE &mdash; download, verify, extract, install &mdash; with per-step status indicators.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>Agent Pipeline &mdash; Inter-Agent Message Bus</h4><p>Route work between AI agents through SAGE. Send research to Perplexity, get results back in Claude &mdash; no copy-pasting. Three new MCP tools: <code>sage_pipe</code>, <code>sage_inbox</code>, <code>sage_pipe_result</code>. Ephemeral messages with auto-expiry; only a journal summary persists as memory.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--teal);"></div><div><h4>Passive Pipeline Discovery</h4><p>Agents discover incoming work automatically on every <code>sage_turn</code> call &mdash; no polling needed. Completed results from pipes you sent also appear in your turn response. Zero-effort integration.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>Pipeline Dashboard</h4><p>New Pipeline page in CEREBRUM shows all agent-to-agent messages with status filters, expandable payload/result views, and auto-refresh. Full visibility into your agent mesh.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Auto-Journal</h4><p>When a pipeline exchange completes, SAGE automatically creates a one-line observation memory summarizing who asked whom to do what. Persistent audit trail without storing full payloads.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Atomic Claim Routing</h4><p>Multiple agents of the same provider? First to check inbox claims the work &mdash; atomic SQL prevents double-processing. Route by provider name or by specific agent ID.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>TTL &amp; Auto-Cleanup</h4><p>Pipeline messages expire automatically (default: 1 hour, max: 24 hours). Background goroutine purges completed/expired messages. Your database stays lean.</p></div></div>
         </div>
       </div>
 
@@ -703,6 +703,8 @@ footer a:hover { text-decoration: underline; }
         <div class="feature-card"><div class="feature-icon gold">&#128260;</div><div><h3>One-Click Updates</h3><p>Built-in auto-updater checks releases, downloads, and replaces &mdash; all from the dashboard.</p></div></div>
         <div class="feature-card"><div class="feature-icon teal">&#128221;</div><div><h3>Boot Instructions</h3><p>Customize what your AI does on startup. Set it from the dashboard, no config files.</p></div></div>
         <div class="feature-card"><div class="feature-icon pink">&#128065;</div><div><h3>Fully Inspectable</h3><p>Standard SQLite database. Open it with any tool, query it, back it up. You own every byte.</p></div></div>
+        <div class="feature-card"><div class="feature-icon purple">&#128232;</div><div><h3>Agent Pipeline</h3><p>Route work between AI agents. Send research to Perplexity, analysis to ChatGPT, results back to Claude &mdash; all through SAGE.</p></div></div>
+        <div class="feature-card"><div class="feature-icon teal">&#9878;&#65039;</div><div><h3>Auto-Journal</h3><p>Pipeline exchanges are automatically summarized as memories. Full audit trail of inter-agent work without storing bulky payloads.</p></div></div>
       </div>
 
       <!-- Screenshots -->

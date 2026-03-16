@@ -207,6 +207,50 @@ func (s *Server) registerTools() map[string]Tool {
 			},
 			Handler: s.toolReflect,
 		},
+		"sage_pipe": {
+			Name: "sage_pipe",
+			Description: "Send work to another agent via SAGE pipeline. The target agent will see this in their inbox " +
+				"on their next sage_turn or sage_inbox call. Address by provider name (e.g. 'perplexity', 'chatgpt') " +
+				"or by agent_id. SAGE journals the exchange when complete but does NOT store the full payload as memory.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"to":          map[string]any{"type": "string", "description": "Target: provider name (e.g. 'perplexity', 'chatgpt') or agent_id hex"},
+					"intent":      map[string]any{"type": "string", "description": "What you want done: 'research', 'summarize', 'analyze', 'review', etc."},
+					"payload":     map[string]any{"type": "string", "description": "The work content to send"},
+					"ttl_minutes": map[string]any{"type": "integer", "description": "Time-to-live in minutes (default: 60, max: 1440)", "default": 60},
+				},
+				"required": []string{"to", "payload"},
+			},
+			Handler: s.toolPipe,
+		},
+		"sage_inbox": {
+			Name: "sage_inbox",
+			Description: "Check your pipeline inbox for work sent by other agents. Returns pending items addressed " +
+				"to you (by agent_id or provider). Automatically claims items you view so other agents of the same " +
+				"provider don't duplicate work. Call sage_pipe_result to send results back.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"limit": map[string]any{"type": "integer", "description": "Max items to return (default: 5)", "default": 5},
+				},
+			},
+			Handler: s.toolInbox,
+		},
+		"sage_pipe_result": {
+			Name: "sage_pipe_result",
+			Description: "Return results for a claimed pipeline work item. Sends your result back to the requesting agent. " +
+				"SAGE auto-journals the exchange as a memory (just the summary, not the full payload).",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"pipe_id": map[string]any{"type": "string", "description": "The pipeline message ID to reply to"},
+					"result":  map[string]any{"type": "string", "description": "Your result/response"},
+				},
+				"required": []string{"pipe_id", "result"},
+			},
+			Handler: s.toolPipeResult,
+		},
 	}
 	return tools
 }
@@ -625,6 +669,12 @@ func (s *Server) toolTurn(ctx context.Context, params map[string]any) (any, erro
 	} else if observation != "" {
 		result["stored"] = false
 		result["skip_reason"] = "observation below quality threshold"
+	}
+
+	// Phase 3: Pipeline — check for incoming work and completed results.
+	pipeData := s.checkPipelineInbox(ctx)
+	for k, v := range pipeData {
+		result[k] = v
 	}
 
 	return result, nil
@@ -1362,4 +1412,211 @@ func floatParam(params map[string]any, key string, defaultVal float64) float64 {
 		return f
 	}
 	return defaultVal
+}
+
+// --- Pipeline Tool Handlers ---
+
+func (s *Server) toolPipe(ctx context.Context, params map[string]any) (any, error) {
+	to := stringParam(params, "to", "")
+	if to == "" {
+		return nil, fmt.Errorf("'to' is required (provider name or agent_id)")
+	}
+	payload := stringParam(params, "payload", "")
+	if payload == "" {
+		return nil, fmt.Errorf("'payload' is required")
+	}
+	intent := stringParam(params, "intent", "")
+	ttlMinutes := intParam(params, "ttl_minutes", 60)
+	if ttlMinutes <= 0 {
+		ttlMinutes = 60
+	}
+	if ttlMinutes > 1440 {
+		ttlMinutes = 1440
+	}
+
+	// Resolve target: hex agent_id vs provider name
+	toAgent := ""
+	toProvider := to
+	if len(to) == 64 && isHexString(to) {
+		toAgent = to
+		toProvider = ""
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"to_agent":    toAgent,
+		"to_provider": toProvider,
+		"intent":      intent,
+		"payload":     payload,
+		"ttl_minutes": ttlMinutes,
+	})
+
+	var resp struct {
+		PipeID    string `json:"pipe_id"`
+		Status    string `json:"status"`
+		ExpiresAt string `json:"expires_at"`
+	}
+	if err := s.doSignedJSON(ctx, "POST", "/v1/pipe/send", body, &resp); err != nil {
+		return nil, fmt.Errorf("pipeline send: %w", err)
+	}
+
+	target := toProvider
+	if toAgent != "" {
+		target = toAgent[:16] + "..."
+	}
+
+	return map[string]any{
+		"pipe_id":    resp.PipeID,
+		"status":     resp.Status,
+		"expires_at": resp.ExpiresAt,
+		"message":    fmt.Sprintf("Sent to %s. The target agent will see this on their next sage_turn or sage_inbox call. Check back with sage_turn later — the result will appear in pipe_results.", target),
+	}, nil
+}
+
+func (s *Server) toolInbox(ctx context.Context, params map[string]any) (any, error) {
+	limit := intParam(params, "limit", 5)
+	if limit <= 0 || limit > 20 {
+		limit = 5
+	}
+
+	var resp struct {
+		Items []struct {
+			PipeID       string `json:"pipe_id"`
+			FromAgent    string `json:"from_agent"`
+			FromProvider string `json:"from_provider"`
+			Intent       string `json:"intent"`
+			Payload      string `json:"payload"`
+			CreatedAt    string `json:"created_at"`
+		} `json:"items"`
+		Count int `json:"count"`
+	}
+
+	path := fmt.Sprintf("/v1/pipe/inbox?limit=%d", limit)
+	if err := s.doSignedJSON(ctx, "GET", path, nil, &resp); err != nil {
+		return nil, fmt.Errorf("pipeline inbox: %w", err)
+	}
+
+	if resp.Count == 0 {
+		return map[string]any{
+			"items":   []any{},
+			"count":   0,
+			"message": "No pending pipeline items.",
+		}, nil
+	}
+
+	items := make([]map[string]any, 0, len(resp.Items))
+	for _, item := range resp.Items {
+		from := item.FromProvider
+		if from == "" {
+			from = item.FromAgent[:16] + "..."
+		}
+		items = append(items, map[string]any{
+			"pipe_id":    item.PipeID,
+			"from":       from,
+			"intent":     item.Intent,
+			"payload":    item.Payload,
+			"created_at": item.CreatedAt,
+		})
+	}
+
+	return map[string]any{
+		"items":   items,
+		"count":   resp.Count,
+		"message": fmt.Sprintf("You have %d pipeline item(s). Process them and call sage_pipe_result with your response.", resp.Count),
+	}, nil
+}
+
+func (s *Server) toolPipeResult(ctx context.Context, params map[string]any) (any, error) {
+	pipeID := stringParam(params, "pipe_id", "")
+	if pipeID == "" {
+		return nil, fmt.Errorf("'pipe_id' is required")
+	}
+	result := stringParam(params, "result", "")
+	if result == "" {
+		return nil, fmt.Errorf("'result' is required")
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"result": result,
+	})
+
+	var resp struct {
+		Status    string `json:"status"`
+		JournalID string `json:"journal_id"`
+	}
+	if err := s.doSignedJSON(ctx, "PUT", "/v1/pipe/"+pipeID+"/result", body, &resp); err != nil {
+		return nil, fmt.Errorf("pipeline result: %w", err)
+	}
+
+	return map[string]any{
+		"status":     resp.Status,
+		"journal_id": resp.JournalID,
+		"message":    "Result delivered. The requesting agent will see it on their next sage_turn. A journal entry was auto-created summarizing the exchange.",
+	}, nil
+}
+
+// checkPipelineInbox queries the pipeline inbox for this agent during sage_turn.
+// Returns inbox items and completed results in a single map.
+func (s *Server) checkPipelineInbox(ctx context.Context) map[string]any {
+	result := map[string]any{}
+
+	// Check for incoming work
+	var inboxResp struct {
+		Items []struct {
+			PipeID       string `json:"pipe_id"`
+			FromProvider string `json:"from_provider"`
+			Intent       string `json:"intent"`
+			Payload      string `json:"payload"`
+			CreatedAt    string `json:"created_at"`
+		} `json:"items"`
+		Count int `json:"count"`
+	}
+	if err := s.doSignedJSON(ctx, "GET", "/v1/pipe/inbox?limit=5", nil, &inboxResp); err == nil && inboxResp.Count > 0 {
+		items := make([]map[string]any, 0, len(inboxResp.Items))
+		for _, item := range inboxResp.Items {
+			items = append(items, map[string]any{
+				"pipe_id": item.PipeID,
+				"from":    item.FromProvider,
+				"intent":  item.Intent,
+				"payload": item.Payload,
+			})
+		}
+		result["pipe_inbox"] = items
+		result["pipe_inbox_count"] = inboxResp.Count
+	}
+
+	// Check for completed results from pipes we sent
+	var resultsResp struct {
+		Items []struct {
+			PipeID     string `json:"pipe_id"`
+			ToProvider string `json:"to_provider"`
+			Intent     string `json:"intent"`
+			Result     string `json:"result"`
+		} `json:"items"`
+		Count int `json:"count"`
+	}
+	if err := s.doSignedJSON(ctx, "GET", "/v1/pipe/results?limit=5", nil, &resultsResp); err == nil && resultsResp.Count > 0 {
+		items := make([]map[string]any, 0, len(resultsResp.Items))
+		for _, item := range resultsResp.Items {
+			items = append(items, map[string]any{
+				"pipe_id": item.PipeID,
+				"from":    item.ToProvider,
+				"intent":  item.Intent,
+				"result":  item.Result,
+			})
+		}
+		result["pipe_results"] = items
+		result["pipe_results_count"] = resultsResp.Count
+	}
+
+	return result
+}
+
+// isHexString returns true if the string contains only hex characters.
+func isHexString(s string) bool {
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
 }

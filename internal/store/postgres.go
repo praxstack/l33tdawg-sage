@@ -1330,3 +1330,45 @@ func (s *PostgresStore) GetRedeployLog(_ context.Context, _ string) ([]*Redeploy
 func (s *PostgresStore) UpdateRedeployLog(_ context.Context, _ int64, _, _ string) error {
 	return fmt.Errorf("UpdateRedeployLog not implemented for PostgresStore")
 }
+
+// --- Pipeline Store stubs (SQLite-only feature for now) ---
+
+func (s *PostgresStore) InsertPipeline(_ context.Context, _ *PipelineMessage) error {
+	return fmt.Errorf("InsertPipeline not implemented for PostgresStore")
+}
+
+func (s *PostgresStore) GetPipeline(_ context.Context, _ string) (*PipelineMessage, error) {
+	return nil, fmt.Errorf("GetPipeline not implemented for PostgresStore")
+}
+
+func (s *PostgresStore) GetInbox(_ context.Context, _, _ string, _ int) ([]*PipelineMessage, error) {
+	return nil, fmt.Errorf("GetInbox not implemented for PostgresStore")
+}
+
+func (s *PostgresStore) ClaimPipeline(_ context.Context, _, _ string) error {
+	return fmt.Errorf("ClaimPipeline not implemented for PostgresStore")
+}
+
+func (s *PostgresStore) CompletePipeline(_ context.Context, _, _, _ string) error {
+	return fmt.Errorf("CompletePipeline not implemented for PostgresStore")
+}
+
+func (s *PostgresStore) GetCompletedForSender(_ context.Context, _ string, _ int) ([]*PipelineMessage, error) {
+	return nil, fmt.Errorf("GetCompletedForSender not implemented for PostgresStore")
+}
+
+func (s *PostgresStore) ListPipelines(_ context.Context, _ string, _ int) ([]*PipelineMessage, error) {
+	return nil, fmt.Errorf("ListPipelines not implemented for PostgresStore")
+}
+
+func (s *PostgresStore) PipelineStats(_ context.Context) (map[string]int, error) {
+	return nil, fmt.Errorf("PipelineStats not implemented for PostgresStore")
+}
+
+func (s *PostgresStore) ExpirePipelines(_ context.Context) (int, error) {
+	return 0, fmt.Errorf("ExpirePipelines not implemented for PostgresStore")
+}
+
+func (s *PostgresStore) PurgePipelines(_ context.Context, _ time.Time) (int, error) {
+	return 0, fmt.Errorf("PurgePipelines not implemented for PostgresStore")
+}
