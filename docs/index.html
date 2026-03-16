@@ -1112,32 +1112,46 @@ function copyPrompt(box) {
 
 // ─── Download Counter + Latest Version ───
 (function() {
-  // Baseline: total downloads from releases no longer returned by the first API page
-  // Snapshot taken 2026-03-14 — 331 total across 42 releases, API default page returns 153
+  // Baseline: cumulative downloads from re-tagged releases whose counts were reset.
+  // Snapshot taken 2026-03-14.
   const BASELINE = 363;
-  fetch('https://api.github.com/repos/l33tdawg/sage/releases')
-    .then(r => r.json())
-    .then(releases => {
-      if (!Array.isArray(releases)) return;
-      let total = BASELINE;
-      for (const rel of releases) for (const asset of (rel.assets || [])) total += asset.download_count || 0;
-      // High-water mark: never show fewer minds freed than previously seen.
-      // GitHub download counts reset when releases are re-tagged, causing
-      // the counter to temporarily dip. This ensures it only goes up.
-      const hwmKey = 'sage_minds_freed_hwm';
-      const prevHWM = parseInt(localStorage.getItem(hwmKey) || '0', 10);
-      if (total > prevHWM) { localStorage.setItem(hwmKey, total); }
-      else if (prevHWM > total) { total = prevHWM; }
-      if (total > 0) {
-        document.getElementById('download-count').textContent = total.toLocaleString();
-        document.getElementById('minds-freed').style.display = 'block';
-      }
-      const latest = releases.find(r => !r.prerelease && !r.draft);
-      if (latest) {
-        const el = document.getElementById('latest-version'); if (el) el.textContent = latest.tag_name;
-        const wn = document.getElementById('whats-new-version'); if (wn) wn.textContent = latest.tag_name;
-      }
-    }).catch(() => {});
+
+  // Paginate all releases (GitHub default is only 30 — we need them all)
+  async function fetchAllReleases() {
+    const all = [];
+    let page = 1;
+    while (true) {
+      const r = await fetch('https://api.github.com/repos/l33tdawg/sage/releases?per_page=100&page=' + page);
+      const data = await r.json();
+      if (!Array.isArray(data) || data.length === 0) break;
+      all.push(...data);
+      if (data.length < 100) break;
+      page++;
+    }
+    return all;
+  }
+
+  fetchAllReleases().then(releases => {
+    if (!releases.length) return;
+    let total = BASELINE;
+    for (const rel of releases) for (const asset of (rel.assets || [])) total += asset.download_count || 0;
+    // High-water mark: never show fewer minds freed than previously seen.
+    // GitHub download counts reset when releases are re-tagged, causing
+    // the counter to temporarily dip. This ensures it only goes up.
+    const hwmKey = 'sage_minds_freed_hwm';
+    const prevHWM = parseInt(localStorage.getItem(hwmKey) || '0', 10);
+    if (total > prevHWM) { localStorage.setItem(hwmKey, total); }
+    else if (prevHWM > total) { total = prevHWM; }
+    if (total > 0) {
+      document.getElementById('download-count').textContent = total.toLocaleString();
+      document.getElementById('minds-freed').style.display = 'block';
+    }
+    const latest = releases.find(r => !r.prerelease && !r.draft);
+    if (latest) {
+      const el = document.getElementById('latest-version'); if (el) el.textContent = latest.tag_name;
+      const wn = document.getElementById('whats-new-version'); if (wn) wn.textContent = latest.tag_name;
+    }
+  }).catch(() => {});
 })();
 
 // ─── Screenshot Lightbox ───
