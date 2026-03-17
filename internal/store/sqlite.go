@@ -1882,6 +1882,38 @@ func (s *SQLiteStore) GetAgent(ctx context.Context, agentID string) (*AgentEntry
 	return a, nil
 }
 
+func (s *SQLiteStore) GetAgentByName(ctx context.Context, name string) (*AgentEntry, error) {
+	a := &AgentEntry{}
+	var firstSeen, lastSeen, createdAt, removedAt, claimExpiry *string
+	err := s.conn.QueryRowContext(ctx, `
+		SELECT a.agent_id, a.name, a.role, COALESCE(a.avatar,''), COALESCE(a.boot_bio,''),
+			COALESCE(a.validator_pubkey,''), COALESCE(a.node_id,''), COALESCE(a.p2p_address,''),
+			a.status, a.clearance, COALESCE(a.org_id,''), COALESCE(a.dept_id,''),
+			COALESCE(a.domain_access,''), COALESCE(a.bundle_path,''),
+			a.first_seen, a.last_seen, a.created_at, a.removed_at,
+			COALESCE(a.on_chain_height, 0), COALESCE(a.visible_agents, ''), COALESCE(a.provider, ''),
+			COALESCE((SELECT COUNT(*) FROM memories WHERE submitting_agent = a.agent_id), 0),
+			COALESCE(a.claim_token, ''), a.claim_expires_at
+		FROM network_agents a WHERE a.name = ? AND a.status != 'removed'`, name).Scan(
+		&a.AgentID, &a.Name, &a.Role, &a.Avatar, &a.BootBio,
+		&a.ValidatorPubkey, &a.NodeID, &a.P2PAddress, &a.Status, &a.Clearance,
+		&a.OrgID, &a.DeptID, &a.DomainAccess, &a.BundlePath,
+		&firstSeen, &lastSeen, &createdAt, &removedAt,
+		&a.OnChainHeight, &a.VisibleAgents, &a.Provider, &a.MemoryCount,
+		&a.ClaimToken, &claimExpiry)
+	if err != nil {
+		return nil, nil // not found — return nil, nil per interface contract
+	}
+	a.FirstSeen = parseTimePtr(firstSeen)
+	a.LastSeen = parseTimePtr(lastSeen)
+	if createdAt != nil {
+		a.CreatedAt = parseTime(*createdAt)
+	}
+	a.RemovedAt = parseTimePtr(removedAt)
+	a.ClaimExpiresAt = parseTimePtr(claimExpiry)
+	return a, nil
+}
+
 func (s *SQLiteStore) CreateAgent(ctx context.Context, agent *AgentEntry) error {
 	var claimExpiry *string
 	if agent.ClaimExpiresAt != nil {

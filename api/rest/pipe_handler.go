@@ -38,6 +38,42 @@ func (s *Server) handlePipeSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate the target agent/provider actually exists
+	if s.agentStore != nil {
+		if req.ToAgent != "" {
+			// Direct agent_id — must exist
+			if _, err := s.agentStore.GetAgent(r.Context(), req.ToAgent); err != nil {
+				writeProblem(w, http.StatusNotFound, "Unknown target agent",
+					fmt.Sprintf("agent_id %s is not registered", req.ToAgent))
+				return
+			}
+		} else if req.ToProvider != "" {
+			// Provider — check if any active agent has this provider
+			agents, err := s.agentStore.ListAgents(r.Context())
+			if err == nil {
+				found := false
+				for _, a := range agents {
+					if a.Provider == req.ToProvider {
+						found = true
+						break
+					}
+				}
+				if !found {
+					// Also try as agent name
+					if agent, _ := s.agentStore.GetAgentByName(r.Context(), req.ToProvider); agent != nil {
+						// Resolve name → agent_id for direct delivery
+						req.ToAgent = agent.AgentID
+						req.ToProvider = ""
+					} else {
+						writeProblem(w, http.StatusNotFound, "Unknown target",
+							fmt.Sprintf("no registered agent with provider or name %q", req.ToProvider))
+						return
+					}
+				}
+			}
+		}
+	}
+
 	ttl := req.TTLMinutes
 	if ttl <= 0 {
 		ttl = 60

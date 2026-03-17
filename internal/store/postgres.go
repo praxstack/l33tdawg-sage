@@ -1263,6 +1263,10 @@ func (s *PostgresStore) GetAgent(_ context.Context, _ string) (*AgentEntry, erro
 	return nil, fmt.Errorf("GetAgent not implemented for PostgresStore")
 }
 
+func (s *PostgresStore) GetAgentByName(_ context.Context, _ string) (*AgentEntry, error) {
+	return nil, fmt.Errorf("GetAgentByName not implemented for PostgresStore")
+}
+
 func (s *PostgresStore) CreateAgent(_ context.Context, _ *AgentEntry) error {
 	return fmt.Errorf("CreateAgent not implemented for PostgresStore")
 }

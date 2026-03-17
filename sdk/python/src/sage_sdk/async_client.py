@@ -61,7 +61,15 @@ class AsyncSageClient:
 
             body = json_mod.dumps(json, separators=(",", ":")).encode()
 
-        headers = self._identity.sign_request(method, path, body)
+        # Include query params in the signing path so the signature matches
+        # what the server verifies (method + path?query + body).
+        sign_path = path
+        if params:
+            from urllib.parse import urlencode
+
+            sign_path = path + "?" + urlencode(params, doseq=True)
+
+        headers = self._identity.sign_request(method, sign_path, body)
         if body is not None:
             headers["Content-Type"] = "application/json"
 

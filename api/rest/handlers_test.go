@@ -683,6 +683,14 @@ func (m *mockAgentStore) ReassignMemoriesByTag(_ context.Context, _, _, _ string
 func (m *mockAgentStore) ReassignMemoriesByDomain(_ context.Context, _, _, _ string) (int64, error) {
 	return 0, nil
 }
+func (m *mockAgentStore) GetAgentByName(_ context.Context, name string) (*store.AgentEntry, error) {
+	for _, a := range m.agents {
+		if a.Name == name {
+			return a, nil
+		}
+	}
+	return nil, nil
+}
 
 // --- Domain Access Read Enforcement Tests ------------------------------------
 

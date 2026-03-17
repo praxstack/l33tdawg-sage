@@ -166,3 +166,33 @@ func TestPipelineDirectAgentRouting(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, inbox2, 0)
 }
+
+func TestGetAgentByName(t *testing.T) {
+	ctx := context.Background()
+	s, err := NewSQLiteStore(ctx, ":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+
+	// Register an agent
+	agent := &AgentEntry{
+		AgentID:   "deadbeef01234567890abcdef01234567890abcdef01234567890abcdef012345",
+		Name:      "claude-code/sage",
+		Role:      "assistant",
+		Status:    "active",
+		Clearance: 5,
+		Provider:  "claude-code",
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Look up by name — should find it
+	found, err := s.GetAgentByName(ctx, "claude-code/sage")
+	require.NoError(t, err)
+	require.NotNil(t, found)
+	assert.Equal(t, agent.AgentID, found.AgentID)
+	assert.Equal(t, "claude-code", found.Provider)
+
+	// Look up non-existent name — should return nil, nil
+	notFound, err := s.GetAgentByName(ctx, "nonexistent/agent")
+	require.NoError(t, err)
+	assert.Nil(t, notFound)
+}

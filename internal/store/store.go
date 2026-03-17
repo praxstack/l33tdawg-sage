@@ -338,6 +338,9 @@ type RedeploymentLock struct {
 type AgentStore interface {
 	ListAgents(ctx context.Context) ([]*AgentEntry, error)
 	GetAgent(ctx context.Context, agentID string) (*AgentEntry, error)
+	// GetAgentByName looks up an agent by its display name (e.g. "claude-code/sage").
+	// Returns nil, nil if no agent matches.
+	GetAgentByName(ctx context.Context, name string) (*AgentEntry, error)
 	CreateAgent(ctx context.Context, agent *AgentEntry) error
 	UpdateAgent(ctx context.Context, agent *AgentEntry) error
 	RemoveAgent(ctx context.Context, agentID string) error
