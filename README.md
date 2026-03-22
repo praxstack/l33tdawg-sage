@@ -56,7 +56,11 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What's New in v5.0.10
+## What's New in v5.0.11
+
+- **Docker Fix** — Container no longer stuck in restart loop. Default entrypoint changed from MCP stdio mode to `serve` (persistent REST API + dashboard). MCP stdio still available via `docker run -i ghcr.io/l33tdawg/sage mcp`. Fixes #14.
+
+### v5.0.10
 
 - **Multi-Agent Identity** — New `SAGE_IDENTITY_PATH` env var and `AgentIdentity.default()` for running multiple Claude Code agents on the same machine without key collisions. (Community PR by @emx)
 - **Dashboard Fix** — "Synaptic Ledger" label in overview settings now reads "Synaptic Ledger Encryption" to clarify it refers to the encryption state, not the ledger itself.
@@ -165,7 +169,7 @@ docker pull ghcr.io/l33tdawg/sage:latest
 docker run -p 8080:8080 -v ~/.sage:/root/.sage ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:5.0.10`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:5.0.11`.
 
 ### Upgrading from an older version?
 

@@ -1,5 +1,6 @@
-# SAGE MCP Server — minimal container for MCP registry distribution
-# Usage: docker run -i ghcr.io/l33tdawg/sage:latest
+# SAGE — Persistent consensus-validated memory for AI agents
+# Server mode:  docker run -p 8080:8080 -v ~/.sage:/root/.sage ghcr.io/l33tdawg/sage:latest
+# MCP stdio:    docker run -i ghcr.io/l33tdawg/sage:latest mcp
 FROM golang:1.24-alpine AS builder
 
 WORKDIR /src
@@ -15,9 +16,12 @@ FROM alpine:3.20
 RUN apk add --no-cache ca-certificates
 COPY --from=builder /sage-gui /usr/local/bin/sage-gui
 
+EXPOSE 8080
+
 LABEL org.opencontainers.image.source="https://github.com/l33tdawg/sage"
 LABEL org.opencontainers.image.description="SAGE — Persistent consensus-validated memory for AI agents"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 LABEL io.modelcontextprotocol.server.name="io.github.l33tdawg/sage"
 
-ENTRYPOINT ["sage-gui", "mcp"]
+ENTRYPOINT ["sage-gui"]
+CMD ["serve"]
