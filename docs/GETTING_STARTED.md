@@ -269,6 +269,20 @@ Starting in v3.5, agent identity is a first-class on-chain concept. When you add
 
 **Visible Agents:** You can restrict which agents' memories are visible to a given agent. Set this in the agent's Access Control tab on the Network page. By default, all agents can see all memories (open model). Set specific agent IDs to restrict visibility.
 
+### Using Custom Identity Paths (Multiple Agents on the same machine)
+
+You can now run multiple independent agents cleanly with one environment variable:
+
+```bash
+# In each tmux tab (example)
+SAGE_IDENTITY_PATH=~/.sage/identities/agent-01.key   claude-code --project myproject
+SAGE_IDENTITY_PATH=~/.sage/identities/agent-02.key   claude-code --project myproject
+SAGE_IDENTITY_PATH=~/.sage/identities/agent-03.key   claude-code --project myproject
+SAGE_IDENTITY_PATH=~/.sage/identities/agent-04.key   claude-code --project myproject
+```
+
+Each agent automatically gets its own permanent key file and unique Agent ID, while still sharing the same memory ledger.
+
 ---
 
 ## Using Ollama for Local Embeddings
