@@ -308,6 +308,14 @@ identity = AgentIdentity.generate()
 print(f"Agent ID: {identity.agent_id}")
 ```
 
+New recommended way for multi-agent setups (Claude Code in tmux, etc.):
+
+```python
+identity = AgentIdentity.default()   # automatically respects SAGE_IDENTITY_PATH env var
+```
+
+This is the clean way to give each agent its own permanent key file while still sharing the same memory ledger.
+
 Or use the CLI:
 
 ```bash
