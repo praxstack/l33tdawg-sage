@@ -81,18 +81,27 @@ func runMCP() error {
 		selfHealProject(projectDir, home)
 	}
 
-	// Per-project agent identity: each project directory gets its own key.
-	// If SAGE_AGENT_KEY is set, use that explicit path (backward compat).
-	// Otherwise, derive from the working directory so each Claude Code
-	// session in a different project folder auto-provisions a unique agent.
-	keyPath := os.Getenv("SAGE_AGENT_KEY")
+	// === IDENTITY RESOLUTION (highest priority first) ===
+	// 1. SAGE_IDENTITY_PATH (matches SDK AgentIdentity.default())
+	// 2. SAGE_AGENT_KEY (kept for backward compatibility)
+	// 3. Per-project key (~/.sage/agents/<name>-<hash>/agent.key)
+	// 4. Default ~/.sage/agent.key
+	keyPath := os.Getenv("SAGE_IDENTITY_PATH")
+	if keyPath == "" {
+		keyPath = os.Getenv("SAGE_AGENT_KEY")
+	}
+
 	projectName := ""
 
-	if keyPath == "" {
+	if keyPath != "" {
+		keyPath = expandTilde(keyPath)
+		fmt.Fprintf(os.Stderr, "INFO: Identity resolved via env var: %s\n", keyPath)
+	} else {
 		projectDir, err := os.Getwd()
 		if err != nil {
 			// Fallback to legacy shared key
 			keyPath = filepath.Join(home, "agent.key")
+			fmt.Fprintf(os.Stderr, "INFO: Identity resolved via default ~/.sage/agent.key\n")
 		} else {
 			projectName = filepath.Base(projectDir)
 			agentDir := projectAgentDir(home, projectDir)
@@ -100,6 +109,14 @@ func runMCP() error {
 				return fmt.Errorf("create agent dir: %w", mkErr)
 			}
 			keyPath = filepath.Join(agentDir, "agent.key")
+			fmt.Fprintf(os.Stderr, "INFO: Identity resolved via per-project agents/: %s\n", keyPath)
+		}
+	}
+
+	// Ensure parent directory exists (critical for SAGE_IDENTITY_PATH auto-generation)
+	if dir := filepath.Dir(keyPath); dir != "." && dir != home {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return fmt.Errorf("create identity dir: %w", err)
 		}
 	}
 
