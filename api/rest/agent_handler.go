@@ -41,9 +41,21 @@ func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 	if s.badgerStore != nil && s.badgerStore.IsAgentRegistered(agentID) {
 		existing, err := s.badgerStore.GetRegisteredAgent(agentID)
 		if err == nil {
+			name := existing.Name
+
+			// Self-healing: if the dashboard (SQLite) has a different name than on-chain
+			// (e.g. admin renamed via GUI but the CometBFT broadcast failed), reconcile
+			// by pushing the SQLite name to on-chain state.
+			if s.agentStore != nil {
+				if sqliteAgent, agErr := s.agentStore.GetAgent(r.Context(), agentID); agErr == nil && sqliteAgent.Name != existing.Name {
+					name = sqliteAgent.Name
+					s.reconcileAgentName(agentID, sqliteAgent.Name, existing.BootBio)
+				}
+			}
+
 			writeJSON(w, http.StatusOK, map[string]any{
 				"agent_id":      existing.AgentID,
-				"name":          existing.Name,
+				"name":          name,
 				"role":          existing.Role,
 				"provider":      existing.Provider,
 				"status":        "already_registered",
@@ -152,6 +164,36 @@ func (s *Server) handleAgentUpdate(w http.ResponseWriter, r *http.Request) {
 		"status":   "updated",
 		"tx_hash":  txHash,
 	})
+}
+
+// reconcileAgentName pushes the SQLite (display) name to on-chain state via an
+// AgentUpdate transaction. This self-heals the split-brain where a GUI rename
+// updated SQLite but the CometBFT broadcast silently failed.
+func (s *Server) reconcileAgentName(agentID, name, bio string) {
+	updateTx := &tx.ParsedTx{
+		Type:      tx.TxTypeAgentUpdate,
+		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
+		Timestamp: time.Now(),
+		AgentUpdateTx: &tx.AgentUpdate{
+			AgentID: agentID,
+			Name:    name,
+			BootBio: bio,
+		},
+	}
+	if err := tx.SignTx(updateTx, s.signingKey); err != nil {
+		s.logger.Warn().Err(err).Str("agent_id", agentID).Msg("reconcile: failed to sign agent name update")
+		return
+	}
+	encoded, err := tx.EncodeTx(updateTx)
+	if err != nil {
+		s.logger.Warn().Err(err).Str("agent_id", agentID).Msg("reconcile: failed to encode agent name update")
+		return
+	}
+	if _, err := s.broadcastTx(encoded); err != nil {
+		s.logger.Warn().Err(err).Str("agent_id", agentID).Msg("reconcile: failed to broadcast agent name update")
+		return
+	}
+	s.logger.Info().Str("agent_id", agentID).Str("name", name).Msg("reconciled agent name: on-chain updated to match display name")
 }
 
 // handleAgentSetPermission handles PUT /v1/agent/{id}/permission.

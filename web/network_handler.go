@@ -190,7 +190,7 @@ func (h *DashboardHandler) handleCreateAgent(agentStore store.AgentStore) http.H
 				if encErr != nil {
 					return
 				}
-				broadcastTxSync(h.CometBFTRPC, encoded)
+				_ = broadcastTxSync(h.CometBFTRPC, encoded)
 			}()
 		}
 
@@ -305,33 +305,21 @@ func (h *DashboardHandler) handleUpdateAgent(agentStore store.AgentStore) http.H
 			return
 		}
 
-		// Broadcast metadata update through CometBFT (non-blocking).
+		// Broadcast metadata update through CometBFT synchronously so the
+		// GUI knows whether the on-chain state actually updated. Without this,
+		// a silent broadcast failure causes SQLite and BadgerDB to diverge
+		// (the "split-brain rename" bug).
+		var onChainWarning string
 		if h.CometBFTRPC != "" && h.SigningKey != nil {
-			go func() {
-				// Metadata changes (name, boot_bio) go through AgentUpdate
-				if req.Name != nil || req.BootBio != nil {
-					updateTx := &tx.ParsedTx{
-						Type:      tx.TxTypeAgentUpdate,
-						Nonce:     uint64(time.Now().UnixNano()), //nolint:gosec // G115: UnixNano is always positive // #nosec G115 -- nonce from timestamp
-						Timestamp: time.Now(),
-						AgentUpdateTx: &tx.AgentUpdate{
-							AgentID: id,
-							Name:    existing.Name,
-							BootBio: existing.BootBio,
-						},
-					}
-					embedDashboardAgentProof(updateTx, h.SigningKey)
-					if signErr := tx.SignTx(updateTx, h.SigningKey); signErr != nil {
-						return
-					}
-					encoded, encErr := tx.EncodeTx(updateTx)
-					if encErr != nil {
-						return
-					}
-					broadcastTxSync(h.CometBFTRPC, encoded)
+			// Metadata changes (name, boot_bio) go through AgentUpdate
+			if req.Name != nil || req.BootBio != nil {
+				if err := h.broadcastAgentUpdate(id, existing.Name, existing.BootBio); err != nil {
+					onChainWarning = "on-chain sync failed: " + err.Error()
 				}
-				// Permission changes go through AgentSetPermission
-				if req.Clearance != nil || req.DomainAccess != nil || req.VisibleAgents != nil {
+			}
+			// Permission changes go through AgentSetPermission (keep non-blocking — less critical)
+			if req.Clearance != nil || req.DomainAccess != nil || req.VisibleAgents != nil {
+				go func() {
 					clearance := uint8(existing.Clearance) // #nosec G115 -- clearance is 0-4
 					domainAccess := existing.DomainAccess
 					permTx := &tx.ParsedTx{
@@ -355,12 +343,24 @@ func (h *DashboardHandler) handleUpdateAgent(agentStore store.AgentStore) http.H
 					if encErr != nil {
 						return
 					}
-					broadcastTxSync(h.CometBFTRPC, encoded)
-				}
-			}()
+					_ = broadcastTxSync(h.CometBFTRPC, encoded)
+				}()
+			}
 		}
 
-		writeJSONResp(w, http.StatusOK, existing)
+		resp := map[string]any{
+			"agent_id":    existing.AgentID,
+			"name":        existing.Name,
+			"role":        existing.Role,
+			"avatar":      existing.Avatar,
+			"boot_bio":    existing.BootBio,
+			"clearance":   existing.Clearance,
+			"status":      existing.Status,
+		}
+		if onChainWarning != "" {
+			resp["on_chain_warning"] = onChainWarning
+		}
+		writeJSONResp(w, http.StatusOK, resp)
 	}
 }
 
@@ -789,7 +789,7 @@ func (h *DashboardHandler) handleMergeAgent(agentStore store.AgentStore) http.Ha
 				if encErr != nil {
 					return
 				}
-				broadcastTxSync(h.CometBFTRPC, encoded)
+				_ = broadcastTxSync(h.CometBFTRPC, encoded)
 			}()
 		}
 
@@ -873,7 +873,7 @@ func (h *DashboardHandler) handleTransferTag(agentStore store.AgentStore) http.H
 				if encErr != nil {
 					return
 				}
-				broadcastTxSync(h.CometBFTRPC, encoded)
+				_ = broadcastTxSync(h.CometBFTRPC, encoded)
 			}()
 		}
 
@@ -942,7 +942,7 @@ func (h *DashboardHandler) handleTransferDomain(agentStore store.AgentStore) htt
 				if encErr != nil {
 					return
 				}
-				broadcastTxSync(h.CometBFTRPC, encoded)
+				_ = broadcastTxSync(h.CometBFTRPC, encoded)
 			}()
 		}
 
@@ -1080,20 +1080,48 @@ This agent will connect to the primary node's network.
 	return zipPath, nil
 }
 
+// broadcastAgentUpdate signs and broadcasts a TxTypeAgentUpdate through CometBFT.
+// Returns an error if any step fails so callers can surface it to the UI.
+func (h *DashboardHandler) broadcastAgentUpdate(agentID, name, bio string) error {
+	updateTx := &tx.ParsedTx{
+		Type:      tx.TxTypeAgentUpdate,
+		Nonce:     uint64(time.Now().UnixNano()), //nolint:gosec // G115: UnixNano is always positive // #nosec G115 -- nonce from timestamp
+		Timestamp: time.Now(),
+		AgentUpdateTx: &tx.AgentUpdate{
+			AgentID: agentID,
+			Name:    name,
+			BootBio: bio,
+		},
+	}
+	embedDashboardAgentProof(updateTx, h.SigningKey)
+	if err := tx.SignTx(updateTx, h.SigningKey); err != nil {
+		return fmt.Errorf("sign agent update: %w", err)
+	}
+	encoded, err := tx.EncodeTx(updateTx)
+	if err != nil {
+		return fmt.Errorf("encode agent update: %w", err)
+	}
+	return broadcastTxSync(h.CometBFTRPC, encoded)
+}
+
 // broadcastTxSync sends a transaction to CometBFT via broadcast_tx_sync RPC.
 // Used by dashboard handlers to put agent operations on-chain.
-func broadcastTxSync(cometRPC string, txBytes []byte) {
+func broadcastTxSync(cometRPC string, txBytes []byte) error {
 	txHex := hex.EncodeToString(txBytes)
 	u := fmt.Sprintf("%s/broadcast_tx_sync?tx=0x%s", cometRPC, txHex)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return
+		return fmt.Errorf("create broadcast request: %w", err)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return
+		return fmt.Errorf("broadcast tx: %w", err)
 	}
 	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("broadcast tx: CometBFT returned status %d", resp.StatusCode)
+	}
+	return nil
 }

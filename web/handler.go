@@ -1136,7 +1136,7 @@ func (h *DashboardHandler) handleCreateTaskDashboard(w http.ResponseWriter, r *h
 		embedDashboardAgentProof(submitTx, h.SigningKey)
 		if signErr := tx.SignTx(submitTx, h.SigningKey); signErr == nil {
 			if encoded, encErr := tx.EncodeTx(submitTx); encErr == nil {
-				broadcastTxSync(h.CometBFTRPC, encoded)
+				_ = broadcastTxSync(h.CometBFTRPC, encoded)
 			}
 		}
 	}

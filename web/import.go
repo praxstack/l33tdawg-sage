@@ -260,7 +260,7 @@ func (h *DashboardHandler) processImportRecords(w http.ResponseWriter, r *http.R
 			embedDashboardAgentProof(submitTx, h.SigningKey)
 			if signErr := tx.SignTx(submitTx, h.SigningKey); signErr == nil {
 				if encoded, encErr := tx.EncodeTx(submitTx); encErr == nil {
-					broadcastTxSync(h.CometBFTRPC, encoded)
+					_ = broadcastTxSync(h.CometBFTRPC, encoded)
 				}
 			}
 		}

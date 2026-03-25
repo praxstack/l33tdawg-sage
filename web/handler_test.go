@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"context"
+	ed25519pkg "crypto/ed25519"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -533,3 +534,134 @@ func TestHandleUnregisteredAgents_NoneOrphan(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Len(t, resp.Unregistered, 0, "no orphaned agents should be found")
 }
+
+// --- Agent Update Synchronous Broadcast Tests --------------------------------
+
+func TestHandleUpdateAgent_SyncBroadcast_Success(t *testing.T) {
+	// When CometBFT is available, name updates should broadcast synchronously
+	// and the response should NOT contain on_chain_warning.
+	var broadcastSeen bool
+	cometMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		broadcastSeen = true
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"result":{"code":0,"hash":"ABC123"}}`)
+	}))
+	defer cometMock.Close()
+
+	h, s := newTestHandler(t)
+	h.CometBFTRPC = cometMock.URL
+	_, priv, _ := ed25519GenerateKey()
+	h.SigningKey = priv
+	r := testRouter(h)
+
+	// Create an agent in SQLite
+	agent := &store.AgentEntry{
+		AgentID:   "agent-rename-1",
+		Name:      "Old Name",
+		Role:      "member",
+		Status:    "active",
+		CreatedAt: time.Now().UTC(),
+	}
+	require.NoError(t, s.CreateAgent(context.Background(), agent))
+
+	// Rename via PATCH
+	body, _ := json.Marshal(map[string]string{"name": "New Display Name"})
+	req := httptest.NewRequest("PATCH", "/v1/dashboard/network/agents/agent-rename-1", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "New Display Name", resp["name"])
+	assert.Nil(t, resp["on_chain_warning"], "should not have warning on success")
+	assert.True(t, broadcastSeen, "CometBFT broadcast should have been called")
+
+	// Verify SQLite was also updated
+	updated, err := s.GetAgent(context.Background(), "agent-rename-1")
+	require.NoError(t, err)
+	assert.Equal(t, "New Display Name", updated.Name)
+}
+
+func TestHandleUpdateAgent_SyncBroadcast_Failure_ReturnsWarning(t *testing.T) {
+	// When CometBFT broadcast fails, the response should include on_chain_warning
+	// but the SQLite update should still succeed (best-effort).
+	cometMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Simulate CometBFT being down
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer cometMock.Close()
+
+	h, s := newTestHandler(t)
+	h.CometBFTRPC = cometMock.URL
+	_, priv, _ := ed25519GenerateKey()
+	h.SigningKey = priv
+	r := testRouter(h)
+
+	agent := &store.AgentEntry{
+		AgentID:   "agent-rename-2",
+		Name:      "Old Name",
+		Role:      "member",
+		Status:    "active",
+		CreatedAt: time.Now().UTC(),
+	}
+	require.NoError(t, s.CreateAgent(context.Background(), agent))
+
+	body, _ := json.Marshal(map[string]string{"name": "Renamed Agent"})
+	req := httptest.NewRequest("PATCH", "/v1/dashboard/network/agents/agent-rename-2", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "Renamed Agent", resp["name"])
+	assert.NotNil(t, resp["on_chain_warning"], "should have warning when broadcast fails")
+
+	// SQLite should still have the new name
+	updated, err := s.GetAgent(context.Background(), "agent-rename-2")
+	require.NoError(t, err)
+	assert.Equal(t, "Renamed Agent", updated.Name)
+}
+
+func TestHandleUpdateAgent_NoCometBFT_NoWarning(t *testing.T) {
+	// When CometBFT is not configured, no broadcast happens and no warning.
+	h, s := newTestHandler(t)
+	// CometBFTRPC and SigningKey left empty
+	r := testRouter(h)
+
+	agent := &store.AgentEntry{
+		AgentID:   "agent-rename-3",
+		Name:      "Old Name",
+		Role:      "member",
+		Status:    "active",
+		CreatedAt: time.Now().UTC(),
+	}
+	require.NoError(t, s.CreateAgent(context.Background(), agent))
+
+	body, _ := json.Marshal(map[string]string{"name": "Renamed Without Consensus"})
+	req := httptest.NewRequest("PATCH", "/v1/dashboard/network/agents/agent-rename-3", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "Renamed Without Consensus", resp["name"])
+	assert.Nil(t, resp["on_chain_warning"])
+}
+
+// ed25519GenerateKey is a test helper wrapping crypto/ed25519.GenerateKey.
+func ed25519GenerateKey() (ed25519PublicKey, ed25519PrivateKey, error) {
+	return ed25519pkg.GenerateKey(nil)
+}
+
+// Type aliases to avoid import naming conflicts with sha256.
+type ed25519PublicKey = ed25519pkg.PublicKey
+type ed25519PrivateKey = ed25519pkg.PrivateKey

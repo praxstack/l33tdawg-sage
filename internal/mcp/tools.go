@@ -695,8 +695,8 @@ func (s *Server) toolInception(ctx context.Context, _ map[string]any) (any, erro
 	// Auto-register on chain if not already registered.
 	// This ensures the agent has an on-chain identity so RBAC domain access works.
 	// The register endpoint is idempotent — if already registered, it returns the
-	// existing record without modifying the name/role/bio. Only first-time registration
-	// uses the auto-generated name.
+	// current display name (reconciling on-chain with SQLite if they diverged).
+	// Only first-time registration uses the auto-generated name.
 	var registrationStatus string
 	regBody, _ := json.Marshal(map[string]any{
 		"name":     s.autoAgentName(),

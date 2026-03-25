@@ -56,13 +56,19 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What's New in v5.0.12
+## What’s New in v5.1.0
 
-- **MCP Identity Fix** — `sage-gui mcp` and `sage-gui mcp install --token` now respect `SAGE_IDENTITY_PATH` environment variable as the **highest priority** (exactly matching the SDK’s `AgentIdentity.default()`).  
-- Auto-creates directories + keypair if missing. Added clear INFO logs. 100% backward compatible.  
+- **Agent Rename Fix** — Renaming an agent in the dashboard (Network → Agents → Edit) now reliably syncs to on-chain state. Previously, the CometBFT broadcast was fire-and-forget and could silently fail, causing `sage_inception` to return the old auto-generated name.
+- **Self-Healing Name Reconciliation** — If on-chain and display names ever diverge, `sage_inception` automatically detects and repairs the mismatch on the agent’s next boot.
+- **Broadcast Error Feedback** — The dashboard now warns you if an on-chain sync fails instead of silently swallowing the error.
+
+### v5.0.12
+
+- **MCP Identity Fix** — `sage-gui mcp` and `sage-gui mcp install --token` now respect `SAGE_IDENTITY_PATH` environment variable as the **highest priority** (exactly matching the SDK’s `AgentIdentity.default()`).
+- Auto-creates directories + keypair if missing. Added clear INFO logs. 100% backward compatible.
 - Enables clean multi-agent setups (e.g. multiple Claude Code instances in tmux). Closes the identity collision issue.
 
-## What's New in v5.0.11
+## What’s New in v5.0.11
 
 - **Docker Fix** — Container no longer stuck in restart loop. Default entrypoint changed from MCP stdio mode to `serve` (persistent REST API + dashboard). MCP stdio still available via `docker run -i ghcr.io/l33tdawg/sage mcp`. Fixes #14.
 
@@ -175,7 +181,7 @@ docker pull ghcr.io/l33tdawg/sage:latest
 docker run -p 8080:8080 -v ~/.sage:/root/.sage ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:5.0.11`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:5.1.0`.
 
 ### Upgrading from an older version?
 

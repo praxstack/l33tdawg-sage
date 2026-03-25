@@ -4864,9 +4864,15 @@ function NetworkPage() {
     }, [editRole, editClearance, editDomainAccess, loadAgents]);
 
     const handleOverviewSave = useCallback(async (agentId) => {
-        await updateAgent(agentId, { name: editName, boot_bio: editBio });
-        loadAgents();
-        setEditing(false);
+        try {
+            const res = await updateAgent(agentId, { name: editName, boot_bio: editBio });
+            if (res.error) { showToast(res.error, 'error'); return; }
+            if (res.on_chain_warning) {
+                showToast('Saved locally but on-chain sync failed — will auto-heal on next agent boot. (' + res.on_chain_warning + ')', 'warning', 8000);
+            }
+            loadAgents();
+            setEditing(false);
+        } catch (e) { showToast('Failed to save agent: ' + e.message, 'error'); }
     }, [editName, editBio, loadAgents]);
 
     const handleRemove = useCallback(async (agent) => {

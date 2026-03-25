@@ -899,3 +899,129 @@ func TestQueryMemory_ReadAccess_NoDomainAllowed(t *testing.T) {
 	// Empty domain tag skips the check entirely
 	assert.Equal(t, http.StatusOK, rr.Code)
 }
+
+// --- Agent Register Name Reconciliation Tests --------------------------------
+
+func TestAgentRegister_Idempotent_ReturnsOnChainName(t *testing.T) {
+	// When SQLite and on-chain names match, register returns the on-chain name.
+	cometMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"result": map[string]interface{}{"code": 0, "hash": "TX123"},
+		})
+	}))
+	defer cometMock.Close()
+
+	srv, _, _ := newTestServer(t, cometMock.URL)
+
+	// Set up BadgerStore with an on-chain agent
+	badgerDir := t.TempDir()
+	bs, err := store.NewBadgerStore(badgerDir)
+	require.NoError(t, err)
+	defer bs.CloseBadger()
+	srv.badgerStore = bs
+
+	// Set up mock AgentStore (SQLite) with the same name
+	agentSt := newMockAgentStore()
+	srv.agentStore = agentSt
+
+	// Create a signed request
+	body := []byte(`{"name":"claude-code/sage","boot_bio":"test","provider":"claude-code"}`)
+	req, agentID := signedRequest(t, http.MethodPost, "/v1/agent/register", body)
+
+	// Pre-register the agent on-chain with the same name
+	require.NoError(t, bs.RegisterAgent(agentID, "claude-code/sage", "member", "test", "claude-code", "", 1))
+	agentSt.agents[agentID] = &store.AgentEntry{AgentID: agentID, Name: "claude-code/sage"}
+
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	assert.Equal(t, "already_registered", resp["status"])
+	assert.Equal(t, "claude-code/sage", resp["name"])
+}
+
+func TestAgentRegister_Reconcile_SQLiteNameDiffersFromOnChain(t *testing.T) {
+	// When SQLite has a different name (admin renamed via GUI), the register
+	// endpoint should return the SQLite name and fire a reconciliation tx.
+	var broadcastCalled bool
+	cometMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		broadcastCalled = true
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"result": map[string]interface{}{"code": 0, "hash": "RECONCILE_TX"},
+		})
+	}))
+	defer cometMock.Close()
+
+	srv, _, _ := newTestServer(t, cometMock.URL)
+
+	badgerDir := t.TempDir()
+	bs, err := store.NewBadgerStore(badgerDir)
+	require.NoError(t, err)
+	defer bs.CloseBadger()
+	srv.badgerStore = bs
+
+	agentSt := newMockAgentStore()
+	srv.agentStore = agentSt
+
+	body := []byte(`{"name":"claude-code/sage","boot_bio":"test","provider":"claude-code"}`)
+	req, agentID := signedRequest(t, http.MethodPost, "/v1/agent/register", body)
+
+	// On-chain: old auto-generated name
+	require.NoError(t, bs.RegisterAgent(agentID, "claude-code/sage", "member", "test", "claude-code", "", 1))
+	// SQLite: admin renamed to "My Coding Assistant"
+	agentSt.agents[agentID] = &store.AgentEntry{AgentID: agentID, Name: "My Coding Assistant"}
+
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	assert.Equal(t, "already_registered", resp["status"])
+	// Should return the SQLite (display) name, not the on-chain name
+	assert.Equal(t, "My Coding Assistant", resp["name"])
+	// Should have broadcast a reconciliation tx
+	assert.True(t, broadcastCalled, "expected reconciliation tx to be broadcast")
+}
+
+func TestAgentRegister_Reconcile_NoAgentStore(t *testing.T) {
+	// When agentStore is nil (no SQLite), reconciliation is skipped gracefully.
+	cometMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"result": map[string]interface{}{"code": 0, "hash": "TX123"},
+		})
+	}))
+	defer cometMock.Close()
+
+	srv, _, _ := newTestServer(t, cometMock.URL)
+
+	badgerDir := t.TempDir()
+	bs, err := store.NewBadgerStore(badgerDir)
+	require.NoError(t, err)
+	defer bs.CloseBadger()
+	srv.badgerStore = bs
+	srv.agentStore = nil // Explicitly nil
+
+	body := []byte(`{"name":"claude-code/sage","boot_bio":"test","provider":"claude-code"}`)
+	req, agentID := signedRequest(t, http.MethodPost, "/v1/agent/register", body)
+
+	require.NoError(t, bs.RegisterAgent(agentID, "old-auto-name", "member", "test", "claude-code", "", 1))
+
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	assert.Equal(t, "already_registered", resp["status"])
+	// Without agentStore, falls back to the on-chain name
+	assert.Equal(t, "old-auto-name", resp["name"])
+}
