@@ -54,12 +54,13 @@ func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 			}
 
 			writeJSON(w, http.StatusOK, map[string]any{
-				"agent_id":      existing.AgentID,
-				"name":          name,
-				"role":          existing.Role,
-				"provider":      existing.Provider,
-				"status":        "already_registered",
-				"registered_at": existing.RegisteredAt,
+				"agent_id":        existing.AgentID,
+				"name":            name,
+				"registered_name": existing.RegisteredName,
+				"role":            existing.Role,
+				"provider":        existing.Provider,
+				"status":          "already_registered",
+				"registered_at":   existing.RegisteredAt,
 			})
 			return
 		}
@@ -104,12 +105,13 @@ func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"agent_id": agentID,
-		"name":     req.Name,
-		"role":     req.Role,
-		"provider": req.Provider,
-		"status":   "registered",
-		"tx_hash":  txHash,
+		"agent_id":        agentID,
+		"name":            req.Name,
+		"registered_name": req.Name,
+		"role":            req.Role,
+		"provider":        req.Provider,
+		"status":          "registered",
+		"tx_hash":         txHash,
 	})
 }
 

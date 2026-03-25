@@ -443,6 +443,7 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 		"ALTER TABLE network_agents ADD COLUMN provider TEXT DEFAULT ''",
 		"ALTER TABLE network_agents ADD COLUMN claim_token TEXT DEFAULT ''",
 		"ALTER TABLE network_agents ADD COLUMN claim_expires_at TEXT",
+		"ALTER TABLE network_agents ADD COLUMN registered_name TEXT DEFAULT ''",
 	}
 	for _, m := range agentMigrations {
 		_, _ = s.conn.ExecContext(ctx, m) // Ignore "duplicate column" errors for idempotency
@@ -1810,7 +1811,7 @@ func (s *SQLiteStore) UpdateDeptMemberClearance(ctx context.Context, orgID, dept
 
 func (s *SQLiteStore) ListAgents(ctx context.Context) ([]*AgentEntry, error) {
 	rows, err := s.conn.QueryContext(ctx, `
-		SELECT a.agent_id, a.name, a.role, COALESCE(a.avatar,''), COALESCE(a.boot_bio,''),
+		SELECT a.agent_id, a.name, COALESCE(a.registered_name,''), a.role, COALESCE(a.avatar,''), COALESCE(a.boot_bio,''),
 			COALESCE(a.validator_pubkey,''), COALESCE(a.node_id,''), COALESCE(a.p2p_address,''),
 			a.status, a.clearance, COALESCE(a.org_id,''), COALESCE(a.dept_id,''),
 			COALESCE(a.domain_access,''), COALESCE(a.bundle_path,''),
@@ -1830,7 +1831,7 @@ func (s *SQLiteStore) ListAgents(ctx context.Context) ([]*AgentEntry, error) {
 	for rows.Next() {
 		a := &AgentEntry{}
 		var firstSeen, lastSeen, createdAt, removedAt, claimExpiry *string
-		if scanErr := rows.Scan(&a.AgentID, &a.Name, &a.Role, &a.Avatar, &a.BootBio,
+		if scanErr := rows.Scan(&a.AgentID, &a.Name, &a.RegisteredName, &a.Role, &a.Avatar, &a.BootBio,
 			&a.ValidatorPubkey, &a.NodeID, &a.P2PAddress, &a.Status, &a.Clearance,
 			&a.OrgID, &a.DeptID, &a.DomainAccess, &a.BundlePath,
 			&firstSeen, &lastSeen, &createdAt, &removedAt,
@@ -1845,6 +1846,9 @@ func (s *SQLiteStore) ListAgents(ctx context.Context) ([]*AgentEntry, error) {
 		}
 		a.RemovedAt = parseTimePtr(removedAt)
 		a.ClaimExpiresAt = parseTimePtr(claimExpiry)
+		if a.RegisteredName == "" {
+			a.RegisteredName = a.Name // backfill for pre-existing agents
+		}
 		agents = append(agents, a)
 	}
 	return agents, nil
@@ -1854,7 +1858,7 @@ func (s *SQLiteStore) GetAgent(ctx context.Context, agentID string) (*AgentEntry
 	a := &AgentEntry{}
 	var firstSeen, lastSeen, createdAt, removedAt, claimExpiry *string
 	err := s.conn.QueryRowContext(ctx, `
-		SELECT a.agent_id, a.name, a.role, COALESCE(a.avatar,''), COALESCE(a.boot_bio,''),
+		SELECT a.agent_id, a.name, COALESCE(a.registered_name,''), a.role, COALESCE(a.avatar,''), COALESCE(a.boot_bio,''),
 			COALESCE(a.validator_pubkey,''), COALESCE(a.node_id,''), COALESCE(a.p2p_address,''),
 			a.status, a.clearance, COALESCE(a.org_id,''), COALESCE(a.dept_id,''),
 			COALESCE(a.domain_access,''), COALESCE(a.bundle_path,''),
@@ -1863,7 +1867,7 @@ func (s *SQLiteStore) GetAgent(ctx context.Context, agentID string) (*AgentEntry
 			COALESCE((SELECT COUNT(*) FROM memories WHERE submitting_agent = a.agent_id), 0),
 			COALESCE(a.claim_token, ''), a.claim_expires_at
 		FROM network_agents a WHERE a.agent_id = ?`, agentID).Scan(
-		&a.AgentID, &a.Name, &a.Role, &a.Avatar, &a.BootBio,
+		&a.AgentID, &a.Name, &a.RegisteredName, &a.Role, &a.Avatar, &a.BootBio,
 		&a.ValidatorPubkey, &a.NodeID, &a.P2PAddress, &a.Status, &a.Clearance,
 		&a.OrgID, &a.DeptID, &a.DomainAccess, &a.BundlePath,
 		&firstSeen, &lastSeen, &createdAt, &removedAt,
@@ -1879,6 +1883,9 @@ func (s *SQLiteStore) GetAgent(ctx context.Context, agentID string) (*AgentEntry
 	}
 	a.RemovedAt = parseTimePtr(removedAt)
 	a.ClaimExpiresAt = parseTimePtr(claimExpiry)
+	if a.RegisteredName == "" {
+		a.RegisteredName = a.Name // backfill for pre-existing agents
+	}
 	return a, nil
 }
 
@@ -1886,7 +1893,7 @@ func (s *SQLiteStore) GetAgentByName(ctx context.Context, name string) (*AgentEn
 	a := &AgentEntry{}
 	var firstSeen, lastSeen, createdAt, removedAt, claimExpiry *string
 	err := s.conn.QueryRowContext(ctx, `
-		SELECT a.agent_id, a.name, a.role, COALESCE(a.avatar,''), COALESCE(a.boot_bio,''),
+		SELECT a.agent_id, a.name, COALESCE(a.registered_name,''), a.role, COALESCE(a.avatar,''), COALESCE(a.boot_bio,''),
 			COALESCE(a.validator_pubkey,''), COALESCE(a.node_id,''), COALESCE(a.p2p_address,''),
 			a.status, a.clearance, COALESCE(a.org_id,''), COALESCE(a.dept_id,''),
 			COALESCE(a.domain_access,''), COALESCE(a.bundle_path,''),
@@ -1895,7 +1902,7 @@ func (s *SQLiteStore) GetAgentByName(ctx context.Context, name string) (*AgentEn
 			COALESCE((SELECT COUNT(*) FROM memories WHERE submitting_agent = a.agent_id), 0),
 			COALESCE(a.claim_token, ''), a.claim_expires_at
 		FROM network_agents a WHERE a.name = ? AND a.status != 'removed'`, name).Scan(
-		&a.AgentID, &a.Name, &a.Role, &a.Avatar, &a.BootBio,
+		&a.AgentID, &a.Name, &a.RegisteredName, &a.Role, &a.Avatar, &a.BootBio,
 		&a.ValidatorPubkey, &a.NodeID, &a.P2PAddress, &a.Status, &a.Clearance,
 		&a.OrgID, &a.DeptID, &a.DomainAccess, &a.BundlePath,
 		&firstSeen, &lastSeen, &createdAt, &removedAt,
@@ -1911,6 +1918,9 @@ func (s *SQLiteStore) GetAgentByName(ctx context.Context, name string) (*AgentEn
 	}
 	a.RemovedAt = parseTimePtr(removedAt)
 	a.ClaimExpiresAt = parseTimePtr(claimExpiry)
+	if a.RegisteredName == "" {
+		a.RegisteredName = a.Name // backfill for pre-existing agents
+	}
 	return a, nil
 }
 
@@ -1930,12 +1940,12 @@ func (s *SQLiteStore) CreateAgent(ctx context.Context, agent *AgentEntry) error 
 		createdAt = agent.CreatedAt.Format(time.RFC3339Nano)
 	}
 	_, err := s.conn.ExecContext(ctx, `
-		INSERT INTO network_agents (agent_id, name, role, avatar, boot_bio, validator_pubkey,
+		INSERT INTO network_agents (agent_id, name, registered_name, role, avatar, boot_bio, validator_pubkey,
 			node_id, p2p_address, status, clearance, org_id, dept_id, domain_access, bundle_path,
 			on_chain_height, visible_agents, provider, claim_token, claim_expires_at,
 			first_seen, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		agent.AgentID, agent.Name, agent.Role, agent.Avatar, agent.BootBio, agent.ValidatorPubkey,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		agent.AgentID, agent.Name, agent.RegisteredName, agent.Role, agent.Avatar, agent.BootBio, agent.ValidatorPubkey,
 		agent.NodeID, agent.P2PAddress, agent.Status, agent.Clearance, agent.OrgID, agent.DeptID,
 		agent.DomainAccess, agent.BundlePath, agent.OnChainHeight, agent.VisibleAgents, agent.Provider,
 		agent.ClaimToken, claimExpiry, firstSeen, createdAt)

@@ -94,7 +94,7 @@ func runMCP() error {
 	projectName := ""
 
 	if keyPath != "" {
-		keyPath = expandTilde(keyPath)
+		keyPath = filepath.Clean(expandTilde(keyPath))
 		fmt.Fprintf(os.Stderr, "INFO: Identity resolved via env var: %s\n", keyPath)
 	} else {
 		projectDir, err := os.Getwd()
@@ -113,9 +113,10 @@ func runMCP() error {
 		}
 	}
 
-	// Ensure parent directory exists (critical for SAGE_IDENTITY_PATH auto-generation)
+	// Ensure parent directory exists (critical for SAGE_IDENTITY_PATH auto-generation).
+	// keyPath is already sanitized via filepath.Clean above.
 	if dir := filepath.Dir(keyPath); dir != "." && dir != home {
-		if err := os.MkdirAll(dir, 0700); err != nil {
+		if err := os.MkdirAll(dir, 0700); err != nil { //nolint:gosec // keyPath cleaned via filepath.Clean
 			return fmt.Errorf("create identity dir: %w", err)
 		}
 	}
@@ -256,11 +257,11 @@ func runMCPInstall() error {
 	// SAGE_IDENTITY_PATH when set (e.g.for multi-agent tmux setups).
 	keyPath := os.Getenv("SAGE_IDENTITY_PATH")
 	if keyPath != "" {
-		keyPath = expandTilde(keyPath)
+		keyPath = filepath.Clean(expandTilde(keyPath))
 		fmt.Fprintf(os.Stderr, "INFO: Install using SAGE_IDENTITY_PATH: %s\n", keyPath)
 		// Ensure parent dir exists (auto-generation + claiming)
 		if dir := filepath.Dir(keyPath); dir != "." {
-			if mkErr := os.MkdirAll(dir, 0700); mkErr != nil {
+			if mkErr := os.MkdirAll(dir, 0700); mkErr != nil { //nolint:gosec // dir is cleaned above
 				return fmt.Errorf("create identity dir: %w", mkErr)
 			}
 		}
@@ -555,6 +556,7 @@ func sagePermissionsConfig(settings map[string]any) map[string]any {
 // claimAgentIdentity calls the SAGE dashboard to claim a pre-configured agent
 // identity using a one-time claim token. Downloads the agent key and saves it.
 func claimAgentIdentity(sageHome, token, keyPath string) error {
+	keyPath = filepath.Clean(keyPath)
 	baseURL := os.Getenv("SAGE_API_URL")
 	if baseURL == "" {
 		baseURL = "http://localhost:8080"

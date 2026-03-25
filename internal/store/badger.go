@@ -52,18 +52,19 @@ func agentOnChainKey(agentID string) []byte {
 
 // OnChainAgent represents an agent's on-chain state in BadgerDB.
 type OnChainAgent struct {
-	AgentID       string `json:"agent_id"`
-	Name          string `json:"name"`
-	Role          string `json:"role"`
-	BootBio       string `json:"boot_bio,omitempty"`
-	Provider      string `json:"provider,omitempty"`
-	P2PAddress    string `json:"p2p_address,omitempty"`
-	Clearance     uint8  `json:"clearance"`
-	DomainAccess  string `json:"domain_access,omitempty"`
-	VisibleAgents string `json:"visible_agents,omitempty"`
-	OrgID         string `json:"org_id,omitempty"`
-	DeptID        string `json:"dept_id,omitempty"`
-	RegisteredAt  int64  `json:"registered_at"` // Block height
+	AgentID        string `json:"agent_id"`
+	Name           string `json:"name"`                      // Mutable display name (GUI-editable)
+	RegisteredName string `json:"registered_name,omitempty"` // Immutable name assigned at registration
+	Role           string `json:"role"`
+	BootBio        string `json:"boot_bio,omitempty"`
+	Provider       string `json:"provider,omitempty"`
+	P2PAddress     string `json:"p2p_address,omitempty"`
+	Clearance      uint8  `json:"clearance"`
+	DomainAccess   string `json:"domain_access,omitempty"`
+	VisibleAgents  string `json:"visible_agents,omitempty"`
+	OrgID          string `json:"org_id,omitempty"`
+	DeptID         string `json:"dept_id,omitempty"`
+	RegisteredAt   int64  `json:"registered_at"` // Block height
 }
 
 // MemoryHashEntry represents the on-chain state for a memory.
@@ -1520,14 +1521,15 @@ func (s *BadgerStore) AppendAccessLog(height int64, agentID, domain, action stri
 // RegisterAgent stores a new agent's on-chain identity.
 func (s *BadgerStore) RegisterAgent(agentID, name, role, bio, provider, p2pAddress string, height int64) error {
 	agent := &OnChainAgent{
-		AgentID:      agentID,
-		Name:         name,
-		Role:         role,
-		BootBio:      bio,
-		Provider:     provider,
-		P2PAddress:   p2pAddress,
-		Clearance:    1, // Default: INTERNAL
-		RegisteredAt: height,
+		AgentID:        agentID,
+		Name:           name,
+		RegisteredName: name, // Immutable — preserved forever as the original identity
+		Role:           role,
+		BootBio:        bio,
+		Provider:       provider,
+		P2PAddress:     p2pAddress,
+		Clearance:      1, // Default: INTERNAL
+		RegisteredAt:   height,
 	}
 	data, err := json.Marshal(agent)
 	if err != nil {
@@ -1553,6 +1555,10 @@ func (s *BadgerStore) GetRegisteredAgent(agentID string) (*OnChainAgent, error) 
 	if err != nil {
 		return nil, err
 	}
+	// Backfill for agents registered before RegisteredName was introduced
+	if agent.RegisteredName == "" {
+		agent.RegisteredName = agent.Name
+	}
 	return &agent, nil
 }
 
@@ -1565,7 +1571,8 @@ func (s *BadgerStore) IsAgentRegistered(agentID string) bool {
 	return err == nil
 }
 
-// UpdateAgentMeta updates an agent's name and bio on-chain.
+// UpdateAgentMeta updates an agent's mutable display name and bio on-chain.
+// RegisteredName is the permanent on-chain identity and is NEVER modified here.
 func (s *BadgerStore) UpdateAgentMeta(agentID, name, bio string) error {
 	return s.db.Update(func(txn *badger.Txn) error {
 		item, err := txn.Get(agentOnChainKey(agentID))
@@ -1578,6 +1585,11 @@ func (s *BadgerStore) UpdateAgentMeta(agentID, name, bio string) error {
 		}); valErr != nil {
 			return valErr
 		}
+		// Backfill RegisteredName for agents created before v5.2.0
+		if agent.RegisteredName == "" {
+			agent.RegisteredName = agent.Name
+		}
+		// Only update mutable fields — RegisteredName is immutable and must not be touched.
 		agent.Name = name
 		agent.BootBio = bio
 		data, err := json.Marshal(&agent)
@@ -1585,6 +1597,13 @@ func (s *BadgerStore) UpdateAgentMeta(agentID, name, bio string) error {
 			return err
 		}
 		return txn.Set(agentOnChainKey(agentID), data)
+	})
+}
+
+// SetRawForTest writes a raw key-value pair to BadgerDB. Test-only.
+func (s *BadgerStore) SetRawForTest(key, value []byte) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(key, value)
 	})
 }
 

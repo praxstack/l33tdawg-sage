@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 	"time"
@@ -167,6 +168,7 @@ func TestProcessAgentRegister(t *testing.T) {
 	agent, err := app.badgerStore.GetRegisteredAgent(ak.id)
 	require.NoError(t, err)
 	assert.Equal(t, "test-agent", agent.Name)
+	assert.Equal(t, "test-agent", agent.RegisteredName, "RegisteredName should match initial Name at registration")
 	assert.Equal(t, "member", agent.Role)
 	assert.Equal(t, "I am a test agent", agent.BootBio)
 	assert.Equal(t, "claude-code", agent.Provider)
@@ -178,6 +180,7 @@ func TestProcessAgentRegister(t *testing.T) {
 	entry, ok := app.pendingWrites[0].data.(*store.AgentEntry)
 	require.True(t, ok)
 	assert.Equal(t, ak.id, entry.AgentID)
+	assert.Equal(t, "test-agent", entry.RegisteredName, "pending write should include RegisteredName")
 	assert.Equal(t, "active", entry.Status)
 }
 
@@ -199,9 +202,13 @@ func TestProcessAgentRegisterIdempotent(t *testing.T) {
 	agent, err := app.badgerStore.GetRegisteredAgent(ak.id)
 	require.NoError(t, err)
 	assert.Equal(t, "agent-v1", agent.Name, "idempotent register should keep original name")
+	assert.Equal(t, "agent-v1", agent.RegisteredName, "RegisteredName must survive idempotent re-registration")
 
 	// 2 pending writes: first registration + idempotent backfill write for on_chain_height
 	assert.Len(t, app.pendingWrites, 2, "idempotent register should buffer backfill write for on_chain_height")
+	idempotentEntry, ok := app.pendingWrites[1].data.(*store.AgentEntry)
+	require.True(t, ok)
+	assert.Equal(t, "agent-v1", idempotentEntry.RegisteredName, "idempotent pending write should carry original RegisteredName")
 }
 
 // ---------------------------------------------------------------------------
@@ -225,6 +232,7 @@ func TestProcessAgentUpdate(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "updated-name", agent.Name)
 	assert.Equal(t, "updated bio", agent.BootBio)
+	assert.Equal(t, "original-name", agent.RegisteredName, "RegisteredName must be immutable across updates")
 
 	// Verify pending write was buffered (1 from register + 1 from update)
 	require.Len(t, app.pendingWrites, 2)
@@ -254,6 +262,76 @@ func TestProcessAgentUpdateSelfOnly(t *testing.T) {
 	agent, err := app.badgerStore.GetRegisteredAgent(owner.id)
 	require.NoError(t, err)
 	assert.Equal(t, "owner-agent", agent.Name, "name should remain unchanged")
+}
+
+func TestRegisteredNameImmutableAcrossMultipleUpdates(t *testing.T) {
+	app := setupTestApp(t)
+	ak := newAgentKey(t)
+
+	// Register with initial name
+	registerAgent(t, app, ak, "original-identity", "member")
+
+	// Verify RegisteredName is set at registration
+	agent, err := app.badgerStore.GetRegisteredAgent(ak.id)
+	require.NoError(t, err)
+	assert.Equal(t, "original-identity", agent.RegisteredName)
+	assert.Equal(t, "original-identity", agent.Name)
+
+	// First rename
+	ptx1 := makeAgentUpdateTx(t, ak, ak.id, "display-name-v1", "bio v1")
+	r1 := app.processAgentUpdate(ptx1, 2, time.Now())
+	assert.Equal(t, uint32(0), r1.Code)
+
+	agent, err = app.badgerStore.GetRegisteredAgent(ak.id)
+	require.NoError(t, err)
+	assert.Equal(t, "display-name-v1", agent.Name, "Name should be updated")
+	assert.Equal(t, "original-identity", agent.RegisteredName, "RegisteredName must remain immutable after first rename")
+
+	// Second rename
+	ptx2 := makeAgentUpdateTx(t, ak, ak.id, "display-name-v2", "bio v2")
+	r2 := app.processAgentUpdate(ptx2, 3, time.Now())
+	assert.Equal(t, uint32(0), r2.Code)
+
+	agent, err = app.badgerStore.GetRegisteredAgent(ak.id)
+	require.NoError(t, err)
+	assert.Equal(t, "display-name-v2", agent.Name, "Name should be updated again")
+	assert.Equal(t, "original-identity", agent.RegisteredName, "RegisteredName must remain immutable after second rename")
+}
+
+func TestRegisteredNameBackfillForLegacyAgent(t *testing.T) {
+	app := setupTestApp(t)
+	ak := newAgentKey(t)
+
+	// Simulate a legacy agent by writing directly to BadgerDB without RegisteredName.
+	// We use the raw badger transaction to bypass RegisterAgent (which sets RegisteredName).
+	legacyData, err := json.Marshal(map[string]any{
+		"agent_id":      ak.id,
+		"name":          "legacy-agent",
+		"role":          "member",
+		"clearance":     1,
+		"registered_at": 1,
+		// Note: no "registered_name" field — simulating pre-v5.2.0 data
+	})
+	require.NoError(t, err)
+	err = app.badgerStore.SetRawForTest([]byte("agent:"+ak.id), legacyData)
+	require.NoError(t, err)
+
+	// GetRegisteredAgent should backfill RegisteredName from Name
+	agent, err := app.badgerStore.GetRegisteredAgent(ak.id)
+	require.NoError(t, err)
+	assert.Equal(t, "legacy-agent", agent.RegisteredName, "backfill should set RegisteredName = Name for legacy agents")
+
+	// Now update the display name
+	ptx := makeAgentUpdateTx(t, ak, ak.id, "renamed-agent", "new bio")
+	r := app.processAgentUpdate(ptx, 2, time.Now())
+	assert.Equal(t, uint32(0), r.Code)
+
+	// RegisteredName should still be the backfilled value (from the Name at read time,
+	// then preserved through the read-modify-write in UpdateAgentMeta)
+	agent, err = app.badgerStore.GetRegisteredAgent(ak.id)
+	require.NoError(t, err)
+	assert.Equal(t, "renamed-agent", agent.Name)
+	assert.Equal(t, "legacy-agent", agent.RegisteredName, "backfilled RegisteredName must survive updates")
 }
 
 // ---------------------------------------------------------------------------

@@ -704,9 +704,10 @@ func (s *Server) toolInception(ctx context.Context, _ map[string]any) (any, erro
 		"provider": s.provider,
 	})
 	var regResp struct {
-		AgentID string `json:"agent_id"`
-		Name    string `json:"name"`
-		Status  string `json:"status"`
+		AgentID        string `json:"agent_id"`
+		Name           string `json:"name"`
+		RegisteredName string `json:"registered_name"`
+		Status         string `json:"status"`
 	}
 	if err := s.doSignedJSON(ctx, "POST", "/v1/agent/register", regBody, &regResp); err != nil {
 		registrationStatus = "failed: " + err.Error()
@@ -807,14 +808,15 @@ func (s *Server) toolInception(ctx context.Context, _ map[string]any) (any, erro
 		}
 
 		resp := map[string]any{
-			"status":       "awakened",
-			"message":      "Welcome back. Your institutional memory is online.",
-			"agent_id":     s.agentID,
-			"agent_name":   regResp.Name,
-			"stats":        statsResp,
-			"registration": registrationStatus,
-			"instructions": instructions,
-			"memory_mode":  memMode,
+			"status":          "awakened",
+			"message":         "Welcome back. Your institutional memory is online.",
+			"agent_id":        s.agentID,
+			"agent_name":      regResp.Name,
+			"registered_name": regResp.RegisteredName,
+			"stats":           statsResp,
+			"registration":    registrationStatus,
+			"instructions":    instructions,
+			"memory_mode":     memMode,
 		}
 
 		// Warn agent if the Synaptic Ledger is locked — reads will return placeholders,
@@ -912,6 +914,7 @@ func (s *Server) toolInception(ctx context.Context, _ map[string]any) (any, erro
 		"memories_seeded": seeded,
 		"agent_id":        s.agentID,
 		"agent_name":      regResp.Name,
+		"registered_name": regResp.RegisteredName,
 		"registration":    registrationStatus,
 		"message":         inceptionMsg,
 	}, nil
@@ -1128,20 +1131,22 @@ func (s *Server) toolRegister(ctx context.Context, params map[string]any) (any, 
 		"provider": s.provider,
 	})
 	var resp struct {
-		AgentID      string `json:"agent_id"`
-		Name         string `json:"name"`
-		Status       string `json:"status"`
-		RegisteredAt int64  `json:"registered_at"`
+		AgentID        string `json:"agent_id"`
+		Name           string `json:"name"`
+		RegisteredName string `json:"registered_name"`
+		Status         string `json:"status"`
+		RegisteredAt   int64  `json:"registered_at"`
 	}
 	if err := s.doSignedJSON(ctx, "POST", "/v1/agent/register", body, &resp); err != nil {
 		return nil, fmt.Errorf("register agent: %w", err)
 	}
 
 	return map[string]any{
-		"agent_id":      resp.AgentID,
-		"name":          resp.Name,
-		"status":        resp.Status,
-		"registered_at": resp.RegisteredAt,
+		"agent_id":        resp.AgentID,
+		"name":            resp.Name,
+		"registered_name": resp.RegisteredName,
+		"status":          resp.Status,
+		"registered_at":   resp.RegisteredAt,
 	}, nil
 }
 

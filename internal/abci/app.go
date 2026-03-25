@@ -1508,16 +1508,17 @@ func (app *SageApp) processAgentRegister(parsedTx *tx.ParsedTx, height int64, bl
 			app.pendingWrites = append(app.pendingWrites, pendingWrite{
 				writeType: "agent_register",
 				data: &store.AgentEntry{
-					AgentID:       regAgentID,
-					Name:          existing.Name,
-					Role:          existing.Role,
-					BootBio:       existing.BootBio,
-					Provider:      existing.Provider,
-					P2PAddress:    existing.P2PAddress,
-					Status:        "active",
-					Clearance:     int(existing.Clearance),
-					OnChainHeight: existing.RegisteredAt,
-					CreatedAt:     blockTime,
+					AgentID:        regAgentID,
+					Name:           existing.Name,
+					RegisteredName: existing.RegisteredName,
+					Role:           existing.Role,
+					BootBio:        existing.BootBio,
+					Provider:       existing.Provider,
+					P2PAddress:     existing.P2PAddress,
+					Status:         "active",
+					Clearance:      int(existing.Clearance),
+					OnChainHeight:  existing.RegisteredAt,
+					CreatedAt:      blockTime,
 				},
 			})
 			return &abcitypes.ExecTxResult{Code: 0, Data: []byte(regAgentID), Log: fmt.Sprintf("agent %s already registered", regAgentID[:16])}
@@ -1537,16 +1538,17 @@ func (app *SageApp) processAgentRegister(parsedTx *tx.ParsedTx, height int64, bl
 	app.pendingWrites = append(app.pendingWrites, pendingWrite{
 		writeType: "agent_register",
 		data: &store.AgentEntry{
-			AgentID:       regAgentID,
-			Name:          reg.Name,
-			Role:          role,
-			BootBio:       reg.BootBio,
-			Provider:      reg.Provider,
-			P2PAddress:    reg.P2PAddress,
-			Status:        "active",
-			Clearance:     1, // Default: INTERNAL
-			OnChainHeight: height,
-			CreatedAt:     blockTime,
+			AgentID:        regAgentID,
+			Name:           reg.Name,
+			RegisteredName: reg.Name, // Immutable — original identity preserved forever
+			Role:           role,
+			BootBio:        reg.BootBio,
+			Provider:       reg.Provider,
+			P2PAddress:     reg.P2PAddress,
+			Status:         "active",
+			Clearance:      1, // Default: INTERNAL
+			OnChainHeight:  height,
+			CreatedAt:      blockTime,
 		},
 	})
 
@@ -1582,7 +1584,8 @@ func (app *SageApp) processAgentUpdate(parsedTx *tx.ParsedTx, height int64, bloc
 		return &abcitypes.ExecTxResult{Code: 64, Log: fmt.Sprintf("agent %s not registered", targetID[:16])}
 	}
 
-	// Update on-chain state
+	// Update mutable display name + bio only.
+	// RegisteredName is the permanent on-chain identity and is NEVER modified by AgentUpdate.
 	if updErr := app.badgerStore.UpdateAgentMeta(targetID, upd.Name, upd.BootBio); updErr != nil {
 		return &abcitypes.ExecTxResult{Code: 65, Log: fmt.Sprintf("badger write error: %v", updErr)}
 	}

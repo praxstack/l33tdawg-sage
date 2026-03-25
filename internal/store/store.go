@@ -287,6 +287,7 @@ type DeptMemberEntry struct {
 type AgentEntry struct {
 	AgentID         string     `json:"agent_id"`
 	Name            string     `json:"name"`
+	RegisteredName  string     `json:"registered_name,omitempty"` // Immutable name from initial registration
 	Role            string     `json:"role"`
 	Avatar          string     `json:"avatar,omitempty"`
 	BootBio         string     `json:"boot_bio,omitempty"`

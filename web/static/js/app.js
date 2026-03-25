@@ -4995,6 +4995,10 @@ function NetworkPage() {
                                                 ${editing ? html`<input class="wizard-input" value=${editName} onInput=${e => setEditName(e.target.value)} onClick=${e => e.stopPropagation()} />`
                                                     : html`<span class="agent-info-value">${agent.name}</span>`}
                                             </div>
+                                            ${agent.registered_name && agent.registered_name !== agent.name ? html`<div class="agent-info-block">
+                                                <span class="agent-info-label">Registered As</span>
+                                                <span class="agent-info-value" style="color:var(--text-dim);font-style:italic;" title="Immutable on-chain identity from initial registration">${agent.registered_name}</span>
+                                            </div>` : ''}
                                             <div class="agent-info-block">
                                                 <span class="agent-info-label">Status</span>
                                                 <span class="agent-info-value" style="display:flex;align-items:center;gap:6px;">
