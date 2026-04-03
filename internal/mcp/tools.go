@@ -22,13 +22,13 @@ func (s *Server) registerTools() map[string]Tool {
 	tools := map[string]Tool{
 		"sage_remember": {
 			Name:        "sage_remember",
-			Description: "Store a memory in SAGE. Use this to save facts, observations, or inferences that should persist across conversations.",
+			Description: "Store a memory in SAGE. Use this to save facts, observations, or inferences that should persist across conversations. IMPORTANT: Use type='fact' (confidence 0.95) for durable knowledge that should persist long-term and be visible across all agents — infrastructure details (IPs, hostnames, SSH commands, URLs, ports), architecture decisions, verified configurations, credentials paths, and server specs. Use type='observation' for ephemeral session context. Facts survive confidence decay and cross provider boundaries; observations do not.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"content":    map[string]any{"type": "string", "description": "The memory content to store"},
 					"domain":     map[string]any{"type": "string", "description": "Domain tag (e.g. general, security, code)", "default": "general"},
-					"type":       map[string]any{"type": "string", "enum": []string{"fact", "observation", "inference", "task"}, "default": "observation"},
+					"type":       map[string]any{"type": "string", "enum": []string{"fact", "observation", "inference", "task"}, "default": "observation", "description": "Memory type. fact (0.95+): verified durable knowledge — IPs, hostnames, architecture decisions, configs, infrastructure. observation (0.80): session-level context — what happened, what was discussed. inference (0.60): hypotheses and conclusions. task: actionable items."},
 					"confidence": map[string]any{"type": "number", "description": "Confidence score 0-1", "default": 0.8},
 					"tags":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "User-defined labels for this memory (e.g. 'important', 'project-x')"},
 				},
