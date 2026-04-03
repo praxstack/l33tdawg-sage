@@ -56,7 +56,20 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What’s New in v5.1.0
+## What’s New in v5.2.2
+
+- **Memory Type Guidance** — `sage_remember` tool description now guides agents to use the `fact` type for infrastructure details (IPs, hostnames, SSH commands) instead of `observation`, preventing decay across provider boundaries.
+
+### v5.2.1
+
+- **Self-Updater Fix** — Dashboard "Update" button no longer fails. GitHub changed release asset downloads to route through `release-assets.githubusercontent.com`, which wasn’t in the redirect allowlist.
+
+### v5.2.0
+
+- **Immutable RegisteredName** — Agents now have a permanent `RegisteredName` (set once at registration) alongside the mutable display `Name`. Renames preserve the original on-chain identity for audit trail and provenance. Dashboard shows "Registered As" when names differ.
+- **Lazy Backfill** — Pre-v5.2.0 agents automatically get their `RegisteredName` populated from their current name on first access.
+
+### v5.1.0
 
 - **Agent Rename Fix** — Renaming an agent in the dashboard (Network → Agents → Edit) now reliably syncs to on-chain state. Previously, the CometBFT broadcast was fire-and-forget and could silently fail, causing `sage_inception` to return the old auto-generated name.
 - **Self-Healing Name Reconciliation** — If on-chain and display names ever diverge, `sage_inception` automatically detects and repairs the mismatch on the agent’s next boot.
