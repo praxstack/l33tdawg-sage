@@ -85,7 +85,7 @@ jobs:
           for i in $(seq 1 60); do
             ALL_UP=true
             for port in 8080 8081 8082 8083; do
-              if ! curl -sf "http://localhost:${port}/healthz" > /dev/null 2>&1; then
+              if ! curl -sf "http://localhost:${port}/health" > /dev/null 2>&1; then
                 ALL_UP=false
                 break
               fi
