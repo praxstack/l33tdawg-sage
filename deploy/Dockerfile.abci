@@ -24,7 +24,8 @@ RUN apk add --no-cache ca-certificates \
 
 WORKDIR /app
 COPY --from=builder /app/amid ./amid
-RUN chown -R sage:sage /app
+RUN chown -R sage:sage /app \
+    && mkdir -p /data && chown sage:sage /data
 
 USER sage
 
