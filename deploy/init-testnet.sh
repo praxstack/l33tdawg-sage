@@ -15,7 +15,9 @@ mkdir -p "${GENESIS_DIR}"
 # Check if cometbft binary is available
 if ! command -v cometbft &> /dev/null; then
     echo "cometbft binary not found. Building from Docker..."
-    docker run --rm --user "$(id -u):$(id -g)" -v "${GENESIS_DIR}:/genesis" \
+    HOST_UID=$(id -u)
+    HOST_GID=$(id -g)
+    docker run --rm -v "${GENESIS_DIR}:/genesis" \
         golang:1.22-alpine sh -c '
         apk add --no-cache git make >/dev/null 2>&1
         git clone --branch v0.38.15 --depth 1 https://github.com/cometbft/cometbft.git /tmp/cometbft 2>/dev/null
@@ -25,6 +27,7 @@ if ! command -v cometbft &> /dev/null; then
             --o /genesis \
             --hostname-prefix cometbft \
             --populate-persistent-peers
+        chown -R '"${HOST_UID}:${HOST_GID}"' /genesis
     '
 else
     cometbft testnet \
