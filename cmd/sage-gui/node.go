@@ -152,8 +152,8 @@ func runServe() error {
 	defer func() { _ = app.Close() }()
 
 	// Backfill FTS5 index for existing memories (only when vault is not active).
-	if err := sqliteStore.BackfillFTS(ctx); err != nil {
-		logger.Warn().Err(err).Msg("FTS5 backfill failed — text search may be incomplete")
+	if ftsErr := sqliteStore.BackfillFTS(ctx); ftsErr != nil {
+		logger.Warn().Err(ftsErr).Msg("FTS5 backfill failed — text search may be incomplete")
 	}
 
 	// Create embedding provider
