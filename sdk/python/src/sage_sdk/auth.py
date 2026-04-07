@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import secrets
 import struct
 import time
 from pathlib import Path
@@ -81,16 +82,21 @@ class AgentIdentity:
     ) -> dict[str, str]:
         """Sign an HTTP request and return auth headers.
 
-        The signed message is: SHA256(method + " " + path + "\\n" + body) || big-endian int64 timestamp.
-        This binds signatures to specific endpoints, preventing cross-endpoint replay.
+        The signed message is: SHA256(method + " " + path + "\\n" + body)
+        || big-endian int64 timestamp || nonce (8 random bytes).
+
+        The nonce prevents signature collisions when multiple requests share
+        the same method+path+body within the same second.
         """
         ts = timestamp or int(time.time())
+        nonce = secrets.token_bytes(8)
         canonical = method.encode() + b" " + path.encode() + b"\n" + (body or b"")
         body_hash = hashlib.sha256(canonical).digest()
-        message = body_hash + struct.pack(">q", ts)
+        message = body_hash + struct.pack(">q", ts) + nonce
         signed = self._signing_key.sign(message)
         return {
             "X-Agent-ID": self.agent_id,
             "X-Signature": signed.signature.hex(),
             "X-Timestamp": str(ts),
+            "X-Nonce": nonce.hex(),
         }

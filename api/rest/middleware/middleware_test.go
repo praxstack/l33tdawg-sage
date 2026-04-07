@@ -153,6 +153,73 @@ func TestAuthMiddleware_SkipPaths(t *testing.T) {
 	}
 }
 
+func TestAuthMiddleware_WithNonce(t *testing.T) {
+	handler := Ed25519AuthMiddleware(okHandler)
+
+	pub, priv, err := auth.GenerateKeypair()
+	require.NoError(t, err)
+
+	body := []byte(`{"domain_tag":"crypto","status":"committed","limit":50}`)
+	ts := time.Now().Unix()
+	nonce := []byte("random01") // 8 bytes
+	sig := auth.SignRequestWithNonce(priv, http.MethodGet, "/v1/memory/list", body, ts, nonce)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/memory/list", bytes.NewReader(body))
+	req.Header.Set("X-Agent-ID", auth.PublicKeyToAgentID(pub))
+	req.Header.Set("X-Signature", hex.EncodeToString(sig))
+	req.Header.Set("X-Timestamp", fmt.Sprintf("%d", ts))
+	req.Header.Set("X-Nonce", hex.EncodeToString(nonce))
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+}
+
+func TestAuthMiddleware_NoncePreventsReplay(t *testing.T) {
+	// Reset the replay cache for this test.
+	sigCache = &replayCache{
+		seen:    make(map[string]time.Time),
+		maxSize: 10000,
+	}
+
+	handler := Ed25519AuthMiddleware(okHandler)
+
+	pub, priv, err := auth.GenerateKeypair()
+	require.NoError(t, err)
+
+	body := []byte(`{"domain_tag":"crypto","status":"committed","limit":50}`)
+	ts := time.Now().Unix()
+
+	// Two requests with same body+timestamp but different nonces.
+	nonce1 := []byte("nonce001")
+	nonce2 := []byte("nonce002")
+	sig1 := auth.SignRequestWithNonce(priv, http.MethodGet, "/v1/memory/list", body, ts, nonce1)
+	sig2 := auth.SignRequestWithNonce(priv, http.MethodGet, "/v1/memory/list", body, ts, nonce2)
+
+	agentID := auth.PublicKeyToAgentID(pub)
+
+	// First request — should pass.
+	req1 := httptest.NewRequest(http.MethodGet, "/v1/memory/list", bytes.NewReader(body))
+	req1.Header.Set("X-Agent-ID", agentID)
+	req1.Header.Set("X-Signature", hex.EncodeToString(sig1))
+	req1.Header.Set("X-Timestamp", fmt.Sprintf("%d", ts))
+	req1.Header.Set("X-Nonce", hex.EncodeToString(nonce1))
+	rr1 := httptest.NewRecorder()
+	handler.ServeHTTP(rr1, req1)
+	assert.Equal(t, http.StatusOK, rr1.Code, "first request should pass")
+
+	// Second request (different nonce) — should also pass (not a replay).
+	req2 := httptest.NewRequest(http.MethodGet, "/v1/memory/list", bytes.NewReader(body))
+	req2.Header.Set("X-Agent-ID", agentID)
+	req2.Header.Set("X-Signature", hex.EncodeToString(sig2))
+	req2.Header.Set("X-Timestamp", fmt.Sprintf("%d", ts))
+	req2.Header.Set("X-Nonce", hex.EncodeToString(nonce2))
+	rr2 := httptest.NewRecorder()
+	handler.ServeHTTP(rr2, req2)
+	assert.Equal(t, http.StatusOK, rr2.Code, "second request with different nonce should pass")
+}
+
 func TestAuthMiddleware_EmptyBody(t *testing.T) {
 	handler := Ed25519AuthMiddleware(okHandler)
 	req, _ := signedRequest(t, http.MethodGet, "/v1/agent/me", nil)

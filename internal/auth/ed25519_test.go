@@ -93,6 +93,47 @@ func TestSignRequestEmptyBody(t *testing.T) {
 	assert.True(t, VerifyRequest(pub, "GET", "/v1/memory/query", []byte{}, ts, sig))
 }
 
+func TestSignRequestWithNonce(t *testing.T) {
+	pub, priv, err := GenerateKeypair()
+	require.NoError(t, err)
+
+	body := []byte(`{"domain_tag":"crypto","status":"committed","limit":50}`)
+	ts := time.Now().Unix()
+
+	// Two requests with same body+timestamp but different nonces → different signatures.
+	nonce1 := []byte("abcdefgh") // 8 bytes
+	nonce2 := []byte("12345678")
+
+	sig1 := SignRequestWithNonce(priv, "GET", "/v1/memory/list", body, ts, nonce1)
+	sig2 := SignRequestWithNonce(priv, "GET", "/v1/memory/list", body, ts, nonce2)
+
+	// Both should verify with their own nonce.
+	assert.True(t, VerifyRequestWithNonce(pub, "GET", "/v1/memory/list", body, ts, nonce1, sig1))
+	assert.True(t, VerifyRequestWithNonce(pub, "GET", "/v1/memory/list", body, ts, nonce2, sig2))
+
+	// But not with the other's nonce.
+	assert.False(t, VerifyRequestWithNonce(pub, "GET", "/v1/memory/list", body, ts, nonce2, sig1))
+	assert.False(t, VerifyRequestWithNonce(pub, "GET", "/v1/memory/list", body, ts, nonce1, sig2))
+
+	// Signatures must be different.
+	assert.NotEqual(t, sig1, sig2)
+}
+
+func TestNonceBackwardCompatibility(t *testing.T) {
+	pub, priv, err := GenerateKeypair()
+	require.NoError(t, err)
+
+	body := []byte(`{"content":"test"}`)
+	ts := time.Now().Unix()
+
+	// Legacy signature (no nonce) should still verify via legacy path.
+	legacySig := SignRequest(priv, "POST", "/v1/memory/submit", body, ts)
+	assert.True(t, VerifyRequest(pub, "POST", "/v1/memory/submit", body, ts, legacySig))
+
+	// Legacy signature must NOT verify when a nonce is expected.
+	assert.False(t, VerifyRequestWithNonce(pub, "POST", "/v1/memory/submit", body, ts, []byte("nonce123"), legacySig))
+}
+
 func TestVerifyRequestCrossEndpointReplay(t *testing.T) {
 	pub, priv, err := GenerateKeypair()
 	require.NoError(t, err)

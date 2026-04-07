@@ -152,13 +152,33 @@ func Ed25519AuthMiddleware(next http.Handler) http.Handler {
 			r.Body = io.NopCloser(bytes.NewReader(body))
 		}
 
-		// Verify Ed25519 signature (covers method + path + query + body + timestamp).
+		// Verify Ed25519 signature (covers method + path + query + body + timestamp + optional nonce).
 		// Use RequestURI to include query params — the MCP client signs the full path.
 		reqPath := r.URL.Path
 		if r.URL.RawQuery != "" {
 			reqPath = r.URL.Path + "?" + r.URL.RawQuery
 		}
-		if !auth.VerifyRequest(pubKey, r.Method, reqPath, body, tsUnix, sig) {
+
+		// Support optional X-Nonce header for sub-second replay protection.
+		// If present, include nonce in signature verification; otherwise fall back
+		// to legacy (nonce-less) verification for backward compatibility.
+		var nonce []byte
+		if nonceHex := strings.TrimSpace(r.Header.Get("X-Nonce")); nonceHex != "" {
+			nonce, err = hex.DecodeString(nonceHex)
+			if err != nil {
+				writeProblem(w, http.StatusUnauthorized, "Invalid nonce encoding",
+					"X-Nonce must be hex-encoded.")
+				return
+			}
+		}
+
+		var sigValid bool
+		if len(nonce) > 0 {
+			sigValid = auth.VerifyRequestWithNonce(pubKey, r.Method, reqPath, body, tsUnix, nonce, sig)
+		} else {
+			sigValid = auth.VerifyRequest(pubKey, r.Method, reqPath, body, tsUnix, sig)
+		}
+		if !sigValid {
 			writeProblem(w, http.StatusUnauthorized, "Invalid signature",
 				"Ed25519 signature verification failed.")
 			return
