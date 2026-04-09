@@ -576,7 +576,8 @@ laddr = ""
 
 [consensus]
 timeout_commit = "1s"
-create_empty_blocks = false
+create_empty_blocks = true
+create_empty_blocks_after = "5s"
 
 [mempool]
 size = 1000
