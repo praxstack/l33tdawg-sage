@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -64,7 +63,7 @@ func (e *Engine) Propose(proposerID string, op ProposalOp, targetID string, targ
 	if err != nil {
 		return "", fmt.Errorf("check cooldown: %w", err)
 	}
-	if cooldownData != nil && len(cooldownData) == 8 {
+	if len(cooldownData) == 8 {
 		cooldownHeight := int64(binary.BigEndian.Uint64(cooldownData))
 		if height < cooldownHeight+CooldownBlocks {
 			return "", fmt.Errorf("proposer %s is in cooldown until block %d (current: %d)", proposerID, cooldownHeight+CooldownBlocks, height)
@@ -272,11 +271,11 @@ func (e *Engine) ProcessBlock(height int64) (*ProposalState, error) {
 	// Check expiry.
 	if height > proposal.ExpiryHeight {
 		proposal.Status = StatusExpired
-		if err := e.saveProposal(proposal); err != nil {
-			return nil, err
+		if saveErr := e.saveProposal(proposal); saveErr != nil {
+			return nil, saveErr
 		}
-		if err := e.store.DeleteState("gov:active"); err != nil {
-			return nil, fmt.Errorf("clear active: %w", err)
+		if clearErr := e.store.DeleteState("gov:active"); clearErr != nil {
+			return nil, fmt.Errorf("clear active: %w", clearErr)
 		}
 		return nil, nil
 	}
@@ -396,15 +395,4 @@ func (e *Engine) saveProposal(proposal *ProposalState) error {
 		return fmt.Errorf("marshal proposal: %w", err)
 	}
 	return e.store.SetState("gov:proposal:"+proposal.ProposalID, data)
-}
-
-// sortedKeys returns the keys of a map sorted lexicographically.
-// Used to ensure deterministic iteration over maps.
-func sortedKeys(m map[string]string) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }

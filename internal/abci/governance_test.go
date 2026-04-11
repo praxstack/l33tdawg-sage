@@ -1,6 +1,7 @@
 package abci
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/hex"
 	"testing"
@@ -123,7 +124,7 @@ func makeGovCancelTx(t *testing.T, ak agentKey, proposalID string, nonce uint64)
 // finalizeBlock is a helper that calls FinalizeBlock with the given txs at a specific height.
 func finalizeBlock(t *testing.T, app *SageApp, height int64, txs ...[]byte) *abcitypes.ResponseFinalizeBlock {
 	t.Helper()
-	resp, err := app.FinalizeBlock(nil, &abcitypes.RequestFinalizeBlock{
+	resp, err := app.FinalizeBlock(context.TODO(), &abcitypes.RequestFinalizeBlock{
 		Txs:    txs,
 		Height: height,
 		Time:   time.Now(),
