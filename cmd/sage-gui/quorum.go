@@ -119,11 +119,11 @@ func runQuorumInit() error {
 	if err != nil {
 		return fmt.Errorf("generate node TLS cert: %w", err)
 	}
-	if err := tlsca.WriteCert(filepath.Join(certsDir, tlsca.NodeCertFile), nodeCert); err != nil {
-		return fmt.Errorf("write node cert: %w", err)
+	if writeErr := tlsca.WriteCert(filepath.Join(certsDir, tlsca.NodeCertFile), nodeCert); writeErr != nil {
+		return fmt.Errorf("write node cert: %w", writeErr)
 	}
-	if err := tlsca.WriteKey(filepath.Join(certsDir, tlsca.NodeKeyFile), nodeKey2); err != nil {
-		return fmt.Errorf("write node key: %w", err)
+	if writeErr := tlsca.WriteKey(filepath.Join(certsDir, tlsca.NodeKeyFile), nodeKey2); writeErr != nil {
+		return fmt.Errorf("write node key: %w", writeErr)
 	}
 
 	// Encode CA cert and key for manifest (shared with peers during LAN setup).

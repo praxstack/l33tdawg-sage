@@ -121,8 +121,8 @@ func TestWriteReadCert(t *testing.T) {
 	}
 
 	path := filepath.Join(dir, "test.crt")
-	if err := WriteCert(path, cert); err != nil {
-		t.Fatalf("WriteCert: %v", err)
+	if wErr := WriteCert(path, cert); wErr != nil {
+		t.Fatalf("WriteCert: %v", wErr)
 	}
 
 	loaded, err := ReadCert(path)
@@ -142,8 +142,8 @@ func TestWriteReadKey(t *testing.T) {
 	}
 
 	path := filepath.Join(dir, "test.key")
-	if err := WriteKey(path, key); err != nil {
-		t.Fatalf("WriteKey: %v", err)
+	if wErr := WriteKey(path, key); wErr != nil {
+		t.Fatalf("WriteKey: %v", wErr)
 	}
 
 	// Verify file permissions are restrictive.
@@ -225,19 +225,19 @@ func TestServerTLSConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateCA: %v", err)
 	}
-	if err := WriteCert(filepath.Join(dir, CACertFile), caCert); err != nil {
-		t.Fatalf("write CA cert: %v", err)
+	if wErr := WriteCert(filepath.Join(dir, CACertFile), caCert); wErr != nil {
+		t.Fatalf("write CA cert: %v", wErr)
 	}
 
 	nodeCert, nodeKey, err := GenerateNodeCert(caCert, caKey, "node1", []string{"192.168.1.10"})
 	if err != nil {
 		t.Fatalf("GenerateNodeCert: %v", err)
 	}
-	if err := WriteCert(filepath.Join(dir, NodeCertFile), nodeCert); err != nil {
-		t.Fatalf("write node cert: %v", err)
+	if wErr := WriteCert(filepath.Join(dir, NodeCertFile), nodeCert); wErr != nil {
+		t.Fatalf("write node cert: %v", wErr)
 	}
-	if err := WriteKey(filepath.Join(dir, NodeKeyFile), nodeKey); err != nil {
-		t.Fatalf("write node key: %v", err)
+	if wErr := WriteKey(filepath.Join(dir, NodeKeyFile), nodeKey); wErr != nil {
+		t.Fatalf("write node key: %v", wErr)
 	}
 
 	cfg, err := ServerTLSConfig(dir)
@@ -262,8 +262,8 @@ func TestClientTLSConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateCA: %v", err)
 	}
-	if err := WriteCert(filepath.Join(dir, CACertFile), caCert); err != nil {
-		t.Fatalf("write CA cert: %v", err)
+	if wErr := WriteCert(filepath.Join(dir, CACertFile), caCert); wErr != nil {
+		t.Fatalf("write CA cert: %v", wErr)
 	}
 
 	cfg, err := ClientTLSConfig(dir)
