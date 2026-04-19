@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -399,7 +400,7 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 	txHash, err := s.broadcastTxCommit(encoded)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to broadcast submit tx")
-		writeProblem(w, http.StatusInternalServerError, "Broadcast error", "Failed to broadcast transaction to CometBFT.")
+		writeProblem(w, broadcastErrorStatus(err), "Broadcast error", err.Error())
 		return
 	}
 
@@ -956,6 +957,19 @@ func (s *Server) broadcastTxCommit(txBytes []byte) (string, error) {
 	}
 
 	return result.Result.Hash, nil
+}
+
+// broadcastErrorStatus maps a broadcastTx/broadcastTxCommit error into an HTTP status.
+// Access-denied rejections surface as 403 so clients don't mistake policy failures for infra failures.
+func broadcastErrorStatus(err error) int {
+	if err == nil {
+		return http.StatusInternalServerError
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "access denied") || strings.Contains(msg, "not in the validator set") {
+		return http.StatusForbidden
+	}
+	return http.StatusInternalServerError
 }
 
 func memoryTypeToTx(mt string) tx.MemoryType {

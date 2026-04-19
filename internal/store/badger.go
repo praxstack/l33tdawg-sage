@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -11,6 +12,10 @@ import (
 
 	badger "github.com/dgraph-io/badger/v4"
 )
+
+// ErrDomainAlreadyRegistered is returned by RegisterDomain when the domain
+// already has a non-empty owner. Use TransferDomain for authorized ownership changes.
+var ErrDomainAlreadyRegistered = errors.New("domain already registered")
 
 // BadgerStore manages on-chain state in BadgerDB.
 type BadgerStore struct {
@@ -535,10 +540,39 @@ func (s *BadgerStore) HasAccess(domain, agentID string, requiredLevel uint8, blo
 
 // RegisterDomain registers a domain in BadgerDB.
 // Encoding: ownerID (length-prefixed) + parentDomain (length-prefixed) + height (8 bytes).
+// RegisterDomain atomically registers a domain with the given owner.
+// Returns ErrDomainAlreadyRegistered if the domain is already registered with a non-empty owner.
+// This is intentionally check-and-set to prevent ownership "capture" when a prior registration
+// record is present but unexpectedly read as empty during the submit path.
 func (s *BadgerStore) RegisterDomain(name, ownerID, parentDomain string, height int64) error {
 	return s.db.Update(func(txn *badger.Txn) error {
+		if item, getErr := txn.Get(domainKey(name)); getErr == nil {
+			var existingOwner string
+			if err := item.Value(func(val []byte) error {
+				owner, _, decErr := decodeString(val, 0)
+				existingOwner = owner
+				return decErr
+			}); err == nil && existingOwner != "" {
+				return ErrDomainAlreadyRegistered
+			}
+		} else if !errors.Is(getErr, badger.ErrKeyNotFound) {
+			return getErr
+		}
 		val := make([]byte, 4+len(ownerID)+4+len(parentDomain)+8)
 		offset := encodeString(val, 0, ownerID)
+		offset = encodeString(val, offset, parentDomain)
+		binary.BigEndian.PutUint64(val[offset:offset+8], uint64(height)) // #nosec G115 -- block height is always non-negative
+		return txn.Set(domainKey(name), val)
+	})
+}
+
+// TransferDomain forcibly reassigns domain ownership. Callers are responsible for
+// authorization (e.g. current owner consent or admin role). Do NOT call from
+// transaction processing paths that should use RegisterDomain's check-and-set semantics.
+func (s *BadgerStore) TransferDomain(name, newOwnerID, parentDomain string, height int64) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		val := make([]byte, 4+len(newOwnerID)+4+len(parentDomain)+8)
+		offset := encodeString(val, 0, newOwnerID)
 		offset = encodeString(val, offset, parentDomain)
 		binary.BigEndian.PutUint64(val[offset:offset+8], uint64(height)) // #nosec G115 -- block height is always non-negative
 		return txn.Set(domainKey(name), val)

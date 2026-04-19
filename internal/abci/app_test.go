@@ -544,3 +544,105 @@ func TestProcessAgentSetPermission_WildcardVisibleAgents_PersistsThroughStack(t 
 	require.NotNil(t, permWrite, "expected agent_permission pending write for target")
 	assert.Equal(t, "*", permWrite.VisibleAgents, "pending SQLite write must carry the wildcard")
 }
+
+// ---------------------------------------------------------------------------
+// Memory submit domain-ownership regression tests (v6.5.5)
+// ---------------------------------------------------------------------------
+
+// makeMemorySubmitTx builds a signed ParsedTx for TxTypeMemorySubmit in the given domain.
+func makeMemorySubmitTx(t *testing.T, ak agentKey, domain, content string) *tx.ParsedTx {
+	t.Helper()
+	body := []byte(content + domain)
+	pubKey, sig, bodyHash, ts := signAgentProof(t, ak, body)
+	contentHash := sha256.Sum256([]byte(content))
+	return &tx.ParsedTx{
+		Type: tx.TxTypeMemorySubmit,
+		MemorySubmit: &tx.MemorySubmit{
+			ContentHash:     contentHash[:],
+			MemoryType:      tx.MemoryTypeObservation,
+			DomainTag:       domain,
+			ConfidenceScore: 0.8,
+			Content:         content,
+		},
+		AgentPubKey:    pubKey,
+		AgentSig:       sig,
+		AgentBodyHash:  bodyHash,
+		AgentTimestamp: ts,
+	}
+}
+
+// TestSharedDomainsBypassOwnershipCheck verifies that reserved "catch-all" domains
+// (general, self) accept writes from any authenticated agent and are never auto-registered.
+// Regression for the v6.5.5 bug where ownership of these domains could be "captured" by the
+// first writer, locking out everyone else with "access denied" disguised as a CometBFT broadcast error.
+func TestSharedDomainsBypassOwnershipCheck(t *testing.T) {
+	app := setupTestApp(t)
+
+	alice := newAgentKey(t)
+	bob := newAgentKey(t)
+
+	for _, domain := range []string{"general", "self"} {
+		domain := domain
+		t.Run(domain, func(t *testing.T) {
+			// Alice writes first — must NOT auto-register the domain with her as owner.
+			r1 := app.processMemorySubmit(makeMemorySubmitTx(t, alice, domain, "alice-1"), 1, time.Now())
+			require.Equal(t, uint32(0), r1.Code, "alice write to %q should succeed: %s", domain, r1.Log)
+
+			_, err := app.badgerStore.GetDomainOwner(domain)
+			assert.Error(t, err, "%q must remain unregistered — shared domains have no owner", domain)
+
+			// Bob writes second — would be locked out if alice had captured ownership.
+			r2 := app.processMemorySubmit(makeMemorySubmitTx(t, bob, domain, "bob-1"), 2, time.Now())
+			assert.Equal(t, uint32(0), r2.Code, "bob write to %q must also succeed: %s", domain, r2.Log)
+		})
+	}
+}
+
+// TestRegisterDomainRefusesOverwrite verifies that RegisterDomain is check-and-set —
+// a second call with a different owner returns ErrDomainAlreadyRegistered instead of
+// silently swapping ownership. Regression for the v6.5.5 ownership-theft bug.
+func TestRegisterDomainRefusesOverwrite(t *testing.T) {
+	bs := setupTestBadger(t)
+
+	const alice = "alice-agent-id"
+	const bob = "bob-agent-id"
+	const domain = "my-owned-domain"
+
+	require.NoError(t, bs.RegisterDomain(domain, alice, "", 1))
+
+	err := bs.RegisterDomain(domain, bob, "", 2)
+	require.Error(t, err)
+	require.ErrorIs(t, err, store.ErrDomainAlreadyRegistered)
+
+	owner, err := bs.GetDomainOwner(domain)
+	require.NoError(t, err)
+	assert.Equal(t, alice, owner, "original owner must survive attempted overwrite")
+
+	// Explicit transfer path remains available for admin ops.
+	require.NoError(t, bs.TransferDomain(domain, bob, "", 3))
+	owner, err = bs.GetDomainOwner(domain)
+	require.NoError(t, err)
+	assert.Equal(t, bob, owner, "TransferDomain must replace ownership unconditionally")
+}
+
+// TestOwnedDomainStillGatesWrites verifies that NON-shared domains continue to enforce
+// ownership + access grants (i.e. the v6.5.5 fix didn't accidentally disable RBAC on owned domains).
+func TestOwnedDomainStillGatesWrites(t *testing.T) {
+	app := setupTestApp(t)
+
+	owner := newAgentKey(t)
+	stranger := newAgentKey(t)
+
+	// Owner creates + claims a private domain (not in the shared set).
+	require.NoError(t, app.badgerStore.RegisterDomain("private-data", owner.id, "", 1))
+	require.NoError(t, app.badgerStore.SetAccessGrant("private-data", owner.id, 2, 0, owner.id))
+
+	// Owner can write.
+	r1 := app.processMemorySubmit(makeMemorySubmitTx(t, owner, "private-data", "owner-write"), 1, time.Now())
+	require.Equal(t, uint32(0), r1.Code, "owner should be able to write: %s", r1.Log)
+
+	// Stranger is rejected with the real reason (code 11, "access denied").
+	r2 := app.processMemorySubmit(makeMemorySubmitTx(t, stranger, "private-data", "stranger-write"), 2, time.Now())
+	require.Equal(t, uint32(11), r2.Code, "stranger must be rejected")
+	assert.Contains(t, r2.Log, "access denied")
+}

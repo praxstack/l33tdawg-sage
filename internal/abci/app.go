@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -633,6 +634,18 @@ func voteDecisionToString(d tx.VoteDecision) string {
 	}
 }
 
+// sharedDomains are reserved catch-all domain names writable by any authenticated agent.
+// They are never auto-registered with an owner, so ownership cannot be "captured" on first write.
+var sharedDomains = map[string]struct{}{
+	"general": {},
+	"self":    {},
+}
+
+func isSharedDomain(name string) bool {
+	_, ok := sharedDomains[name]
+	return ok
+}
+
 func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blockTime time.Time) *abcitypes.ExecTxResult {
 	submit := parsedTx.MemorySubmit
 	if submit == nil {
@@ -647,7 +660,9 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 
 	// Domain write-access check: if the domain has a registered owner, verify the agent has write access.
 	// If the domain doesn't exist, auto-register it with the submitting agent as owner.
-	if submit.DomainTag != "" {
+	// Reserved shared domains (e.g. "general", "self") are writable by any authenticated agent
+	// and are never auto-registered — they are conventional catch-alls without single-owner semantics.
+	if submit.DomainTag != "" && !isSharedDomain(submit.DomainTag) {
 		domainOwner, domainErr := app.badgerStore.GetDomainOwner(submit.DomainTag)
 		if domainErr == nil && domainOwner != "" {
 			// Domain is owned — check write access (level 2).
@@ -656,9 +671,13 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 				return &abcitypes.ExecTxResult{Code: 11, Log: fmt.Sprintf("access denied: agent %s has no write access to domain %s", agentID[:16], submit.DomainTag)}
 			}
 		} else {
-			// Domain not registered — auto-register with submitting agent as owner
+			// Domain not registered — auto-register with submitting agent as owner.
+			// RegisterDomain is check-and-set: it returns ErrDomainAlreadyRegistered on race,
+			// in which case we fall through to the access check on the next tx.
 			if regErr := app.badgerStore.RegisterDomain(submit.DomainTag, agentID, "", height); regErr != nil {
-				app.logger.Error().Err(regErr).Str("domain", submit.DomainTag).Msg("failed to auto-register domain")
+				if !errors.Is(regErr, store.ErrDomainAlreadyRegistered) {
+					app.logger.Error().Err(regErr).Str("domain", submit.DomainTag).Msg("failed to auto-register domain")
+				}
 			} else {
 				app.logger.Info().Str("domain", submit.DomainTag).Str("owner", agentID[:16]).Msg("auto-registered domain on first memory submit")
 				// Also grant the owner full access
