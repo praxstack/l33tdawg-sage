@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -645,4 +646,141 @@ func TestOwnedDomainStillGatesWrites(t *testing.T) {
 	r2 := app.processMemorySubmit(makeMemorySubmitTx(t, stranger, "private-data", "stranger-write"), 2, time.Now())
 	require.Equal(t, uint32(11), r2.Code, "stranger must be rejected")
 	assert.Contains(t, r2.Log, "access denied")
+}
+
+// ---------------------------------------------------------------------------
+// Commit flush / SQLITE_BUSY regression tests (silent-data-loss fix)
+// ---------------------------------------------------------------------------
+
+// busyInjectingStore wraps an OffchainStore and fails RunInTx with a
+// SQLITE_BUSY error either for the first `failuresRemaining` calls (then
+// delegates to the wrapped store) or forever when `alwaysFail` is true.
+type busyInjectingStore struct {
+	store.OffchainStore
+	failuresRemaining int
+	alwaysFail        bool
+	attempts          int
+}
+
+func (s *busyInjectingStore) RunInTx(ctx context.Context, fn func(tx store.OffchainStore) error) error {
+	s.attempts++
+	if s.alwaysFail || s.failuresRemaining > 0 {
+		s.failuresRemaining--
+		return errors.New("database is locked (5) (SQLITE_BUSY)")
+	}
+	return s.OffchainStore.RunInTx(ctx, fn)
+}
+
+// TestCommitRetriesOnSQLITE_BUSYAndEventuallyFlushes exercises the happy
+// recovery path: the offchain store rejects the first few RunInTx calls
+// with SQLITE_BUSY, and Commit must keep retrying until the store accepts
+// the batch rather than silently dropping writes.
+func TestCommitRetriesOnSQLITE_BUSYAndEventuallyFlushes(t *testing.T) {
+	bs := setupTestBadger(t)
+	dbPath := filepath.Join(t.TempDir(), "busy-retry.db")
+	inner, err := store.NewSQLiteStore(context.Background(), dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { inner.Close() })
+
+	busy := &busyInjectingStore{OffchainStore: inner, failuresRemaining: 3}
+	logger := zerolog.Nop()
+	app, err := NewSageAppWithStores(bs, busy, logger)
+	require.NoError(t, err)
+	// Tight retry budget keeps the test fast — we only need >3 to pass.
+	app.flushMaxRetries = 6
+
+	agent := newAgentKey(t)
+	registerAgent(t, app, agent, "busy-retry-agent", "member")
+
+	// Drop anything FinalizeBlock-worthy into pendingWrites so the Commit
+	// path actually has something to flush. processMemorySubmit buffers the
+	// memory row + supplementary writes for us.
+	submit := app.processMemorySubmit(
+		makeMemorySubmitTx(t, agent, "general", "retry-recovers"),
+		2, time.Now(),
+	)
+	require.Equal(t, uint32(0), submit.Code, "submit should succeed: %s", submit.Log)
+	require.NotEmpty(t, app.pendingWrites, "submit must buffer a pending write")
+	app.state.Height = 2
+
+	_, err = app.Commit(context.Background(), nil)
+	require.NoError(t, err)
+
+	assert.GreaterOrEqual(t, busy.attempts, 4,
+		"Commit must have retried through the 3 injected BUSY failures before succeeding")
+	assert.Empty(t, app.pendingWrites, "pendingWrites must be cleared after successful flush")
+
+	// Offchain store now has the row — look it up via the inner SQLite
+	// directly. We don't care about the memory ID; the assertion is simply
+	// that the row landed, i.e. the flush happened exactly once it was
+	// allowed to.
+	mems, _, err := inner.ListMemories(context.Background(), store.ListOptions{DomainTag: "general", Limit: 10})
+	require.NoError(t, err)
+	assert.NotEmpty(t, mems, "offchain store must contain the submitted memory after retry")
+
+	// BadgerDB height advanced because the flush succeeded.
+	reloaded, err := LoadState(bs)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), reloaded.Height, "state must be saved after a successful flush")
+}
+
+// TestCommitPanicsOnExhaustedBUSYAndDoesNotAdvanceBadger is the core
+// silent-data-loss regression: if the offchain store cannot accept writes
+// after the full retry budget, Commit MUST panic rather than clear
+// pendingWrites. BadgerDB state must stay behind so CometBFT replays the
+// block on restart instead of skipping it.
+func TestCommitPanicsOnExhaustedBUSYAndDoesNotAdvanceBadger(t *testing.T) {
+	bs := setupTestBadger(t)
+	dbPath := filepath.Join(t.TempDir(), "busy-exhaust.db")
+	inner, err := store.NewSQLiteStore(context.Background(), dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { inner.Close() })
+
+	busy := &busyInjectingStore{OffchainStore: inner, alwaysFail: true}
+	logger := zerolog.Nop()
+	app, err := NewSageAppWithStores(bs, busy, logger)
+	require.NoError(t, err)
+	// 3 retries × ≤200ms backoff keeps the panic path under a second.
+	app.flushMaxRetries = 3
+
+	agent := newAgentKey(t)
+	registerAgent(t, app, agent, "busy-exhaust-agent", "member")
+
+	submit := app.processMemorySubmit(
+		makeMemorySubmitTx(t, agent, "general", "exhaustion-panics"),
+		2, time.Now(),
+	)
+	require.Equal(t, uint32(0), submit.Code)
+	require.NotEmpty(t, app.pendingWrites)
+	app.state.Height = 2
+
+	// Snapshot BadgerDB height before the Commit call so we can assert
+	// afterward that SaveState never ran.
+	before, err := LoadState(bs)
+	require.NoError(t, err)
+
+	func() {
+		defer func() {
+			r := recover()
+			require.NotNil(t, r, "Commit must panic when the flush exhausts its retry budget")
+			msg, ok := r.(string)
+			require.True(t, ok, "panic value should be a string: %T", r)
+			assert.Contains(t, msg, "offchain flush failed",
+				"panic message should identify the flush failure")
+			assert.Contains(t, msg, "replay this block",
+				"panic message should direct the operator to the replay recovery path")
+		}()
+		_, _ = app.Commit(context.Background(), nil)
+	}()
+
+	assert.Equal(t, app.flushMaxRetries, busy.attempts,
+		"every retry slot must be consumed before the panic fires")
+	assert.NotEmpty(t, app.pendingWrites,
+		"pendingWrites must NOT be cleared on exhaustion — this is the silent-drop bug guard")
+
+	after, err := LoadState(bs)
+	require.NoError(t, err)
+	assert.Equal(t, before.Height, after.Height,
+		"BadgerDB height must NOT advance when the offchain flush fails — "+
+			"advancing here is what produced the 6.5.5 on-chain/offchain divergence")
 }

@@ -118,15 +118,15 @@ type memoryReassignData struct {
 
 // govProposalData carries governance proposal data for offchain write in Commit.
 type govProposalData struct {
-	ProposalID  string
-	Operation   string
-	TargetID    string
-	TargetPower int64
-	ProposerID  string
-	Status      string
+	ProposalID    string
+	Operation     string
+	TargetID      string
+	TargetPower   int64
+	ProposerID    string
+	Status        string
 	CreatedHeight int64
 	ExpiryHeight  int64
-	Reason      string
+	Reason        string
 }
 
 // govVoteData carries governance vote data for offchain write in Commit.
@@ -139,8 +139,8 @@ type govVoteData struct {
 
 // govStatusUpdateData carries governance proposal status update for offchain write in Commit.
 type govStatusUpdateData struct {
-	ProposalID    string
-	Status        string
+	ProposalID     string
+	Status         string
 	ExecutedHeight int64
 }
 
@@ -246,10 +246,22 @@ type SageApp struct {
 	// Buffered writes — only flushed to PostgreSQL in Commit
 	pendingWrites []pendingWrite
 
+	// flushMaxRetries bounds the SQLITE_BUSY retry loop in Commit. Exposed
+	// as a field (not a const) so tests can shrink it to keep the panic
+	// path fast.
+	flushMaxRetries int
+
 	// SuppCache bridges REST→ABCI for off-chain data (embeddings, triples, provider).
 	// Nil in standalone ABCI mode without co-located REST API.
 	SuppCache *SupplementaryCache
 }
+
+// defaultFlushMaxRetries caps Commit's SQLITE_BUSY retry loop. At 30 tries
+// with backoff capped at 5s, sustained contention is tolerated for several
+// minutes before the node panics — long enough to absorb realistic lock
+// pile-ups, short enough that a broken store surfaces in operator-visible
+// time rather than hanging the consensus pipeline forever.
+const defaultFlushMaxRetries = 30
 
 // NewSageApp creates a new SAGE ABCI application.
 func NewSageApp(badgerPath string, postgresURL string, logger zerolog.Logger) (*SageApp, error) {
@@ -277,15 +289,16 @@ func NewSageApp(badgerPath string, postgresURL string, logger zerolog.Logger) (*
 	valSet := validator.NewValidatorSet()
 
 	app := &SageApp{
-		badgerStore:   bs,
-		offchainStore: ps,
-		validators:    valSet,
-		poeEngine:     domainReg,
-		phiTracker:    poe.NewPhiTracker(50),
-		govEngine:     governance.NewEngine(bs, &validatorSetAdapter{vs: valSet}),
-		state:         state,
-		logger:        logger.With().Str("component", "abci").Logger(),
-		SuppCache:     NewSupplementaryCache(),
+		badgerStore:     bs,
+		offchainStore:   ps,
+		validators:      valSet,
+		poeEngine:       domainReg,
+		phiTracker:      poe.NewPhiTracker(50),
+		govEngine:       governance.NewEngine(bs, &validatorSetAdapter{vs: valSet}),
+		state:           state,
+		logger:          logger.With().Str("component", "abci").Logger(),
+		SuppCache:       NewSupplementaryCache(),
+		flushMaxRetries: defaultFlushMaxRetries,
 	}
 
 	// Reload persisted validators from BadgerDB (survives restart)
@@ -319,15 +332,16 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 	valSet := validator.NewValidatorSet()
 
 	app := &SageApp{
-		badgerStore:   bs,
-		offchainStore: offchain,
-		validators:    valSet,
-		poeEngine:     domainReg,
-		phiTracker:    poe.NewPhiTracker(50),
-		govEngine:     governance.NewEngine(bs, &validatorSetAdapter{vs: valSet}),
-		state:         state,
-		logger:        logger.With().Str("component", "abci").Logger(),
-		SuppCache:     NewSupplementaryCache(),
+		badgerStore:     bs,
+		offchainStore:   offchain,
+		validators:      valSet,
+		poeEngine:       domainReg,
+		phiTracker:      poe.NewPhiTracker(50),
+		govEngine:       governance.NewEngine(bs, &validatorSetAdapter{vs: valSet}),
+		state:           state,
+		logger:          logger.With().Str("component", "abci").Logger(),
+		SuppCache:       NewSupplementaryCache(),
+		flushMaxRetries: defaultFlushMaxRetries,
 	}
 
 	persistedVals, err := bs.LoadValidators()
@@ -1472,7 +1486,7 @@ func (app *SageApp) processFederationPropose(parsedTx *tx.ParsedTx, height int64
 			FederationID: fedID, ProposerOrgID: prop.ProposerOrgID, TargetOrgID: prop.TargetOrgID,
 			AllowedDomains: prop.AllowedDomains, AllowedDepts: prop.AllowedDepts,
 			MaxClearance: store.ClearanceLevel(prop.MaxClearance),
-			ExpiresAt: expiresAt, RequiresApproval: prop.RequiresApproval,
+			ExpiresAt:    expiresAt, RequiresApproval: prop.RequiresApproval,
 			Status: "proposed", CreatedHeight: height, CreatedAt: blockTime,
 		},
 	})
@@ -2005,14 +2019,14 @@ func (app *SageApp) processEpoch(height int64, blockTime time.Time) {
 		rawWeights[v.ID] = weight
 
 		epochDetails[v.ID] = &store.EpochScore{
-			EpochNum:    epochNum,
-			BlockHeight: height,
-			ValidatorID: v.ID,
-			Accuracy:    accuracy,
-			DomainScore: domainScore,
+			EpochNum:     epochNum,
+			BlockHeight:  height,
+			ValidatorID:  v.ID,
+			Accuracy:     accuracy,
+			DomainScore:  domainScore,
 			RecencyScore: recencyScore,
-			CorrScore:   corrScore,
-			RawWeight:   weight,
+			CorrScore:    corrScore,
+			RawWeight:    weight,
 		}
 
 		app.logger.Info().
@@ -2074,27 +2088,42 @@ func (app *SageApp) processEpoch(height int64, blockTime time.Time) {
 
 // Commit persists finalized state.
 // THIS is where PostgreSQL writes happen — never in FinalizeBlock.
+//
+// Ordering is load-bearing: the offchain flush runs BEFORE SaveState so that
+// if the flush fails, BadgerDB's recorded height stays behind the block we
+// just processed. On restart CometBFT reads the behind height via Info() and
+// replays the block, giving FinalizeBlock another chance to populate
+// pendingWrites and Commit another chance to flush. Persisting BadgerDB
+// first would produce silent on-chain-vs-offchain divergence: ABCI would
+// claim it's caught up, CometBFT would skip replay, and the SQLite row
+// would be lost forever.
 func (app *SageApp) Commit(_ context.Context, req *abcitypes.RequestCommit) (*abcitypes.ResponseCommit, error) {
 	ctx := context.Background()
-
-	// Save state to BadgerDB
-	if err := SaveState(app.badgerStore, app.state); err != nil {
-		app.logger.Error().Err(err).Msg("failed to save state")
-	}
 
 	// Flush pending writes to the offchain store atomically within a single
 	// database transaction. If any write fails, the entire batch rolls back,
 	// preventing partial state divergence between BadgerDB and the query layer.
 	//
-	// Retry with exponential backoff on SQLITE_BUSY — consensus already succeeded
-	// so these writes MUST eventually land in the offchain store.
+	// Retry on SQLITE_BUSY with exponential backoff capped at 5s per attempt.
+	// The SQLite driver's busy_timeout (15s per statement) already absorbs
+	// short contention windows; this budget handles sustained lock contention
+	// across the whole batch. On exhaustion we panic rather than silently
+	// drop: consensus has already committed these writes on-chain, so losing
+	// them from the offchain store would produce divergence the read API
+	// cannot detect.
 	if len(app.pendingWrites) > 0 {
 		writes := app.pendingWrites
-		const maxRetries = 5
+		maxRetries := app.flushMaxRetries
+		if maxRetries <= 0 {
+			maxRetries = defaultFlushMaxRetries
+		}
 		var lastErr error
 		for attempt := 0; attempt < maxRetries; attempt++ {
 			if attempt > 0 {
-				backoff := time.Duration(1<<uint(attempt-1)) * 100 * time.Millisecond // 100ms, 200ms, 400ms, 800ms
+				backoff := time.Duration(1<<uint(attempt-1)) * 100 * time.Millisecond
+				if backoff > 5*time.Second {
+					backoff = 5 * time.Second
+				}
 				app.logger.Warn().Int("attempt", attempt+1).Dur("backoff", backoff).Int("count", len(writes)).
 					Msg("retrying offchain flush after SQLITE_BUSY")
 				time.Sleep(backoff)
@@ -2105,7 +2134,8 @@ func (app *SageApp) Commit(_ context.Context, req *abcitypes.RequestCommit) (*ab
 			if lastErr == nil {
 				break
 			}
-			// Only retry on SQLITE_BUSY; other errors are not transient.
+			// Only retry on transient lock contention; other errors won't clear
+			// by waiting and are better surfaced immediately via panic below.
 			if !strings.Contains(lastErr.Error(), "SQLITE_BUSY") &&
 				!strings.Contains(lastErr.Error(), "database is locked") {
 				break
@@ -2113,10 +2143,20 @@ func (app *SageApp) Commit(_ context.Context, req *abcitypes.RequestCommit) (*ab
 		}
 		if lastErr != nil {
 			app.logger.Error().Err(lastErr).Int("count", len(writes)).Int("attempts", maxRetries).
-				Msg("CRITICAL: atomic flush of pending writes failed — offchain store may be behind on-chain state")
+				Msg("CRITICAL: atomic flush of pending writes failed — halting node to preserve on-chain/offchain consistency")
+			panic(fmt.Sprintf(
+				"sage: offchain flush failed after %d attempts (%d writes pending): %v — "+
+					"consensus cannot advance without offchain commit; fix DB contention and restart to replay this block",
+				maxRetries, len(writes), lastErr,
+			))
 		}
 	}
 	app.pendingWrites = nil
+
+	// Save state to BadgerDB only after the offchain flush has succeeded.
+	if err := SaveState(app.badgerStore, app.state); err != nil {
+		app.logger.Error().Err(err).Msg("failed to save state")
+	}
 
 	return &abcitypes.ResponseCommit{}, nil
 }
