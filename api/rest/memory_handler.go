@@ -68,7 +68,25 @@ type QueryMemoryResponse struct {
 	Results    []*MemoryResult `json:"results"`
 	NextCursor string          `json:"next_cursor,omitempty"`
 	TotalCount int             `json:"total_count"`
+	Filtered   *FilterInfo     `json:"filtered,omitempty"`
 }
+
+// FilterInfo surfaces server-side filters that hid data from the caller.
+// Populated when any silent-hide filter ran so clients can distinguish
+// "empty result" from "access-limited result" without guessing.
+// See X-SAGE-Filter-Applied response header for the same info in header form.
+type FilterInfo struct {
+	By                []string `json:"by"`
+	TotalBeforeFilter *int     `json:"total_before_filter,omitempty"`
+	Visible           *int     `json:"visible,omitempty"`
+	HiddenCount       *int     `json:"hidden_count,omitempty"`
+}
+
+const (
+	filterHeader            = "X-SAGE-Filter-Applied"
+	filterBySubmittingAgts  = "rbac_submitting_agents"
+	filterByClassification  = "classification"
+)
 
 // MemoryResult is a memory record with computed confidence.
 type MemoryResult struct {
@@ -283,6 +301,17 @@ func (s *Server) resolveVisibleAgents(agentID string) ([]string, bool) {
 	if visibleAgents == "*" {
 		return nil, true
 	}
+
+	// Org-clearance-as-seeAll: a TopSecret member of any org is trusted to
+	// see across agents within their org's visibility envelope. Per-domain
+	// access control (HasAccessMultiOrg, checkDomainAccess) and per-record
+	// classification gates still apply - this only lifts the submitting_agents
+	// filter, not the domain-access filters. In single-org deployments this
+	// closes the "visible_agents=\"*\" on every agent" boilerplate.
+	if s.badgerStore != nil && s.agentHasTopSecretClearance(agentID) {
+		return nil, true
+	}
+
 	allowed := []string{agentID} // Always see own
 	if visibleAgents != "" {
 		var list []string
@@ -291,6 +320,24 @@ func (s *Server) resolveVisibleAgents(agentID string) ([]string, bool) {
 		}
 	}
 	return allowed, false
+}
+
+// agentHasTopSecretClearance reports whether the agent is a TopSecret-cleared
+// member of their org. Used to lift the submitting_agents filter for trusted
+// agents without forcing admins to configure visible_agents="*" per member.
+func (s *Server) agentHasTopSecretClearance(agentID string) bool {
+	if s.badgerStore == nil {
+		return false
+	}
+	orgID, err := s.badgerStore.GetAgentOrg(agentID)
+	if err != nil || orgID == "" {
+		return false
+	}
+	clearance, _, err := s.badgerStore.GetMemberClearance(orgID, agentID)
+	if err != nil {
+		return false
+	}
+	return clearance >= uint8(tx.ClearanceTopSecret)
 }
 
 // --- Handlers ----------------------------------------------------------------
@@ -532,7 +579,8 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 		Cursor:        req.Cursor,
 		Tags:          req.Tags,
 	}
-	if !seeAll {
+	filterApplied := !seeAll
+	if filterApplied {
 		opts.SubmittingAgents = allowedAgents
 	}
 
@@ -549,6 +597,7 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 	// Apply confidence decay and classification filtering.
 	now := time.Now()
 	results := make([]*MemoryResult, 0, len(records))
+	hiddenByClassification := 0
 	for _, rec := range records {
 		// Classification gate: check agent clearance >= memory classification
 		// Only enforce when domain has a registered owner (backward compat for pre-RBAC setups)
@@ -560,6 +609,7 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 				if domErr == nil && domainOwner != "" {
 					hasAccess, _ := s.badgerStore.HasAccessMultiOrg(rec.DomainTag, queryAgentID, memClass, now)
 					if !hasAccess && rec.SubmittingAgent != queryAgentID {
+						hiddenByClassification++
 						continue // Skip memories the agent can't access
 					}
 				}
@@ -615,10 +665,38 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	writeJSON(w, http.StatusOK, QueryMemoryResponse{
+	resp := QueryMemoryResponse{
 		Results:    results,
 		TotalCount: len(results),
-	})
+	}
+	setFilterInfo(w, &resp, filterApplied, hiddenByClassification)
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// setFilterInfo attaches the X-SAGE-Filter-Applied header and the `filtered`
+// envelope field to a query/search response when either silent-hide filter ran.
+// submittingAgentsApplied indicates the store-level agent-isolation filter was
+// used; hiddenByClassification is the count of records dropped by the
+// in-handler classification+multi-org gate.
+func setFilterInfo(w http.ResponseWriter, resp *QueryMemoryResponse, submittingAgentsApplied bool, hiddenByClassification int) {
+	if !submittingAgentsApplied && hiddenByClassification == 0 {
+		return
+	}
+	var applied []string
+	if submittingAgentsApplied {
+		applied = append(applied, filterBySubmittingAgts)
+	}
+	if hiddenByClassification > 0 {
+		applied = append(applied, filterByClassification)
+	}
+	w.Header().Set(filterHeader, strings.Join(applied, ","))
+	info := &FilterInfo{By: applied}
+	if hiddenByClassification > 0 {
+		hc := hiddenByClassification
+		info.HiddenCount = &hc
+	}
+	resp.Filtered = info
 }
 
 // SearchMemoryRequest is the JSON body for POST /v1/memory/search.
@@ -705,7 +783,8 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 		TopK:          req.TopK,
 		Tags:          req.Tags,
 	}
-	if !seeAll {
+	filterApplied := !seeAll
+	if filterApplied {
 		opts.SubmittingAgents = allowedAgents
 	}
 
@@ -721,6 +800,7 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 	// Apply confidence decay and classification filtering (same as handleQueryMemory).
 	now := time.Now()
 	results := make([]*MemoryResult, 0, len(records))
+	hiddenByClassification := 0
 	for _, rec := range records {
 		var memClass uint8
 		if s.badgerStore != nil {
@@ -730,6 +810,7 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 				if domErr == nil && domainOwner != "" {
 					hasAccess, _ := s.badgerStore.HasAccessMultiOrg(rec.DomainTag, queryAgentID, memClass, now)
 					if !hasAccess && rec.SubmittingAgent != queryAgentID {
+						hiddenByClassification++
 						continue
 					}
 				}
@@ -783,10 +864,13 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	writeJSON(w, http.StatusOK, QueryMemoryResponse{
+	resp := QueryMemoryResponse{
 		Results:    results,
 		TotalCount: len(results),
-	})
+	}
+	setFilterInfo(w, &resp, filterApplied, hiddenByClassification)
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleGetMemory handles GET /v1/memory/{memory_id}.
@@ -1178,7 +1262,8 @@ func (s *Server) handleListMemoriesAuth(w http.ResponseWriter, r *http.Request) 
 	if agent := q.Get("agent"); agent != "" {
 		opts.SubmittingAgent = agent
 	}
-	if !seeAll {
+	filterApplied := !seeAll
+	if filterApplied {
 		opts.SubmittingAgents = allowedAgents
 	}
 
@@ -1188,12 +1273,33 @@ func (s *Server) handleListMemoriesAuth(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	body := map[string]any{
 		"memories": records,
 		"total":    total,
 		"limit":    limit,
 		"offset":   offset,
-	})
+	}
+
+	if filterApplied {
+		// Second count-only query without the SubmittingAgents filter so the
+		// caller can distinguish empty-domain from rbac-hidden. Limit:1 keeps
+		// row materialization bounded; store.ListMemories computes total anyway.
+		unfilteredOpts := opts
+		unfilteredOpts.SubmittingAgents = nil
+		unfilteredOpts.Limit = 1
+		unfilteredOpts.Offset = 0
+		_, totalBefore, countErr := s.store.ListMemories(r.Context(), unfilteredOpts)
+		w.Header().Set(filterHeader, filterBySubmittingAgts)
+		info := &FilterInfo{By: []string{filterBySubmittingAgts}}
+		visible := total
+		info.Visible = &visible
+		if countErr == nil {
+			info.TotalBeforeFilter = &totalBefore
+		}
+		body["filtered"] = info
+	}
+
+	writeJSON(w, http.StatusOK, body)
 }
 
 // handleTimelineAuth handles GET /v1/memory/timeline (authenticated, agent-isolated).

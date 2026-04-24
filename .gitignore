@@ -98,6 +98,7 @@ CLAUDE.md
 docs/*
 !docs/ARCHITECTURE.md
 !docs/GETTING_STARTED.md
+!docs/ADMIN_BOOTSTRAP.md
 !docs/index.html
 !docs/connect.html
 !docs/og-image.png
