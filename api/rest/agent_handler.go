@@ -93,10 +93,17 @@ func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	txHash, err := s.broadcastTx(encoded)
+	// broadcast_tx_commit (not _sync) so the response includes the block
+	// height. Clients use on_chain_height as a trivial "did this actually
+	// land on-chain?" check — surfacing it on first registration means
+	// the first register_agent call doesn't come back with height=None
+	// (prior behaviour) and then height=<N> only on the idempotent
+	// re-registration path. SDK callers were reading the height=None as
+	// a version-drift signal; with the fix both code paths surface it.
+	txHash, height, err := s.broadcastTxCommitWithHeight(encoded)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to broadcast agent register tx")
-		writeProblem(w, http.StatusInternalServerError, "Broadcast error", err.Error())
+		writeProblem(w, broadcastErrorStatus(err), "Broadcast error", err.Error())
 		return
 	}
 
@@ -112,6 +119,7 @@ func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 		"provider":        req.Provider,
 		"status":          "registered",
 		"tx_hash":         txHash,
+		"on_chain_height": height,
 	})
 }
 

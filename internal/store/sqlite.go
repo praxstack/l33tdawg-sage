@@ -52,6 +52,22 @@ func (s *SQLiteStore) writeExecContext(ctx context.Context, query string, args .
 	return s.conn.ExecContext(ctx, query, args...) //nolint:wrapcheck // intentional pass-through
 }
 
+// beginTxLocked opens a write transaction while holding writeMu, and returns
+// the tx plus an unlock func the caller must defer-run after tx.Rollback /
+// tx.Commit. Use this instead of raw `s.db.BeginTx` for any method that
+// writes; raw BeginTx bypasses writeMu and races both writeExecContext and
+// other transactions, reintroducing SQLITE_BUSY on rollback-journal builds
+// and excess WAL contention on WAL builds.
+func (s *SQLiteStore) beginTxLocked(ctx context.Context) (*sql.Tx, func(), error) {
+	s.writeMu.Lock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		s.writeMu.Unlock()
+		return nil, func() {}, err //nolint:wrapcheck // callers wrap
+	}
+	return tx, s.writeMu.Unlock, nil
+}
+
 // encPrefix marks content as encrypted (prepended to base64 ciphertext).
 const encPrefix = "enc::"
 
@@ -137,7 +153,16 @@ func (s *SQLiteStore) decryptEmbedding(data []byte) ([]byte, error) {
 
 // NewSQLiteStore creates a new SQLite-backed store.
 func NewSQLiteStore(ctx context.Context, dbPath string) (*SQLiteStore, error) {
-	dsn := dbPath + "?_journal_mode=WAL&_busy_timeout=15000&_synchronous=NORMAL&_foreign_keys=ON"
+	// modernc.org/sqlite uses `_pragma=name(value)` syntax. The older
+	// `_name=value` form (mattn/go-sqlite3) is silently ignored, which
+	// means prior deployments ran in rollback-journal mode with a zero
+	// busy timeout — every concurrent writer contention surfaced as
+	// SQLITE_BUSY instead of waiting.
+	dsn := dbPath +
+		"?_pragma=journal_mode(WAL)" +
+		"&_pragma=busy_timeout(15000)" +
+		"&_pragma=synchronous(NORMAL)" +
+		"&_pragma=foreign_keys(ON)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
@@ -146,6 +171,21 @@ func NewSQLiteStore(ctx context.Context, dbPath string) (*SQLiteStore, error) {
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("ping sqlite: %w", err)
+	}
+
+	// Belt-and-braces: re-apply the pragmas via explicit queries so a
+	// DSN-parsing change in a future driver version can't silently
+	// regress this. PRAGMA statements are no-ops when already applied.
+	for _, p := range []string{
+		"PRAGMA journal_mode=WAL",
+		"PRAGMA busy_timeout=15000",
+		"PRAGMA synchronous=NORMAL",
+		"PRAGMA foreign_keys=ON",
+	} {
+		if _, pragErr := db.ExecContext(ctx, p); pragErr != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("apply %s: %w", p, pragErr)
+		}
 	}
 
 	s := &SQLiteStore{conn: db, db: db, dbPath: dbPath}
@@ -1066,10 +1106,11 @@ func (s *SQLiteStore) InsertTriples(ctx context.Context, memoryID string, triple
 	}
 
 	// Otherwise, wrap in a local transaction for atomicity.
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, unlock, err := s.beginTxLocked(ctx)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
+	defer unlock()
 	defer tx.Rollback() //nolint:errcheck
 
 	if err := insertAll(tx); err != nil {
@@ -2290,10 +2331,11 @@ func (s *SQLiteStore) RotateAgentKey(ctx context.Context, oldAgentID string) (st
 
 	// If we have a *sql.DB (not already in a tx), wrap in transaction
 	if s.db != nil {
-		tx, txErr := s.db.BeginTx(ctx, nil)
+		tx, unlock, txErr := s.beginTxLocked(ctx)
 		if txErr != nil {
 			return "", nil, fmt.Errorf("begin tx: %w", txErr)
 		}
+		defer unlock()
 		defer tx.Rollback() //nolint:errcheck
 
 		if err2 := doRotate(tx); err2 != nil {
@@ -2358,10 +2400,11 @@ func (s *SQLiteStore) ReassignMemories(ctx context.Context, sourceAgentID, targe
 
 	// If we have a *sql.DB (not already in a tx), wrap in transaction
 	if s.db != nil {
-		tx, txErr := s.db.BeginTx(ctx, nil)
+		tx, unlock, txErr := s.beginTxLocked(ctx)
 		if txErr != nil {
 			return 0, fmt.Errorf("begin tx: %w", txErr)
 		}
+		defer unlock()
 		defer tx.Rollback() //nolint:errcheck
 
 		if err := doReassign(tx); err != nil {
@@ -2458,10 +2501,11 @@ func (s *SQLiteStore) ReassignMemoriesByTag(ctx context.Context, sourceAgentID, 
 
 	// Transaction handling - same pattern as ReassignMemories
 	if s.db != nil {
-		tx, txErr := s.db.BeginTx(ctx, nil)
+		tx, unlock, txErr := s.beginTxLocked(ctx)
 		if txErr != nil {
 			return 0, fmt.Errorf("begin tx: %w", txErr)
 		}
+		defer unlock()
 		defer tx.Rollback() //nolint:errcheck
 		if err := doReassign(tx); err != nil {
 			return 0, err
@@ -2528,10 +2572,11 @@ func (s *SQLiteStore) ReassignMemoriesByDomain(ctx context.Context, sourceAgentI
 	}
 
 	if s.db != nil {
-		tx, txErr := s.db.BeginTx(ctx, nil)
+		tx, unlock, txErr := s.beginTxLocked(ctx)
 		if txErr != nil {
 			return 0, fmt.Errorf("begin tx: %w", txErr)
 		}
+		defer unlock()
 		defer tx.Rollback() //nolint:errcheck
 		if err := doReassign(tx); err != nil {
 			return 0, err
@@ -2975,10 +3020,11 @@ func (s *SQLiteStore) GetAllTasks(ctx context.Context, domain string, limit int)
 
 // SetTags replaces all tags on a memory with the given set.
 func (s *SQLiteStore) SetTags(ctx context.Context, memoryID string, tags []string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, unlock, err := s.beginTxLocked(ctx)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
+	defer unlock()
 	defer tx.Rollback() //nolint:errcheck
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_tags WHERE memory_id = ?`, memoryID); err != nil {

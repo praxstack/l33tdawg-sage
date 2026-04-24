@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -1039,4 +1040,81 @@ func TestRotateAgentKey_MemoryCountTransfers(t *testing.T) {
 	oldAgent, err := s.GetAgent(ctx, "rotate-mem-agent")
 	require.NoError(t, err)
 	assert.Equal(t, 0, oldAgent.MemoryCount)
+}
+
+// TestSQLitePragmasApplied guards against silent DSN-parsing regressions.
+// modernc.org/sqlite uses `_pragma=name(value)` syntax; earlier versions of
+// NewSQLiteStore used the mattn form (`_journal_mode=WAL`), which was
+// silently ignored — the DB ran in rollback-journal mode with busy_timeout=0,
+// and every concurrent writer raced straight into SQLITE_BUSY.
+func TestSQLitePragmasApplied(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	var journalMode string
+	require.NoError(t, s.db.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&journalMode))
+	assert.Equal(t, "wal", journalMode, "journal_mode must be WAL for concurrent reads")
+
+	var busyTimeout int
+	require.NoError(t, s.db.QueryRowContext(ctx, "PRAGMA busy_timeout").Scan(&busyTimeout))
+	assert.GreaterOrEqual(t, busyTimeout, 15000, "busy_timeout must be at least 15s so contention waits rather than SQLITE_BUSYs")
+
+	var foreignKeys int
+	require.NoError(t, s.db.QueryRowContext(ctx, "PRAGMA foreign_keys").Scan(&foreignKeys))
+	assert.Equal(t, 1, foreignKeys, "foreign_keys must be ON")
+}
+
+// TestSetTags_ConcurrentWithInserts is the raptor-sage-setup idempotency
+// regression: when many memories are proposed concurrently (asyncio.gather
+// with a Semaphore), each REST handler inserts the memory via the ABCI
+// commit path and then calls SetTags. Before the fix, SetTags started its
+// own transaction via raw `s.db.BeginTx` — bypassing writeMu — and the
+// orphan transactions collided with the in-flight ABCI writes, producing
+// `clear tags: database is locked (5) (SQLITE_BUSY)`. Tags silently failed
+// to persist, and the next run's existence check mis-reported every
+// already-seeded memory as missing.
+func TestSetTags_ConcurrentWithInserts(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	const n = 32
+	errs := make(chan error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			id := fmt.Sprintf("concurrent-m%d", i)
+			rec := testMemory(id, "agent1", fmt.Sprintf("content %d", i), "concurrency-test")
+			if err := s.InsertMemory(ctx, rec); err != nil {
+				errs <- fmt.Errorf("insert %s: %w", id, err)
+				return
+			}
+			if err := s.SetTags(ctx, id, []string{fmt.Sprintf("label:%d", i)}); err != nil {
+				errs <- fmt.Errorf("set tags %s: %w", id, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+
+	// Every memory should be reachable via its tag — the symptom that
+	// broke idempotency was SetTags silently erroring out while the
+	// memory row persisted, so the memory was present but untagged.
+	for i := 0; i < n; i++ {
+		tag := fmt.Sprintf("label:%d", i)
+		records, total, err := s.ListMemories(ctx, ListOptions{
+			DomainTag: "concurrency-test",
+			Tag:       tag,
+			Limit:     2,
+		})
+		require.NoError(t, err, "list by tag %q", tag)
+		assert.Equal(t, 1, total, "tag %q should match exactly one memory", tag)
+		if assert.Len(t, records, 1) {
+			assert.Equal(t, fmt.Sprintf("concurrent-m%d", i), records[0].MemoryID)
+		}
+	}
 }

@@ -464,15 +464,29 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 	// non-consensus metadata (node-local), so we set them via the store
 	// rather than folding them into the tx. broadcastTxCommit has already
 	// returned after Commit flushed the memory, so SetTags will find it.
+	//
+	// Use a fresh short-timeout context rather than r.Context() — the
+	// client may have disconnected (SIGKILL, network drop) between
+	// broadcastTxCommit completing and here, and with r.Context() every
+	// interrupted submit leaves an untagged orphan row that the next
+	// idempotency run re-proposes as a duplicate. The commit has already
+	// landed on-chain; tag attachment is a node-local finalisation step
+	// and must not depend on the HTTP request staying alive.
+	tagCtx, tagCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer tagCancel()
+
 	if len(req.Tags) > 0 {
-		if setErr := s.store.SetTags(r.Context(), memoryID, req.Tags); setErr != nil {
+		if setErr := s.store.SetTags(tagCtx, memoryID, req.Tags); setErr != nil {
 			s.logger.Warn().Err(setErr).Str("memory_id", memoryID).Msg("failed to set tags on committed memory")
 		}
 	}
 
-	// Update agent's last activity timestamp
+	// Update agent's last activity timestamp. Same disconnect rationale as
+	// SetTags above — the memory is on-chain, the last-seen update is
+	// post-commit bookkeeping and should not fail just because the client
+	// went away.
 	if agentID != "" && s.agentStore != nil {
-		if updateErr := s.agentStore.UpdateAgentLastSeen(r.Context(), agentID, time.Now()); updateErr != nil {
+		if updateErr := s.agentStore.UpdateAgentLastSeen(tagCtx, agentID, time.Now()); updateErr != nil {
 			s.logger.Warn().Err(updateErr).Str("agent_id", agentID).Msg("failed to update agent last_seen")
 		}
 	}
@@ -1027,6 +1041,15 @@ func (s *Server) broadcastTx(txBytes []byte) (string, error) {
 // Unlike broadcastTx (sync), this blocks until the block is committed, ensuring
 // ABCI Commit has flushed all pending writes to the offchain store before returning.
 func (s *Server) broadcastTxCommit(txBytes []byte) (string, error) {
+	hash, _, err := s.broadcastTxCommitWithHeight(txBytes)
+	return hash, err
+}
+
+// broadcastTxCommitWithHeight is broadcastTxCommit plus the committed block
+// height. Callers that need the on-chain height in their response (e.g.
+// agent registration telemetry) use this variant; everything else stays
+// on the simpler (hash, error) signature via broadcastTxCommit.
+func (s *Server) broadcastTxCommitWithHeight(txBytes []byte) (string, int64, error) {
 	txHex := hex.EncodeToString(txBytes)
 	url := fmt.Sprintf("%s/broadcast_tx_commit?tx=0x%s", s.cometbftRPC, txHex)
 
@@ -1035,32 +1058,32 @@ func (s *Server) broadcastTxCommit(txBytes []byte) (string, error) {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil) // #nosec G107 -- internal CometBFT RPC
 	if err != nil {
-		return "", fmt.Errorf("create broadcast request: %w", err)
+		return "", 0, fmt.Errorf("create broadcast request: %w", err)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("broadcast tx commit: %w", err)
+		return "", 0, fmt.Errorf("broadcast tx commit: %w", err)
 	}
 	defer resp.Body.Close()
 
 	var result cometCommitResponse
 	if err = json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("decode broadcast commit response: %w", err)
+		return "", 0, fmt.Errorf("decode broadcast commit response: %w", err)
 	}
 
 	if result.Error != nil {
-		return "", fmt.Errorf("broadcast error: %s", result.Error.Message)
+		return "", 0, fmt.Errorf("broadcast error: %s", result.Error.Message)
 	}
 
 	if result.Result.CheckTx.Code != 0 {
-		return "", fmt.Errorf("tx rejected in CheckTx (code %d): %s", result.Result.CheckTx.Code, result.Result.CheckTx.Log)
+		return "", 0, fmt.Errorf("tx rejected in CheckTx (code %d): %s", result.Result.CheckTx.Code, result.Result.CheckTx.Log)
 	}
 
 	if result.Result.TxResult.Code != 0 {
-		return "", fmt.Errorf("tx rejected in FinalizeBlock (code %d): %s", result.Result.TxResult.Code, result.Result.TxResult.Log)
+		return "", 0, fmt.Errorf("tx rejected in FinalizeBlock (code %d): %s", result.Result.TxResult.Code, result.Result.TxResult.Log)
 	}
 
-	return result.Result.Hash, nil
+	return result.Result.Hash, result.Result.Height, nil
 }
 
 // broadcastErrorStatus maps a broadcastTx/broadcastTxCommit error into an HTTP status.

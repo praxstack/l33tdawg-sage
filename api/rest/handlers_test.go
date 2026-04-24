@@ -32,6 +32,17 @@ type mockMemoryStore struct {
 	pendingRecords []*memory.MemoryRecord
 	// setTagsCalls captures tag writes per memory_id for test assertions.
 	setTagsCalls map[string][]string
+	// setTagsCtx captures the most recent context passed to SetTags so
+	// tests can assert the handler uses a background-derived context
+	// rather than the request context (which would be canceled if the
+	// client disconnected mid-submit, stranding untagged orphan rows).
+	setTagsCtx context.Context
+	// setTagsCtxErrAtCall snapshots ctx.Err() at the moment SetTags is
+	// called. If the handler deferred-cancels the tag context after the
+	// call, a later inspection of setTagsCtx will see Done(); the
+	// at-call snapshot is the only way to confirm the context was live
+	// *during* the SetTags write.
+	setTagsCtxErrAtCall error
 	// lastQueryTags captures the Tags slice from the most recent QuerySimilar call.
 	lastQueryTags []string
 }
@@ -187,7 +198,9 @@ func (m *mockMemoryStore) GetAllTasks(_ context.Context, _ string, _ int) ([]*me
 	return tasks, nil
 }
 
-func (m *mockMemoryStore) SetTags(_ context.Context, memoryID string, tags []string) error {
+func (m *mockMemoryStore) SetTags(ctx context.Context, memoryID string, tags []string) error {
+	m.setTagsCtx = ctx
+	m.setTagsCtxErrAtCall = ctx.Err()
 	m.setTagsCalls[memoryID] = tags
 	return nil
 }
@@ -421,6 +434,69 @@ func TestSubmitMemory_NoTags_SkipsSetTags(t *testing.T) {
 	require.Equal(t, http.StatusCreated, rr.Code)
 
 	assert.Empty(t, memStore.setTagsCalls, "SetTags must not be called when no tags are supplied")
+}
+
+// TestSubmitMemory_TagCtxSurvivesClientDisconnect guards the post-commit
+// finalisation path: SetTags must run on a background-derived context so a
+// client disconnect between broadcast_tx_commit and the tag write does not
+// leave an untagged orphan row in the DB. Prior behaviour passed r.Context()
+// which canceled as soon as the client SIGKILLed (or timed out, or dropped
+// the TCP connection), and every interrupted submit stranded a memory row
+// the next idempotency run couldn't recognise via tag lookup — so it
+// re-proposed as a duplicate instead.
+func TestSubmitMemory_TagCtxSurvivesClientDisconnect(t *testing.T) {
+	cometMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"result": map[string]interface{}{
+				"check_tx":  map[string]interface{}{"code": 0},
+				"tx_result": map[string]interface{}{"code": 0},
+				"hash":      "DROPPEDCLIENT",
+				"height":    "1",
+			},
+		})
+	}))
+	defer cometMock.Close()
+
+	srv, memStore, _ := newTestServer(t, cometMock.URL)
+
+	body := []byte(`{
+		"content": "tagged memory",
+		"memory_type": "fact",
+		"domain_tag": "crypto",
+		"confidence_score": 0.9,
+		"tags": ["project-x"]
+	}`)
+	req, _ := signedRequest(t, http.MethodPost, "/v1/memory/submit", body)
+
+	// Simulate the client vanishing between broadcast_tx_commit returning
+	// and the SetTags call: cancel the request context before serving.
+	// With the pre-fix behaviour (SetTags used r.Context()) the mock's
+	// SetTags would either not be called at all (if the handler bailed
+	// on the canceled context) or be called with an already-canceled
+	// context; either way, the real store in production would fail with
+	// "begin tx: context canceled" and the row would be an orphan. With
+	// the fix, the handler switches to a fresh context.WithTimeout(
+	// context.Background(), ...) so SetTags still runs and its ctx is
+	// NOT done.
+	ctx, cancel := context.WithCancel(req.Context())
+	cancel() // disconnect before the handler even starts running SetTags
+	req = req.WithContext(ctx)
+
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusCreated, rr.Code, "commit path must still return 201 — the tx already landed on-chain")
+
+	var resp SubmitMemoryResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+
+	_, called := memStore.setTagsCalls[resp.MemoryID]
+	require.True(t, called, "SetTags must run even after client disconnect — otherwise untagged orphan")
+
+	require.NotNil(t, memStore.setTagsCtx, "setTagsCtx must have been captured")
+	require.NoError(t, memStore.setTagsCtxErrAtCall,
+		"SetTags was invoked with a canceled context — orphan tag regression: the handler is still forwarding r.Context() instead of a background-derived context")
 }
 
 func TestQueryMemory_PlumbsTagsThroughToStore(t *testing.T) {
