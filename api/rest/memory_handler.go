@@ -323,21 +323,27 @@ func (s *Server) resolveVisibleAgents(agentID string) ([]string, bool) {
 }
 
 // agentHasTopSecretClearance reports whether the agent is a TopSecret-cleared
-// member of their org. Used to lift the submitting_agents filter for trusted
-// agents without forcing admins to configure visible_agents="*" per member.
+// member of any org they belong to. Used to lift the submitting_agents filter
+// for trusted agents without forcing admins to configure visible_agents="*"
+// per member. Iterates every org membership — TS in one org is enough.
 func (s *Server) agentHasTopSecretClearance(agentID string) bool {
 	if s.badgerStore == nil {
 		return false
 	}
-	orgID, err := s.badgerStore.GetAgentOrg(agentID)
-	if err != nil || orgID == "" {
+	orgIDs, err := s.badgerStore.ListAgentOrgs(agentID)
+	if err != nil || len(orgIDs) == 0 {
 		return false
 	}
-	clearance, _, err := s.badgerStore.GetMemberClearance(orgID, agentID)
-	if err != nil {
-		return false
+	for _, orgID := range orgIDs {
+		clearance, _, gerr := s.badgerStore.GetMemberClearance(orgID, agentID)
+		if gerr != nil {
+			continue
+		}
+		if clearance >= uint8(tx.ClearanceTopSecret) {
+			return true
+		}
 	}
-	return clearance >= uint8(tx.ClearanceTopSecret)
+	return false
 }
 
 // --- Handlers ----------------------------------------------------------------

@@ -1452,13 +1452,11 @@ func (app *SageApp) processFederationPropose(parsedTx *tx.ParsedTx, height int64
 		return &abcitypes.ExecTxResult{Code: 61, Log: fmt.Sprintf("agent identity verification failed: %v", err)}
 	}
 
-	// Verify the sender actually belongs to the proposer org and is admin.
-	senderOrg, orgErr := app.badgerStore.GetAgentOrg(senderID)
-	if orgErr != nil {
-		return &abcitypes.ExecTxResult{Code: 61, Log: fmt.Sprintf("agent %s is not in any organization", senderID[:16])}
-	}
-	if senderOrg != prop.ProposerOrgID {
-		return &abcitypes.ExecTxResult{Code: 61, Log: fmt.Sprintf("agent org %s does not match proposer org %s", senderOrg, prop.ProposerOrgID)}
+	// Verify the sender is a member of the proposer org and is its admin.
+	// Multi-org members can act as admin in any org they belong to.
+	memberOf, memberErr := app.badgerStore.IsAgentInOrg(senderID, prop.ProposerOrgID)
+	if memberErr != nil || !memberOf {
+		return &abcitypes.ExecTxResult{Code: 61, Log: fmt.Sprintf("agent %s is not a member of proposer org %s", senderID[:16], prop.ProposerOrgID)}
 	}
 	if !app.isOrgAdmin(prop.ProposerOrgID, senderID) {
 		return &abcitypes.ExecTxResult{Code: 61, Log: fmt.Sprintf("access denied: %s is not admin of org %s", senderID[:16], prop.ProposerOrgID)}
@@ -1519,13 +1517,12 @@ func (app *SageApp) processFederationApprove(parsedTx *tx.ParsedTx, height int64
 		return &abcitypes.ExecTxResult{Code: 64, Log: fmt.Sprintf("federation %s is %s, not proposed", approve.FederationID, status)}
 	}
 
-	// Verify the sender's org matches the target org and they're admin.
-	senderOrg, orgErr := app.badgerStore.GetAgentOrg(senderID)
-	if orgErr != nil {
-		return &abcitypes.ExecTxResult{Code: 64, Log: fmt.Sprintf("agent %s is not in any organization", senderID[:16])}
-	}
-	if senderOrg != targetOrg {
-		return &abcitypes.ExecTxResult{Code: 64, Log: fmt.Sprintf("approver org %s does not match target org %s", senderOrg, targetOrg)}
+	// Verify the sender is a member of the target org and is its admin.
+	// Multi-org members can approve federations on behalf of any org they
+	// belong to as admin.
+	memberOf, memberErr := app.badgerStore.IsAgentInOrg(senderID, targetOrg)
+	if memberErr != nil || !memberOf {
+		return &abcitypes.ExecTxResult{Code: 64, Log: fmt.Sprintf("agent %s is not a member of target org %s", senderID[:16], targetOrg)}
 	}
 	if !app.isOrgAdmin(targetOrg, senderID) {
 		return &abcitypes.ExecTxResult{Code: 64, Log: fmt.Sprintf("access denied: %s is not admin of target org %s", senderID[:16], targetOrg)}
@@ -1572,16 +1569,19 @@ func (app *SageApp) processFederationRevoke(parsedTx *tx.ParsedTx, height int64,
 		return &abcitypes.ExecTxResult{Code: 66, Log: fmt.Sprintf("federation %s is %s, cannot revoke", revoke.FederationID, status)}
 	}
 
-	// Verify the sender's org is one of the federated orgs and they're admin.
-	revokerOrg, orgErr := app.badgerStore.GetAgentOrg(senderID)
-	if orgErr != nil {
-		return &abcitypes.ExecTxResult{Code: 66, Log: fmt.Sprintf("agent %s is not in any organization", senderID[:16])}
-	}
-	if revokerOrg != proposerOrg && revokerOrg != targetOrg {
-		return &abcitypes.ExecTxResult{Code: 66, Log: "only admins of either org can revoke federations"}
-	}
-	if !app.isOrgAdmin(revokerOrg, senderID) {
-		return &abcitypes.ExecTxResult{Code: 66, Log: fmt.Sprintf("access denied: %s is not admin of org %s", senderID[:16], revokerOrg)}
+	// Verify the sender is a member of either federated org and is its admin.
+	// Multi-org members can revoke from whichever side of the federation they
+	// hold an admin role on.
+	inProposer, _ := app.badgerStore.IsAgentInOrg(senderID, proposerOrg)
+	inTarget, _ := app.badgerStore.IsAgentInOrg(senderID, targetOrg)
+	var revokerOrg string
+	switch {
+	case inProposer && app.isOrgAdmin(proposerOrg, senderID):
+		revokerOrg = proposerOrg
+	case inTarget && app.isOrgAdmin(targetOrg, senderID):
+		revokerOrg = targetOrg
+	default:
+		return &abcitypes.ExecTxResult{Code: 66, Log: "only admins of either federated org can revoke federations"}
 	}
 
 	// Update federation status to "revoked"

@@ -32,7 +32,19 @@ func NewBadgerStore(path string) (*BadgerStore, error) {
 		return nil, fmt.Errorf("open badger: %w", err)
 	}
 
-	return &BadgerStore{db: db}, nil
+	store := &BadgerStore{db: db}
+
+	// Backfill the multi-org agent→orgs reverse index from the authoritative
+	// org_member forward index. Cheap, idempotent — required for in-place
+	// upgrades from versions that only maintained the single-slot agent_org
+	// reverse lookup (which silently dropped non-primary memberships from
+	// access checks).
+	if backfillErr := store.EnsureAgentOrgsIndex(); backfillErr != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("backfill agent_orgs index: %w", backfillErr)
+	}
+
+	return store, nil
 }
 
 // memoryKey returns the BadgerDB key for a memory's on-chain state.
@@ -716,9 +728,26 @@ func orgMemberKey(orgID, agentID string) []byte {
 	return []byte("org_member:" + orgID + ":" + agentID)
 }
 
-// agentOrgKey returns the BadgerDB key for the agent→org reverse lookup.
+// agentOrgKey returns the BadgerDB key for the legacy single-slot agent→org
+// reverse lookup. Retained for backward compatibility with existing callers
+// (e.g. governance handlers that auto-pick a "primary" org). New multi-org
+// access checks must iterate via ListAgentOrgs / IsAgentInOrg instead — this
+// slot only ever holds one of the agent's orgs.
 func agentOrgKey(agentID string) []byte {
 	return []byte("agent_org:" + agentID)
+}
+
+// agentOrgsMemberKey returns the BadgerDB key for the one-to-many agent→orgs
+// reverse index. An entry exists for every (agent, org) the agent is a member
+// of. Iterate by prefix "agent_orgs:<agentID>:" to enumerate. Value is empty —
+// the key itself is the membership marker.
+func agentOrgsMemberKey(agentID, orgID string) []byte {
+	return []byte("agent_orgs:" + agentID + ":" + orgID)
+}
+
+// agentOrgsPrefix returns the BadgerDB scan prefix for an agent's org memberships.
+func agentOrgsPrefix(agentID string) []byte {
+	return []byte("agent_orgs:" + agentID + ":")
 }
 
 // federationKey returns the BadgerDB key for a federation entry.
@@ -776,7 +805,9 @@ func (s *BadgerStore) GetOrg(orgID string) (name, adminAgent string, err error) 
 
 // AddOrgMember adds a member to an organization in BadgerDB.
 // Encoding: clearance (1 byte) + role (length-prefixed) + height (8 bytes).
-// Also sets the agent→org reverse lookup.
+// Maintains both the legacy single-slot agent_org reverse lookup (last add
+// wins, for backward compat) and the one-to-many agent_orgs reverse index
+// that supports multi-org membership.
 func (s *BadgerStore) AddOrgMember(orgID, agentID string, clearance uint8, role string, height int64) error {
 	return s.db.Update(func(txn *badger.Txn) error {
 		val := make([]byte, 1+4+len(role)+8)
@@ -786,18 +817,116 @@ func (s *BadgerStore) AddOrgMember(orgID, agentID string, clearance uint8, role 
 		if err := txn.Set(orgMemberKey(orgID, agentID), val); err != nil {
 			return err
 		}
-		// Reverse lookup: agent→org
+		// Multi-org reverse index — additive, supports membership in N orgs.
+		if err := txn.Set(agentOrgsMemberKey(agentID, orgID), nil); err != nil {
+			return err
+		}
+		// Legacy single-slot reverse lookup — last add wins.
 		return txn.Set(agentOrgKey(agentID), []byte(orgID))
 	})
 }
 
 // RemoveOrgMember removes a member from an organization in BadgerDB.
+// Removes the forward membership entry, the multi-org reverse index entry,
+// and updates the legacy single-slot reverse lookup deterministically (points
+// at any remaining membership in lexical order, or is deleted if none remain).
 func (s *BadgerStore) RemoveOrgMember(orgID, agentID string) error {
 	return s.db.Update(func(txn *badger.Txn) error {
 		if err := txn.Delete(orgMemberKey(orgID, agentID)); err != nil {
 			return err
 		}
-		return txn.Delete(agentOrgKey(agentID))
+		if err := txn.Delete(agentOrgsMemberKey(agentID, orgID)); err != nil {
+			return err
+		}
+		// Recompute the legacy single-slot from remaining memberships so
+		// callers that still use GetAgentOrg keep observing a valid org.
+		remaining, err := scanAgentOrgs(txn, agentID)
+		if err != nil {
+			return err
+		}
+		if len(remaining) == 0 {
+			return txn.Delete(agentOrgKey(agentID))
+		}
+		// Deterministic: lexically smallest orgID wins.
+		sort.Strings(remaining)
+		return txn.Set(agentOrgKey(agentID), []byte(remaining[0]))
+	})
+}
+
+// scanAgentOrgs lists an agent's org memberships from the multi-org reverse
+// index using the given txn. Internal helper — callers outside this file
+// should use ListAgentOrgs.
+func scanAgentOrgs(txn *badger.Txn, agentID string) ([]string, error) {
+	prefix := agentOrgsPrefix(agentID)
+	opts := badger.DefaultIteratorOptions
+	opts.Prefix = prefix
+	opts.PrefetchValues = false
+	it := txn.NewIterator(opts)
+	defer it.Close()
+	var orgs []string
+	for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+		key := it.Item().Key()
+		orgs = append(orgs, string(key[len(prefix):]))
+	}
+	return orgs, nil
+}
+
+// ListAgentOrgs returns every org the agent is a member of. Empty slice if none.
+// Used by multi-org access checks (HasAccessMultiOrg, agentHasTopSecretClearance).
+func (s *BadgerStore) ListAgentOrgs(agentID string) ([]string, error) {
+	var orgs []string
+	err := s.db.View(func(txn *badger.Txn) error {
+		var scanErr error
+		orgs, scanErr = scanAgentOrgs(txn, agentID)
+		return scanErr
+	})
+	return orgs, err
+}
+
+// IsAgentInOrg reports whether the agent is a member of the given org.
+// Cheaper than ListAgentOrgs when only one org needs to be verified.
+func (s *BadgerStore) IsAgentInOrg(agentID, orgID string) (bool, error) {
+	var found bool
+	err := s.db.View(func(txn *badger.Txn) error {
+		_, getErr := txn.Get(agentOrgsMemberKey(agentID, orgID))
+		if getErr == nil {
+			found = true
+			return nil
+		}
+		if getErr == badger.ErrKeyNotFound {
+			return nil
+		}
+		return getErr
+	})
+	return found, err
+}
+
+// EnsureAgentOrgsIndex backfills the one-to-many agent_orgs reverse index from
+// the authoritative org_member forward index. Idempotent — safe to call on
+// every store open. Required for upgrades from versions where the reverse
+// lookup was a single-slot agent_org:<agent> and multi-org members existed
+// only in the forward index.
+func (s *BadgerStore) EnsureAgentOrgsIndex() error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		prefix := []byte("org_member:")
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = prefix
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			suffix := string(it.Item().Key()[len(prefix):])
+			colon := strings.IndexByte(suffix, ':')
+			if colon < 0 {
+				continue
+			}
+			orgID := suffix[:colon]
+			agentID := suffix[colon+1:]
+			if err := txn.Set(agentOrgsMemberKey(agentID, orgID), nil); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 
@@ -1429,6 +1558,11 @@ func (s *BadgerStore) GetFederationAllowedDepts(fedID string) ([]string, error) 
 
 // HasAccessMultiOrg checks multi-org access: direct grants, same-org clearance, or federation agreements.
 // Uses blockTime for deterministic expiry checks (not time.Now()).
+//
+// Multi-org members: iterates every org the agent is a member of, granting
+// same-org access if any of those orgs owns the domain at sufficient clearance,
+// and falling back to a federation check between any agent org and the domain
+// owner's orgs.
 func (s *BadgerStore) HasAccessMultiOrg(domain, agentID string, memoryClassification uint8, blockTime time.Time) (bool, error) {
 	// Step 1: Check direct grant (existing HasAccess — covers same-org grants)
 	directAccess, err := s.HasAccess(domain, agentID, 1, blockTime)
@@ -1436,42 +1570,73 @@ func (s *BadgerStore) HasAccessMultiOrg(domain, agentID string, memoryClassifica
 		return true, nil
 	}
 
-	// Step 2: Check org membership
-	agentOrg, err := s.GetAgentOrg(agentID)
-	if err != nil {
+	// Step 2: Enumerate every org the agent is a member of.
+	agentOrgs, err := s.ListAgentOrgs(agentID)
+	if err != nil || len(agentOrgs) == 0 {
 		// Agent not in any org — only direct grants work
 		return false, nil
 	}
 
-	// Step 3: Get agent's clearance within their org
-	agentClearance, _, err := s.GetMemberClearance(agentOrg, agentID)
-	if err != nil {
-		return false, nil
-	}
-
-	// Step 4: Check if the domain belongs to the same org
+	// Step 3: Resolve the domain owner's orgs (the owner can also be multi-org).
 	domainOwner, err := s.GetDomainOwner(domain)
 	if err != nil {
 		return false, nil // Domain doesn't exist
 	}
-	domainOrg, err := s.GetAgentOrg(domainOwner)
-	if err != nil {
-		// Domain owner not in an org — fall back to direct grants only
+	domainOrgs, err := s.ListAgentOrgs(domainOwner)
+	if err != nil || len(domainOrgs) == 0 {
 		return false, nil
 	}
+	domainOrgSet := make(map[string]struct{}, len(domainOrgs))
+	for _, o := range domainOrgs {
+		domainOrgSet[o] = struct{}{}
+	}
 
-	if agentOrg == domainOrg {
-		// Same org — just check clearance level
-		if agentClearance >= memoryClassification {
+	// Step 4: Same-org access — does any of the agent's orgs own this domain
+	// at sufficient clearance? This is the path that the previous single-slot
+	// implementation silently failed on whenever the agent's "primary" org
+	// had been overwritten by a later AddOrgMember to a different org.
+	for _, agentOrg := range agentOrgs {
+		if _, sameOrg := domainOrgSet[agentOrg]; !sameOrg {
+			continue
+		}
+		clearance, _, gerr := s.GetMemberClearance(agentOrg, agentID)
+		if gerr != nil {
+			continue
+		}
+		if clearance >= memoryClassification {
 			return true, nil
 		}
-		return false, nil
 	}
 
-	// Step 5: Different org — need federation agreement
+	// Step 5: Different org — need federation agreement. Try every (agentOrg,
+	// domainOrg) pairing; the first active federation that satisfies clearance
+	// and dept constraints wins.
+	for _, agentOrg := range agentOrgs {
+		clearance, _, gerr := s.GetMemberClearance(agentOrg, agentID)
+		if gerr != nil {
+			continue
+		}
+		for _, domainOrg := range domainOrgs {
+			if agentOrg == domainOrg {
+				continue
+			}
+			ok, fedErr := s.checkFederationAccess(agentOrg, domainOrg, agentID, clearance, memoryClassification, blockTime)
+			if fedErr == nil && ok {
+				return true, nil
+			}
+		}
+	}
+
+	return false, nil
+}
+
+// checkFederationAccess evaluates a single (agentOrg, domainOrg) pair against
+// any active federation between them. Extracted so HasAccessMultiOrg can fan
+// out across multi-org members without nested loops blowing up the function.
+func (s *BadgerStore) checkFederationAccess(agentOrg, domainOrg, agentID string, agentClearance, memoryClassification uint8, blockTime time.Time) (bool, error) {
 	fedID, err := s.FindFederation(agentOrg, domainOrg)
 	if err != nil {
-		return false, nil // No federation
+		return false, nil
 	}
 
 	// Step 6: Get federation details and check constraints
