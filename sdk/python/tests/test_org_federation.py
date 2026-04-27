@@ -6,8 +6,12 @@ import respx
 
 BASE_URL = "http://localhost:8080"
 
-ORG_ID = "test-org-1"
-TARGET_ORG_ID = "test-org-2"
+# 32-char lowercase hex orgIDs match the format produced by
+# processOrgRegister (sha256 first-16-bytes hex), which `get_org()` sniffs
+# via `_looks_like_org_id` to route directly to /v1/org/{org_id} instead of
+# the new /v1/org/by-name/{name} endpoint added in v6.6.9.
+ORG_ID = "01234567890123456789012345678901"
+TARGET_ORG_ID = "fedcba9876543210fedcba9876543210"
 FED_ID = "fed-abc-123"
 AGENT_ID = "b" * 64
 
@@ -54,6 +58,38 @@ def test_get_org(client, mock_api):
     result = client.get_org(ORG_ID)
     assert result["name"] == "Test Org"
     assert result["org_id"] == ORG_ID
+
+
+def test_get_org_by_name_routes_to_by_name_endpoint(client, mock_api):
+    # Non-hex identifier must route to /v1/org/by-name/{name} and unwrap the
+    # single match. Locks in the v6.6.9 hex-vs-name sniffing in get_org.
+    org_data = {
+        "org_id": ORG_ID,
+        "name": "levelup",
+        "description": "",
+        "owner_agent": "a" * 64,
+        "created_height": 10,
+    }
+    mock_api.get("/v1/org/by-name/levelup").mock(
+        return_value=httpx.Response(200, json={"orgs": [org_data]})
+    )
+    result = client.get_org("levelup")
+    assert result["org_id"] == ORG_ID
+    assert result["name"] == "levelup"
+
+
+def test_get_org_by_name_ambiguous_match_raises(client, mock_api):
+    # Multiple admins registering the same name produces multiple orgIDs;
+    # get_org cannot disambiguate, must raise ValueError so callers fall back
+    # to list_orgs_by_name.
+    mock_api.get("/v1/org/by-name/levelup").mock(
+        return_value=httpx.Response(200, json={"orgs": [
+            {"org_id": "0" * 32, "name": "levelup", "owner_agent": "a" * 64, "created_height": 1},
+            {"org_id": "1" * 32, "name": "levelup", "owner_agent": "b" * 64, "created_height": 2},
+        ]})
+    )
+    with pytest.raises(ValueError):
+        client.get_org("levelup")
 
 
 def test_add_org_member(client, mock_api):
