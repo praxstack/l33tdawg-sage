@@ -1,0 +1,270 @@
+package mcp
+
+// HTTP transports for the SAGE MCP server.
+//
+// Two endpoints are exposed under /v1/mcp:
+//   - GET  /v1/mcp/sse           — Server-Sent Events (older MCP spec, used by
+//                                  ChatGPT today + other browser-friendly
+//                                  clients). Persistent stream from server →
+//                                  client. Paired with POST /v1/mcp/messages
+//                                  for client → server JSON-RPC requests.
+//   - POST /v1/mcp/streamable    — Streamable-HTTP transport (newer MCP spec,
+//                                  single endpoint, request/response over
+//                                  one chunked-encoded HTTP exchange).
+//
+// Both transports share the SAME JSON-RPC dispatch path as the stdio server
+// (Server.DispatchJSONRPC). No duplicate tool routing.
+//
+// Authentication: bearer token via Authorization header (validated against
+// the SHA-256 token store). Token issuance/revocation lives in
+// api/rest/mcp_tokens.go and uses ed25519 admin auth — orthogonal from this
+// transport layer.
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// SSESessionRegistry tracks live SSE sessions so that the paired
+// POST /v1/mcp/messages?sessionId=... endpoint can route a JSON-RPC request's
+// response back to the right client stream.
+type SSESessionRegistry struct {
+	mu       sync.RWMutex
+	sessions map[string]*sseSession
+}
+
+type sseSession struct {
+	id      string
+	out     chan []byte // serialized JSON-RPC payloads, written to the SSE stream
+	done    chan struct{}
+	created time.Time
+}
+
+// NewSSESessionRegistry creates an empty SSE session registry.
+func NewSSESessionRegistry() *SSESessionRegistry {
+	return &SSESessionRegistry{sessions: make(map[string]*sseSession)}
+}
+
+func (r *SSESessionRegistry) register(id string) *sseSession {
+	sess := &sseSession{
+		id:      id,
+		out:     make(chan []byte, 16),
+		done:    make(chan struct{}),
+		created: time.Now(),
+	}
+	r.mu.Lock()
+	r.sessions[id] = sess
+	r.mu.Unlock()
+	return sess
+}
+
+func (r *SSESessionRegistry) lookup(id string) *sseSession {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.sessions[id]
+}
+
+func (r *SSESessionRegistry) unregister(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if sess, ok := r.sessions[id]; ok {
+		close(sess.done)
+		delete(r.sessions, id)
+	}
+}
+
+// HTTPTransport wires a Server's DispatchJSONRPC handler into chi/net-http
+// via SSE + Streamable-HTTP transports. The SAME tool registry is used —
+// only the I/O envelope differs.
+type HTTPTransport struct {
+	server   *Server
+	sessions *SSESessionRegistry
+}
+
+// NewHTTPTransport wraps a Server with HTTP-MCP transport handlers.
+func NewHTTPTransport(server *Server) *HTTPTransport {
+	return &HTTPTransport{
+		server:   server,
+		sessions: NewSSESessionRegistry(),
+	}
+}
+
+// CORSMiddleware reflects the request Origin (or wildcards if absent) and
+// answers preflight OPTIONS requests. MCP clients are first-class; the
+// usual same-origin paranoia doesn't apply to local development tools.
+func (t *HTTPTransport) CORSMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			// Non-browser clients (ChatGPT MCP connector, Cursor, custom CLIs)
+			// often send no Origin header — wildcard is safe here because we
+			// gate the actual MCP endpoints with bearer-token auth.
+			origin = "*"
+		}
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Vary", "Origin")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Mcp-Session-Id")
+		w.Header().Set("Access-Control-Max-Age", "300")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// HandleSSE upgrades a GET request into a Server-Sent Events stream. The
+// client receives an "endpoint" event with the URL it should POST JSON-RPC
+// requests to, then any subsequent server-pushed responses on this stream.
+//
+// This is the older MCP spec ("HTTP+SSE") that ChatGPT's connector currently
+// supports. Pairs with HandleSSEMessages.
+func (t *HTTPTransport) HandleSSE(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	// SSE response headers.
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no") // disable nginx proxy buffering
+	w.WriteHeader(http.StatusOK)
+
+	// Allocate a session ID; client uses it on the paired POST.
+	sessionID := uuid.NewString()
+	sess := t.sessions.register(sessionID)
+	defer t.sessions.unregister(sessionID)
+
+	// First event: tell the client where to POST messages.
+	endpointURL := fmt.Sprintf("/v1/mcp/messages?sessionId=%s", sessionID)
+	fmt.Fprintf(w, "event: endpoint\ndata: %s\n\n", endpointURL)
+	flusher.Flush()
+
+	// Heartbeat keeps NATs / proxies from killing idle TCP streams.
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-sess.done:
+			return
+		case payload := <-sess.out:
+			fmt.Fprintf(w, "event: message\ndata: %s\n\n", string(payload))
+			flusher.Flush()
+		case <-heartbeat.C:
+			// SSE comments are ignored by clients but keep the connection alive.
+			if _, hbErr := fmt.Fprint(w, ": heartbeat\n\n"); hbErr != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
+}
+
+// HandleSSEMessages accepts client → server JSON-RPC requests for the
+// SSE-paired transport. The session ID query param routes the response
+// back to the right SSE stream. Requests with notifications (no ID) are
+// ack'd with HTTP 202 Accepted and produce no SSE response.
+func (t *HTTPTransport) HandleSSEMessages(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.URL.Query().Get("sessionId")
+	if sessionID == "" {
+		http.Error(w, `{"error":"missing sessionId"}`, http.StatusBadRequest)
+		return
+	}
+	sess := t.sessions.lookup(sessionID)
+	if sess == nil {
+		http.Error(w, `{"error":"unknown sessionId"}`, http.StatusNotFound)
+		return
+	}
+
+	body, readErr := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if readErr != nil {
+		http.Error(w, `{"error":"body read"}`, http.StatusBadRequest)
+		return
+	}
+
+	var req jsonRPCRequest
+	if unmarshalErr := json.Unmarshal(body, &req); unmarshalErr != nil {
+		http.Error(w, `{"error":"invalid JSON-RPC"}`, http.StatusBadRequest)
+		return
+	}
+
+	resp := t.server.DispatchJSONRPC(r.Context(), &req)
+	if resp == nil {
+		// Notification — no response on the SSE stream, just acknowledge.
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+
+	payload, marshalErr := json.Marshal(resp)
+	if marshalErr != nil {
+		http.Error(w, `{"error":"marshal response"}`, http.StatusInternalServerError)
+		return
+	}
+
+	// Push the response onto the SSE stream. If the channel is full or the
+	// session has gone away, fall back to writing it in the HTTP response
+	// body (some clients accept either path).
+	select {
+	case sess.out <- payload:
+		w.WriteHeader(http.StatusAccepted)
+	case <-sess.done:
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(payload)
+	default:
+		// Channel full — best effort: write directly.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(payload)
+	}
+}
+
+// HandleStreamable handles a single-shot JSON-RPC request via the newer
+// "Streamable HTTP" MCP transport. Request body is JSON-RPC; response body
+// is the marshaled JSON-RPC reply with chunked encoding. Notifications
+// return HTTP 202.
+//
+// This is the simplest possible MCP transport — no session state, no
+// dual endpoints. We expose it because the request handler is shared with
+// SSE and the diff cost is essentially zero.
+func (t *HTTPTransport) HandleStreamable(w http.ResponseWriter, r *http.Request) {
+	body, readErr := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if readErr != nil {
+		http.Error(w, `{"error":"body read"}`, http.StatusBadRequest)
+		return
+	}
+
+	var req jsonRPCRequest
+	if unmarshalErr := json.Unmarshal(body, &req); unmarshalErr != nil {
+		http.Error(w, `{"error":"invalid JSON-RPC"}`, http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+
+	resp := t.server.DispatchJSONRPC(ctx, &req)
+	if resp == nil {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
+}
