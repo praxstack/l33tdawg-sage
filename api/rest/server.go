@@ -267,6 +267,14 @@ func (s *Server) setupRouter() chi.Router {
 		r.Post("/v1/governance/propose", s.handleGovPropose)
 		r.Post("/v1/governance/vote", s.handleGovVote)
 		r.Post("/v1/governance/cancel", s.handleGovCancel)
+
+		// HTTP MCP token management — admin issues tokens for external MCP
+		// clients (ChatGPT, Cursor, etc.) that can't sign every request with
+		// ed25519. The tokens themselves are validated by the bearer-auth
+		// middleware on /v1/mcp/sse + /v1/mcp/streamable, NOT here.
+		r.Post("/v1/mcp/tokens", s.handleMCPTokenIssue)
+		r.Get("/v1/mcp/tokens", s.handleMCPTokenList)
+		r.Delete("/v1/mcp/tokens/{id}", s.handleMCPTokenRevoke)
 	})
 
 	return r

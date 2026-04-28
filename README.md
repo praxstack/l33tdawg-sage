@@ -57,7 +57,30 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What’s New in v6.6
+## What's New in v6.7
+
+- **HTTPS-capable HTTP MCP transport (6.7.0)** — SAGE is now addressable as an HTTP/HTTPS MCP server in addition to the existing stdio transport. Non-Claude-Code agents — ChatGPT, Cursor, Cline, and any custom HTTP MCP client — can now connect to SAGE without spawning `sage-gui mcp` as a subprocess. Three new endpoints under `/v1/mcp`:
+  - `GET /v1/mcp/sse` — Server-Sent Events transport (older MCP spec, currently used by ChatGPT's connector). Persistent stream from server → client; pair with `POST /v1/mcp/messages?sessionId=…` for client → server JSON-RPC requests.
+  - `POST /v1/mcp/streamable` — newer Streamable-HTTP single-endpoint transport for MCP clients that prefer one round-trip per call.
+  - The same hand-rolled JSON-RPC dispatcher (`Server.DispatchJSONRPC`) handles BOTH the existing stdio path AND the new HTTP transports — no third-party MCP library, no duplicate tool routing. Tool registry in `internal/mcp/tools.go` is unchanged.
+
+  TLS is on by default — `:8443` already serves the chi router, so the HTTP MCP endpoints inherit HTTPS automatically. Plain `:8080` is also live for local development. ChatGPT's MCP connector requires HTTPS, so the public-facing entry point is `https://<host>:8443/v1/mcp/sse`.
+
+  **Bearer-token auth.** External MCP clients can't easily ed25519-sign every request, so we added a simple bearer-token path: `Authorization: Bearer <token>`. Tokens are 32 random bytes, base64url-encoded; we store the SHA-256 digest only, so a DB compromise can't leak working credentials. Token issuance/revocation is admin-managed via the existing ed25519-signed REST API at `POST /v1/mcp/tokens`, `GET /v1/mcp/tokens`, `DELETE /v1/mcp/tokens/{id}`. CLI parity: `sage-gui mcp-token create --agent <id> --name <label>`, `sage-gui mcp-token list`, `sage-gui mcp-token revoke <id>`.
+
+  **CORS.** `/v1/mcp/*` reflects the request `Origin` (or wildcards if absent), allows the bearer-relevant headers (`Authorization`, `Content-Type`, `Mcp-Session-Id`), and answers preflight. MCP clients are first-class — same-origin paranoia doesn't apply to local development tools.
+
+  **ChatGPT setup walkthrough.** Open ChatGPT → Settings → Connectors → Create New → MCP Server. Set:
+  1. **Name:** SAGE (or whatever)
+  2. **MCP Server URL:** `https://<your-host>:8443/v1/mcp/sse`
+  3. **Authentication:** Custom (Bearer Token)
+  4. **Token:** paste the value from `sage-gui mcp-token create --agent <your-agent-id> --name chatgpt`
+
+  Self-signed cert note: SAGE auto-generates its own CA at `~/.sage/certs/` on first boot. ChatGPT's connector currently rejects self-signed certs, so for local-only setups you'll need to either (a) tunnel via cloudflared/ngrok and let the tunnel terminate TLS with a publicly-trusted cert, or (b) put SAGE behind a reverse proxy that uses a Let's Encrypt cert. ChatGPT cannot reach `localhost` either way — the tunnel/proxy is required for any cloud-hosted MCP client.
+
+  Files: new `internal/mcp/http_transport.go` (SSE + Streamable transports + CORS middleware), new `api/rest/mcp_tokens_handler.go` (admin issue/list/revoke), new `api/rest/middleware/bearer.go` (bearer auth), new `internal/store/mcp_tokens.go` (SHA-256 digest store + `mcp_tokens` table). Tests: `internal/mcp/http_transport_test.go`, `api/rest/middleware/bearer_test.go`, `api/rest/mcp_tokens_handler_test.go`, `internal/store/mcp_tokens_test.go`. Stdio MCP path is untouched — Claude Code spawning `sage-gui mcp` still works exactly as before.
+
+## What's New in v6.6
 
 - **Tags on propose + tag-filtered semantic recall (6.6.0)** — `POST /v1/memory/submit` now accepts `tags`, and `/v1/memory/query` and `/search` accept a `tags` filter (any-match / OR semantics). MCP `toolRemember` drops the old 2-step tag dance — single atomic submit. Python SDK: `propose(tags=...)` and `query(tags=...)`.
 - **Offchain SQLITE_BUSY silent-drop fix (6.6.1)** — Under sustained SQLite lock contention, the offchain `Commit()` flush could exhaust its retry budget, log CRITICAL, and silently clear pending writes while BadgerDB had already advanced — CometBFT then skipped replay on restart and the writes were lost invisibly. Now: flush runs *before* BadgerDB state is saved, retry budget raised to 30 attempts, panic on exhaustion so CometBFT replays the block. First surfaced by Level Up: 521 accepted submits with zero new visible memories across 96 hours on 6.5.5.

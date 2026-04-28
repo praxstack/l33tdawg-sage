@@ -545,6 +545,9 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 	// Migration: add pipeline_messages table.
 	s.migratePipeline(ctx)
 
+	// Migration: add mcp_tokens table for HTTP MCP transport bearer auth.
+	s.migrateMCPTokens(ctx)
+
 	// FTS5 full-text search index on memory content.
 	// Used as a fallback when semantic embeddings are unavailable (hash mode).
 	_, _ = s.writeExecContext(ctx, `

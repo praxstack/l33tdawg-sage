@@ -5,9 +5,11 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -30,8 +32,10 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/l33tdawg/sage/api/rest"
+	"github.com/l33tdawg/sage/api/rest/middleware"
 	sageabci "github.com/l33tdawg/sage/internal/abci"
 	"github.com/l33tdawg/sage/internal/embedding"
+	"github.com/l33tdawg/sage/internal/mcp"
 	"github.com/l33tdawg/sage/internal/memory"
 	"github.com/l33tdawg/sage/internal/metrics"
 	"github.com/l33tdawg/sage/internal/orchestrator"
@@ -403,6 +407,17 @@ func runServe() error {
 	r.Mount("/", restServer.Router())
 	// Mount dashboard routes (these don't collide — dashboard uses /v1/dashboard/ prefix)
 	dashboard.RegisterRoutes(r)
+
+	// HTTP MCP transport — enables non-Claude-Code agents (ChatGPT, Cursor,
+	// Cline, custom HTTP MCP clients) to talk to SAGE without spawning a
+	// stdio subprocess. Two transports under /v1/mcp:
+	//   /v1/mcp/sse        — SSE (older spec, ChatGPT-compatible today)
+	//   /v1/mcp/messages   — paired POST endpoint for SSE clients
+	//   /v1/mcp/streamable — newer Streamable-HTTP spec
+	//
+	// Auth: bearer token in Authorization header, validated against the
+	// mcp_tokens table. Tokens are SHA-256-hashed before storage.
+	mountMCPHTTPTransport(r, sqliteStore, cfg, logger)
 
 	// Start background memory cleanup loop
 	memory.StartCleanupLoop(ctx, sqliteStore)
@@ -1101,6 +1116,84 @@ func seedNetworkAgents(ctx context.Context, s *store.SQLiteStore, cometHome stri
 	if seeded > 0 {
 		logger.Info().Int("count", seeded).Msg("auto-seeded network agents from existing chain state")
 	}
+}
+
+// mountMCPHTTPTransport wires the HTTP/HTTPS MCP transport endpoints onto
+// the given chi router. Requires SQLite for the bearer-token store.
+//
+// The MCP server is created with a per-request agent identity resolved from
+// the bearer token — each token belongs to exactly one agent, so we mint a
+// fresh ed25519 signing pair for the transport and let the underlying tool
+// handlers run as that token's agent. (Long-term, an enhancement would let
+// each token also carry its own agent.key — for now they share a transport
+// key and the agent_id is propagated via context.)
+//
+// CORS is liberal — MCP clients are first-class.
+func mountMCPHTTPTransport(r chi.Router, sqliteStore *store.SQLiteStore, cfg *Config, logger zerolog.Logger) {
+	// Use the node's own agent identity as the underlying signing key for
+	// transport-originated REST calls. The actual *acting* agent is supplied
+	// by the bearer-token middleware via request context — downstream tool
+	// handlers can inspect it for audit / on-chain RBAC.
+	keyData, readErr := os.ReadFile(cfg.AgentKey) //nolint:gosec // path from trusted config
+	if readErr != nil {
+		logger.Warn().Err(readErr).Msg("HTTP MCP: cannot load agent key — transport disabled")
+		return
+	}
+	var transportKey ed25519.PrivateKey
+	switch len(keyData) {
+	case ed25519.SeedSize:
+		transportKey = ed25519.NewKeyFromSeed(keyData)
+	case ed25519.PrivateKeySize:
+		transportKey = ed25519.PrivateKey(keyData)
+	default:
+		logger.Warn().Int("len", len(keyData)).Msg("HTTP MCP: invalid agent key size — transport disabled")
+		return
+	}
+
+	// Build the MCP Server reusing the existing stdio Server logic.
+	// The base URL points at the local REST API so tool handlers funnel
+	// through the same signed-REST pipeline as stdio.
+	baseURL := restBaseURL(cfg.RESTAddr)
+	mcpServer := mcp.NewServer(baseURL, transportKey)
+	mcpServer.SetVersion(version)
+
+	transport := mcp.NewHTTPTransport(mcpServer)
+
+	// Bearer-auth lookup: take the SHA-256 digest the middleware computed,
+	// hand it to SQLite, return the agent_id. Translate the store's
+	// ErrTokenRevoked into the middleware-side sentinel so 401 vs 500 are
+	// distinguishable.
+	bearerLookup := func(ctx context.Context, tokenSHA256 string) (string, error) {
+		tok, err := sqliteStore.LookupMCPToken(ctx, tokenSHA256)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return "", err
+			}
+			if errors.Is(err, store.ErrTokenRevoked) {
+				return "", middleware.ErrMCPTokenRevoked
+			}
+			return "", err
+		}
+		if tok == nil {
+			return "", sql.ErrNoRows
+		}
+		return tok.AgentID, nil
+	}
+
+	r.Route("/v1/mcp", func(r chi.Router) {
+		r.Use(transport.CORSMiddleware)
+		// /tokens is admin-managed by the ed25519 path on the main router —
+		// don't double-mount it here. The bearer middleware applies only to
+		// the actual transport endpoints.
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.MCPBearerAuthMiddleware(bearerLookup))
+			r.Get("/sse", transport.HandleSSE)
+			r.Post("/messages", transport.HandleSSEMessages)
+			r.Post("/streamable", transport.HandleStreamable)
+		})
+	})
+
+	logger.Info().Msg("HTTP MCP transport enabled (/v1/mcp/sse, /v1/mcp/streamable)")
 }
 
 // loadNodeSigningKey extracts the Ed25519 private key from CometBFT's priv_validator_key.json.

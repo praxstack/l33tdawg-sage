@@ -119,12 +119,25 @@ func (s *Server) Run(ctx context.Context) error {
 			continue
 		}
 
-		resp := s.handleRequest(ctx, &req)
+		resp := s.DispatchJSONRPC(ctx, &req)
 		if resp != nil {
 			s.writeResponse(resp)
 		}
 	}
 	return scanner.Err()
+}
+
+// DispatchJSONRPC routes a single JSON-RPC request to the appropriate handler
+// and returns the response (or nil for notifications). This is the shared
+// dispatch path used by BOTH the stdio Run() loop AND the HTTP transports
+// (SSE and Streamable-HTTP) — extract once, reuse everywhere, no duplicate
+// tool routing.
+//
+// Returning nil indicates a JSON-RPC notification with no response (e.g.
+// "notifications/initialized"). HTTP callers must NOT write a body in that
+// case (HTTP 202 Accepted is the convention for SSE-paired POSTs).
+func (s *Server) DispatchJSONRPC(ctx context.Context, req *jsonRPCRequest) *jsonRPCResponse {
+	return s.handleRequest(ctx, req)
 }
 
 func (s *Server) handleRequest(ctx context.Context, req *jsonRPCRequest) *jsonRPCResponse {
