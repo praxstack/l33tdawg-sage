@@ -1180,18 +1180,21 @@ func mountMCPHTTPTransport(r chi.Router, sqliteStore *store.SQLiteStore, cfg *Co
 		return tok.AgentID, nil
 	}
 
-	r.Route("/v1/mcp", func(r chi.Router) {
-		r.Use(transport.CORSMiddleware)
-		// /tokens is admin-managed by the ed25519 path on the main router —
-		// don't double-mount it here. The bearer middleware applies only to
-		// the actual transport endpoints.
-		r.Group(func(r chi.Router) {
-			r.Use(middleware.MCPBearerAuthMiddleware(bearerLookup))
-			r.Get("/sse", transport.HandleSSE)
-			r.Post("/messages", transport.HandleSSEMessages)
-			r.Post("/streamable", transport.HandleStreamable)
-		})
-	})
+	// IMPORTANT: register the transport endpoints as FLAT paths, not via
+	// r.Route("/v1/mcp", ...). Using a sub-route here mounts a subrouter
+	// that shadows /v1/mcp/tokens (registered on the main api/rest router
+	// with ed25519 auth) — chi resolves the mount as a catchall for
+	// /v1/mcp/* and the explicit /v1/mcp/tokens registration becomes
+	// unreachable, returning 404 to every token-management call. v6.7.0
+	// shipped that bug; this is the v6.7.1 fix.
+	//
+	// /tokens stays admin-managed by the ed25519-auth group on the main
+	// router. The bearer middleware applies only to the SSE/streamable
+	// transport routes wired below.
+	mcpTransportRouter := r.With(transport.CORSMiddleware, middleware.MCPBearerAuthMiddleware(bearerLookup))
+	mcpTransportRouter.Get("/v1/mcp/sse", transport.HandleSSE)
+	mcpTransportRouter.Post("/v1/mcp/messages", transport.HandleSSEMessages)
+	mcpTransportRouter.Post("/v1/mcp/streamable", transport.HandleStreamable)
 
 	logger.Info().Msg("HTTP MCP transport enabled (/v1/mcp/sse, /v1/mcp/streamable)")
 }
