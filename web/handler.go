@@ -304,6 +304,13 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 
 		// Governance routes
 		h.RegisterGovernanceRoutes(r)
+
+		// ChatGPT setup wizard (v6.7.3) — orchestrates cloudflared install,
+		// login, tunnel create, DNS routing, autostart, and token mint so
+		// non-power-users can wire SAGE up to ChatGPT's MCP connector
+		// without touching a terminal. Local-first orchestration only —
+		// no SAGE-hosted relay, the user owns the tunnel end-to-end.
+		h.RegisterChatGPTWizardRoutes(r)
 	})
 
 	// Launch endpoint — redirects to CEREBRUM dashboard.

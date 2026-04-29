@@ -1,6 +1,6 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
-import { fetchStats, fetchGraph, fetchMemories, deleteMemory, fetchHealth, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchTasks, updateTaskStatus, createTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote } from './api.js';
+import { fetchStats, fetchGraph, fetchMemories, deleteMemory, fetchHealth, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchTasks, updateTaskStatus, createTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken } from './api.js';
 
 const { h, render, createContext } = preact;
 const { useState, useEffect, useRef, useCallback, useContext } = preactHooks;
@@ -4782,6 +4782,10 @@ function NetworkPage({ sse }) {
     const [tagTransfer, setTagTransfer] = useState(null); // { agentId, agentName, tags: [], step: 'tags'|'target', selectedTag: null }
     const [transferring, setTransferring] = useState(false);
 
+    // External-client wizard state (v6.7.3)
+    const [showChatGPTWizard, setShowChatGPTWizard] = useState(false);
+    const [showCursorPanel, setShowCursorPanel] = useState(false);
+
     // Governance state
     const [govProposals, setGovProposals] = useState([]);
     const [activeProposal, setActiveProposal] = useState(null);
@@ -5208,6 +5212,34 @@ function NetworkPage({ sse }) {
                 </div>
             `}
 
+            <div class="ext-clients-section">
+                <div class="ext-clients-header">
+                    <h3>Connect external clients <${HelpTip} text="Wire SAGE up to ChatGPT, Cursor, Cline, or Claude Desktop. Local-first — your tunnel, your domain, your bearer. SAGE never proxies through anyone's cloud." /></h3>
+                </div>
+                <div class="ext-clients-grid">
+                    <div class="ext-client-card" role="button" tabIndex="0"
+                        onClick=${() => setShowChatGPTWizard(true)}
+                        onKeyDown=${e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setShowChatGPTWizard(true); } }}>
+                        <div class="ext-client-icon">🤖</div>
+                        <div class="ext-client-info">
+                            <div class="ext-client-title">Connect to ChatGPT</div>
+                            <div class="ext-client-desc">6-click wizard: cloudflared tunnel + DNS + autostart + bearer token. Requires a domain on Cloudflare.</div>
+                        </div>
+                        <div class="ext-client-cta">Setup wizard →</div>
+                    </div>
+                    <div class="ext-client-card" role="button" tabIndex="0"
+                        onClick=${() => setShowCursorPanel(true)}
+                        onKeyDown=${e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setShowCursorPanel(true); } }}>
+                        <div class="ext-client-icon">💻</div>
+                        <div class="ext-client-info">
+                            <div class="ext-client-title">Connect to Cursor / Cline / Claude Desktop</div>
+                            <div class="ext-client-desc">Bearer-only — no public DNS needed. The most local-first option. Just mint a token.</div>
+                        </div>
+                        <div class="ext-client-cta">Show me how →</div>
+                    </div>
+                </div>
+            </div>
+
             <div class="agent-list">
                 ${agents.map(agent => {
                     const isExpanded = expandedId === agent.agent_id;
@@ -5491,6 +5523,8 @@ function NetworkPage({ sse }) {
                 </div>
             `}
             ${showWizard && html`<${AddAgentWizard} onClose=${() => setShowWizard(false)} onCreated=${() => { setShowWizard(false); loadAgents(); }} />`}
+            ${showChatGPTWizard && html`<${ChatGPTSetupWizard} agents=${agents} onClose=${() => setShowChatGPTWizard(false)} />`}
+            ${showCursorPanel && html`<${CursorSetupPanel} agents=${agents} onClose=${() => setShowCursorPanel(false)} />`}
             ${showRemoveConfirm && html`<${RemoveConfirmModal} agent=${showRemoveConfirm} onConfirm=${() => handleRemove(showRemoveConfirm)} onCancel=${() => setShowRemoveConfirm(null)} />`}
             ${showRotateConfirm && html`
                 <div class="wizard-overlay" onClick=${(e) => { if (e.target === e.currentTarget) setShowRotateConfirm(null); }}>
@@ -5882,6 +5916,427 @@ function AddAgentWizard({ onClose, onCreated }) {
                             </button>
                         `
                     }
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+// ChatGPTSetupWizard — guided 6-step flow that wires SAGE to ChatGPT's MCP
+// connector via cloudflared. v6.7.3.
+//
+// Local-first philosophy: SAGE never proxies through anyone's cloud. The
+// user owns the cloudflared tunnel, the Cloudflare account, and the domain.
+// We just collapse 9 manual terminal steps into a UI.
+function ChatGPTSetupWizard({ agents, onClose }) {
+    const [step, setStep] = useState(1);
+    const [error, setError] = useState(null);
+
+    // Step 2: install
+    const [cloudflaredInstalled, setCloudflaredInstalled] = useState(null); // null | true | false
+    const [cloudflaredVersion, setCloudflaredVersion] = useState('');
+    const [installLog, setInstallLog] = useState('');
+    const [installing, setInstalling] = useState(false);
+
+    // Step 3: login
+    const [loginURL, setLoginURL] = useState('');
+    const [loginAuthenticated, setLoginAuthenticated] = useState(false);
+    const loginPollRef = useRef(null);
+
+    // Step 4: zone + subdomain
+    const [zone, setZone] = useState('');
+    const [subdomain, setSubdomain] = useState('sage');
+
+    // Step 5: tunnel create progress
+    const [tunnelLog, setTunnelLog] = useState('');
+    const [tunnelHostname, setTunnelHostname] = useState('');
+    const [tunnelUUID, setTunnelUUID] = useState('');
+    const [creatingTunnel, setCreatingTunnel] = useState(false);
+
+    // Step 6: token mint
+    const [agentChoice, setAgentChoice] = useState('');
+    const [tokenName, setTokenName] = useState('chatgpt');
+    const [mintedToken, setMintedToken] = useState(null);
+    const [minting, setMinting] = useState(false);
+
+    // Auto-check cloudflared on entry to step 2.
+    useEffect(() => {
+        if (step !== 2) return;
+        wizardCheckCloudflared().then(d => {
+            setCloudflaredInstalled(!!d.installed);
+            setCloudflaredVersion(d.version || '');
+        }).catch(() => setCloudflaredInstalled(false));
+    }, [step]);
+
+    // Auto-start polling for cert.pem on step 3.
+    useEffect(() => {
+        if (step !== 3 || loginAuthenticated) return;
+        loginPollRef.current = setInterval(async () => {
+            try {
+                const s = await wizardLoginStatus();
+                if (s.authenticated) {
+                    setLoginAuthenticated(true);
+                    clearInterval(loginPollRef.current);
+                    loginPollRef.current = null;
+                }
+            } catch (e) { /* ignore */ }
+        }, 2000);
+        return () => { if (loginPollRef.current) { clearInterval(loginPollRef.current); loginPollRef.current = null; } };
+    }, [step, loginAuthenticated]);
+
+    const startInstall = async () => {
+        setInstalling(true);
+        setInstallLog('');
+        try {
+            const res = await wizardInstallCloudflared();
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buf = '';
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                buf += decoder.decode(value, { stream: true });
+                setInstallLog(prev => prev + decoder.decode(value, { stream: false }));
+            }
+            // Re-check.
+            const d = await wizardCheckCloudflared();
+            setCloudflaredInstalled(!!d.installed);
+            setCloudflaredVersion(d.version || '');
+        } catch (e) { setError('install failed: ' + e.message); }
+        setInstalling(false);
+    };
+
+    const startLogin = async () => {
+        setError(null);
+        try {
+            const r = await wizardStartLogin();
+            if (r.error) { setError(r.error); return; }
+            setLoginURL(r.url || '');
+        } catch (e) { setError('login failed: ' + e.message); }
+    };
+
+    const startCreateTunnel = async () => {
+        setCreatingTunnel(true);
+        setTunnelLog('');
+        setError(null);
+        try {
+            const res = await wizardCreateTunnel(subdomain, zone);
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buf = '';
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                const chunk = decoder.decode(value, { stream: true });
+                buf += chunk;
+                setTunnelLog(prev => prev + chunk);
+            }
+            // Parse final hostname/tunnel_uuid out of buffered output.
+            const hostMatch = buf.match(/hostname:\s+(\S+)/);
+            const uuidMatch = buf.match(/tunnel_uuid:\s+([0-9a-f-]+)/);
+            if (hostMatch) setTunnelHostname(hostMatch[1]);
+            if (uuidMatch) setTunnelUUID(uuidMatch[1]);
+            const errMatch = buf.match(/^error:\s+(.+)$/m);
+            if (errMatch && !hostMatch) setError(errMatch[1]);
+            else if (hostMatch) setStep(6);
+        } catch (e) { setError('tunnel create failed: ' + e.message); }
+        setCreatingTunnel(false);
+    };
+
+    const startMintToken = async () => {
+        setMinting(true);
+        setError(null);
+        try {
+            const r = await wizardMintToken(agentChoice, tokenName);
+            if (r.error) { setError(r.error); }
+            else { setMintedToken(r); setStep(7); }
+        } catch (e) { setError('mint token failed: ' + e.message); }
+        setMinting(false);
+    };
+
+    const eligibleAgents = (agents || []).filter(a => a.status !== 'removed');
+
+    return html`
+        <div class="wizard-overlay" onClick=${e => { if (e.target === e.currentTarget) onClose(); }}>
+            <div class="wizard-modal" style="max-width:680px;max-height:85vh;display:flex;flex-direction:column;">
+                <div class="wizard-header">
+                    <h2>Connect to ChatGPT — Step ${step} of 7</h2>
+                    <button class="detail-close" onClick=${onClose}>x</button>
+                </div>
+                <div class="wizard-body" style="overflow-y:auto;flex:1;padding:20px;">
+                    ${error && html`<div class="import-error" style="margin-bottom:12px;">${error}</div>`}
+
+                    ${step === 1 && html`
+                        <div style="line-height:1.55;color:var(--text);">
+                            <h3 style="margin-top:0;color:var(--accent);">SAGE is local-first by design</h3>
+                            <p>ChatGPT lives at <code>chatgpt.com</code>. SAGE lives on <strong>your machine</strong>. To bridge them, you'll set up a tunnel from a domain you own to your localhost.</p>
+                            <p><strong>SAGE doesn't proxy through our cloud, ever.</strong> You own the tunnel. We just collapse the 9 terminal commands it normally takes into 6 clicks.</p>
+                            <h4 style="color:var(--accent);">Prerequisites</h4>
+                            <ul>
+                                <li>A free <a href="https://dash.cloudflare.com/sign-up" target="_blank" rel="noopener" style="color:var(--accent);">Cloudflare account</a></li>
+                                <li>A domain on Cloudflare DNS (a <code>.xyz</code> is ~$1/year if you don't already own one)</li>
+                            </ul>
+                            <div class="warning-banner" style="margin-top:16px;">
+                                <strong>Don't want to own a domain?</strong> Cancel this wizard and pick the
+                                <em>Connect to Cursor / Cline / Claude Desktop</em> card instead. Those clients accept bearer-only and don't need a public URL — that's actually <em>more</em> local-first than ChatGPT.
+                            </div>
+                        </div>
+                    `}
+
+                    ${step === 2 && html`
+                        <div style="line-height:1.55;">
+                            <h3 style="margin-top:0;">cloudflared install check</h3>
+                            ${cloudflaredInstalled === null && html`<p style="color:var(--text-dim);">Checking...</p>`}
+                            ${cloudflaredInstalled === true && html`
+                                <p style="color:var(--accent-green);">✓ cloudflared is installed.</p>
+                                <pre style="background:var(--bg-elev);padding:8px;border-radius:4px;font-size:12px;color:var(--text-dim);">${cloudflaredVersion}</pre>
+                            `}
+                            ${cloudflaredInstalled === false && html`
+                                <p>cloudflared isn't on your PATH. We'll install it now via your platform's package manager.</p>
+                                <button class="btn btn-primary" onClick=${startInstall} disabled=${installing}>
+                                    ${installing ? 'Installing…' : 'Install cloudflared'}
+                                </button>
+                                ${installLog && html`<pre style="background:var(--bg-elev);padding:8px;border-radius:4px;font-size:11px;max-height:200px;overflow:auto;margin-top:12px;color:var(--text-dim);white-space:pre-wrap;">${installLog}</pre>`}
+                                <p style="color:var(--text-muted);font-size:12px;margin-top:12px;">
+                                    Or install manually from <a href="https://github.com/cloudflare/cloudflared/releases" target="_blank" rel="noopener" style="color:var(--accent);">github.com/cloudflare/cloudflared/releases</a> and re-run this step.
+                                </p>
+                            `}
+                        </div>
+                    `}
+
+                    ${step === 3 && html`
+                        <div style="line-height:1.55;">
+                            <h3 style="margin-top:0;">Authorize cloudflared with your Cloudflare account</h3>
+                            <p>This is a one-time browser login. cloudflared will print a URL — we'll open it in your browser. After you click "Authorize", a certificate file is dropped at <code>~/.cloudflared/cert.pem</code>.</p>
+                            ${!loginURL && html`
+                                <button class="btn btn-primary" onClick=${startLogin}>Open Cloudflare login</button>
+                            `}
+                            ${loginURL && !loginAuthenticated && html`
+                                <div style="background:var(--bg-elev);padding:12px;border-radius:4px;margin:12px 0;">
+                                    <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">If your browser didn't open automatically:</div>
+                                    <a href=${loginURL} target="_blank" rel="noopener" style="color:var(--accent);word-break:break-all;font-size:12px;">${loginURL}</a>
+                                </div>
+                                <div style="display:flex;align-items:center;gap:8px;color:var(--text-dim);">
+                                    <span class="spinner" style="width:14px;height:14px;"></span>
+                                    Waiting for cert.pem... (poll every 2s)
+                                </div>
+                            `}
+                            ${loginAuthenticated && html`
+                                <p style="color:var(--accent-green);">✓ Authenticated. cert.pem detected.</p>
+                            `}
+                        </div>
+                    `}
+
+                    ${step === 4 && html`
+                        <div style="line-height:1.55;">
+                            <h3 style="margin-top:0;">Pick your hostname</h3>
+                            <p>This is the public URL ChatGPT will hit. SAGE will create a CNAME from
+                                <strong>${subdomain || '<sub>'}.${zone || '<your-domain>'}</strong>
+                                to your localhost via Cloudflare's tunnel.</p>
+                            <div class="wizard-field">
+                                <label>Subdomain</label>
+                                <input class="wizard-input" value=${subdomain} onInput=${e => setSubdomain(e.target.value)} placeholder="sage" />
+                            </div>
+                            <div class="wizard-field">
+                                <label>Domain (must be on your Cloudflare account)</label>
+                                <input class="wizard-input" value=${zone} onInput=${e => setZone(e.target.value)} placeholder="example.com" />
+                                <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">
+                                    Don't have one yet? Add a domain at
+                                    <a href="https://dash.cloudflare.com/?to=/:account/add-site" target="_blank" rel="noopener" style="color:var(--accent);">dash.cloudflare.com</a>.
+                                </div>
+                            </div>
+                            <div style="background:var(--bg-elev);padding:10px;border-radius:4px;font-size:12px;color:var(--text);">
+                                Public URL preview: <strong style="color:var(--accent);">https://${subdomain || 'sage'}.${zone || 'example.com'}</strong>
+                            </div>
+                        </div>
+                    `}
+
+                    ${step === 5 && html`
+                        <div style="line-height:1.55;">
+                            <h3 style="margin-top:0;">Create tunnel + configure autostart</h3>
+                            <p>SAGE will now run the cloudflared dance for you:</p>
+                            <ol style="color:var(--text-dim);font-size:13px;">
+                                <li><code>cloudflared tunnel create sage</code></li>
+                                <li><code>cloudflared tunnel route dns sage ${subdomain}.${zone}</code></li>
+                                <li>Write <code>~/.cloudflared/config.yml</code> with path-restricted ingress (only <code>/v1/mcp/*</code>, <code>/oauth/*</code>, <code>/.well-known/oauth-authorization-server</code>, <code>/health</code> reach localhost; everything else is 404'd at Cloudflare's edge)</li>
+                                <li>Install autostart (launchd plist on macOS, systemd user unit on Linux)</li>
+                                <li>Verify <code>https://${subdomain}.${zone}/health</code> returns 200</li>
+                            </ol>
+                            ${!creatingTunnel && !tunnelHostname && html`
+                                <button class="btn btn-primary" onClick=${startCreateTunnel}>Create tunnel</button>
+                            `}
+                            ${creatingTunnel && html`
+                                <div style="display:flex;align-items:center;gap:8px;color:var(--accent);">
+                                    <span class="spinner" style="width:14px;height:14px;"></span>
+                                    Working...
+                                </div>
+                            `}
+                            ${tunnelLog && html`<pre style="background:var(--bg-elev);padding:8px;border-radius:4px;font-size:11px;max-height:240px;overflow:auto;margin-top:12px;color:var(--text-dim);white-space:pre-wrap;">${tunnelLog}</pre>`}
+                        </div>
+                    `}
+
+                    ${step === 6 && html`
+                        <div style="line-height:1.55;">
+                            <h3 style="margin-top:0;">Mint a bearer token for ChatGPT</h3>
+                            <p>The bearer is the credential ChatGPT will use to talk to SAGE. Tokens are scoped to a specific agent identity — pick (or create) the agent ChatGPT should run as.</p>
+                            <div class="wizard-field">
+                                <label>Agent</label>
+                                <select class="wizard-select" value=${agentChoice} onInput=${e => setAgentChoice(e.target.value)}>
+                                    <option value="">Pick an agent...</option>
+                                    ${eligibleAgents.map(a => html`<option value=${a.agent_id}>${a.name} (${a.role}) — ${a.agent_id.slice(0,12)}…</option>`)}
+                                </select>
+                                <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">
+                                    No "chatgpt" agent yet? Cancel and create one in the Network tab first, then come back. (Best practice: dedicate one agent to ChatGPT for clear audit trails.)
+                                </div>
+                            </div>
+                            <div class="wizard-field">
+                                <label>Token name</label>
+                                <input class="wizard-input" value=${tokenName} onInput=${e => setTokenName(e.target.value)} placeholder="chatgpt" />
+                            </div>
+                            <button class="btn btn-primary" onClick=${startMintToken} disabled=${minting || !agentChoice}>
+                                ${minting ? 'Minting…' : 'Mint bearer'}
+                            </button>
+                        </div>
+                    `}
+
+                    ${step === 7 && mintedToken && html`
+                        <div style="line-height:1.55;">
+                            <h3 style="margin-top:0;color:var(--accent-green);">✓ Ready to paste into ChatGPT</h3>
+                            <div class="warning-banner" style="margin-bottom:14px;">
+                                Save the bearer token NOW — it's shown ONCE. ChatGPT will retrieve it via OAuth at consent time.
+                            </div>
+                            <${ChatGPTCopyField} label="App name" value="SAGE" />
+                            <${ChatGPTCopyField} label="MCP Server URL" value=${`https://${tunnelHostname || (subdomain + '.' + zone)}/v1/mcp/sse`} />
+                            <${ChatGPTCopyField} label="Authentication" value="OAuth" />
+                            <${ChatGPTCopyField} label="Auth URL" value=${`https://${tunnelHostname || (subdomain + '.' + zone)}/oauth/authorize`} />
+                            <${ChatGPTCopyField} label="Token URL" value=${`https://${tunnelHostname || (subdomain + '.' + zone)}/oauth/token`} />
+                            <${ChatGPTCopyField} label="OAuth Client ID" value="chatgpt" />
+                            <${ChatGPTCopyField} label="OAuth Client Secret" value="(leave empty)" />
+                            <${ChatGPTCopyField} label="Token endpoint auth method" value="none" />
+                            <${ChatGPTCopyField} label="Bearer token (save now!)" value=${mintedToken.token} sensitive=${true} />
+
+                            <div style="margin-top:18px;display:flex;gap:8px;">
+                                <a class="btn btn-primary" href="https://chatgpt.com/#settings/Connectors" target="_blank" rel="noopener">Open ChatGPT Connectors →</a>
+                            </div>
+                        </div>
+                    `}
+                </div>
+                <div class="wizard-footer">
+                    <button class="btn" onClick=${onClose}>${step === 7 ? 'Done' : 'Cancel'}</button>
+                    ${step > 1 && step < 7 && html`<button class="btn" onClick=${() => setStep(step - 1)}>Back</button>`}
+                    ${step === 1 && html`<button class="btn btn-primary" onClick=${() => setStep(2)}>Continue</button>`}
+                    ${step === 2 && cloudflaredInstalled === true && html`<button class="btn btn-primary" onClick=${() => setStep(3)}>Continue</button>`}
+                    ${step === 3 && loginAuthenticated && html`<button class="btn btn-primary" onClick=${() => setStep(4)}>Continue</button>`}
+                    ${step === 4 && html`<button class="btn btn-primary" onClick=${() => setStep(5)} disabled=${!zone || !subdomain}>Continue</button>`}
+                    ${step === 5 && tunnelHostname && html`<button class="btn btn-primary" onClick=${() => setStep(6)}>Continue</button>`}
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+// ChatGPTCopyField — labeled value with one-click copy. Used in the final
+// "paste into ChatGPT" card.
+function ChatGPTCopyField({ label, value, sensitive }) {
+    const [copied, setCopied] = useState(false);
+    const [revealed, setRevealed] = useState(!sensitive);
+    const onCopy = async () => {
+        try {
+            await navigator.clipboard.writeText(value);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1500);
+        } catch (e) { /* clipboard blocked */ }
+    };
+    const display = sensitive && !revealed ? '•'.repeat(Math.min(value.length, 24)) : value;
+    return html`
+        <div style="display:grid;grid-template-columns:180px 1fr auto;gap:8px;align-items:center;margin-bottom:8px;">
+            <div style="font-size:12px;color:var(--text-dim);">${label}</div>
+            <code style="background:var(--bg-elev);padding:6px 8px;border-radius:3px;font-size:12px;word-break:break-all;">${display}</code>
+            <div style="display:flex;gap:4px;">
+                ${sensitive && html`<button class="btn" style="padding:4px 8px;font-size:11px;" onClick=${() => setRevealed(!revealed)}>${revealed ? 'Hide' : 'Show'}</button>`}
+                <button class="btn" style="padding:4px 8px;font-size:11px;" onClick=${onCopy}>${copied ? 'Copied!' : 'Copy'}</button>
+            </div>
+        </div>
+    `;
+}
+
+// CursorSetupPanel — informational panel for bearer-only clients (Cursor,
+// Cline, Claude Desktop). These don't need a public URL/tunnel — they speak
+// directly to localhost over the bearer auth scheme. The most local-first
+// option: zero external surface area.
+function CursorSetupPanel({ agents, onClose }) {
+    const [agentChoice, setAgentChoice] = useState('');
+    const [tokenName, setTokenName] = useState('cursor');
+    const [mintedToken, setMintedToken] = useState(null);
+    const [minting, setMinting] = useState(false);
+    const [error, setError] = useState(null);
+    const eligibleAgents = (agents || []).filter(a => a.status !== 'removed');
+
+    const onMint = async () => {
+        setMinting(true);
+        setError(null);
+        try {
+            const r = await wizardMintToken(agentChoice, tokenName);
+            if (r.error) setError(r.error);
+            else setMintedToken(r);
+        } catch (e) { setError('mint failed: ' + e.message); }
+        setMinting(false);
+    };
+
+    return html`
+        <div class="wizard-overlay" onClick=${e => { if (e.target === e.currentTarget) onClose(); }}>
+            <div class="wizard-modal" style="max-width:620px;max-height:85vh;display:flex;flex-direction:column;">
+                <div class="wizard-header">
+                    <h2>Connect to Cursor / Cline / Claude Desktop</h2>
+                    <button class="detail-close" onClick=${onClose}>x</button>
+                </div>
+                <div class="wizard-body" style="overflow-y:auto;flex:1;padding:20px;line-height:1.55;">
+                    <p>These clients accept bearer-token auth directly — <strong>no tunnel, no public URL, no Cloudflare account needed</strong>. They run on the same machine as SAGE and talk to <code>https://localhost:8443</code>.</p>
+                    <p>This is the most local-first option. Zero external surface area, no DNS to configure, no third party in the path.</p>
+
+                    ${error && html`<div class="import-error" style="margin-bottom:12px;">${error}</div>`}
+
+                    ${!mintedToken && html`
+                        <h3 style="margin-top:18px;">1. Mint a bearer</h3>
+                        <div class="wizard-field">
+                            <label>Agent</label>
+                            <select class="wizard-select" value=${agentChoice} onInput=${e => setAgentChoice(e.target.value)}>
+                                <option value="">Pick an agent...</option>
+                                ${eligibleAgents.map(a => html`<option value=${a.agent_id}>${a.name} (${a.role}) — ${a.agent_id.slice(0,12)}…</option>`)}
+                            </select>
+                        </div>
+                        <div class="wizard-field">
+                            <label>Token name</label>
+                            <input class="wizard-input" value=${tokenName} onInput=${e => setTokenName(e.target.value)} placeholder="cursor" />
+                        </div>
+                        <button class="btn btn-primary" onClick=${onMint} disabled=${minting || !agentChoice}>
+                            ${minting ? 'Minting…' : 'Mint bearer'}
+                        </button>
+                    `}
+
+                    ${mintedToken && html`
+                        <h3 style="margin-top:18px;color:var(--accent-green);">✓ Token minted</h3>
+                        <div class="warning-banner" style="margin-bottom:14px;">
+                            Save the bearer NOW — it's shown ONCE. Paste it into your client's MCP config.
+                        </div>
+                        <${ChatGPTCopyField} label="MCP Server URL" value="https://localhost:8443/v1/mcp/sse" />
+                        <${ChatGPTCopyField} label="Auth header" value=${`Authorization: Bearer ${mintedToken.token}`} sensitive=${true} />
+
+                        <h3 style="margin-top:24px;">2. Drop it in your client's config</h3>
+                        <p style="font-size:12px;color:var(--text-dim);margin-bottom:6px;"><strong>Cursor / Cline</strong> — add to your MCP servers config (typically <code>~/.cursor/mcp.json</code> or via Settings → MCP):</p>
+                        <pre style="background:var(--bg-elev);padding:10px;border-radius:4px;font-size:11px;overflow:auto;color:var(--text);">{
+  "mcpServers": {
+    "sage": {
+      "url": "https://localhost:8443/v1/mcp/sse",
+      "headers": { "Authorization": "Bearer ${mintedToken.token}" }
+    }
+  }
+}</pre>
+                        <p style="font-size:12px;color:var(--text-dim);margin-top:14px;"><strong>Claude Desktop</strong> — Settings → Developer → Edit Config; add the same block. Restart Claude Desktop.</p>
+                    `}
+                </div>
+                <div class="wizard-footer">
+                    <button class="btn" onClick=${onClose}>${mintedToken ? 'Done' : 'Cancel'}</button>
                 </div>
             </div>
         </div>

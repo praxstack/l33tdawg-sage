@@ -489,3 +489,47 @@ export async function submitGovVote(proposalId, decision) {
     if (!res.ok) throw new Error(await res.text());
     return res.json();
 }
+
+// ─── ChatGPT Setup Wizard API (v6.7.3) ───
+// Local-first orchestration — these endpoints help the user wire SAGE up
+// to ChatGPT's MCP connector without touching a terminal. SAGE never
+// proxies through anyone's cloud; the user owns the cloudflared tunnel
+// end-to-end.
+
+export async function wizardCheckCloudflared() {
+    const res = await fetch(`${API_BASE}/v1/wizard/chatgpt/check-cloudflared`, { method: 'POST' });
+    return res.json();
+}
+
+// Returns the streaming Response object so the caller can read .body
+// progressively. Each line is `step: msg\n`; final line is `done: <code>`.
+export async function wizardInstallCloudflared() {
+    return fetch(`${API_BASE}/v1/wizard/chatgpt/install-cloudflared`, { method: 'POST' });
+}
+
+export async function wizardStartLogin() {
+    const res = await fetch(`${API_BASE}/v1/wizard/chatgpt/login`, { method: 'POST' });
+    return res.json();
+}
+
+export async function wizardLoginStatus() {
+    const res = await fetch(`${API_BASE}/v1/wizard/chatgpt/login-status`);
+    return res.json();
+}
+
+export async function wizardCreateTunnel(subdomain, zone) {
+    return fetch(`${API_BASE}/v1/wizard/chatgpt/create-tunnel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subdomain, zone }),
+    });
+}
+
+export async function wizardMintToken(agentId, tokenName) {
+    const res = await fetch(`${API_BASE}/v1/wizard/chatgpt/mint-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agent_id: agentId, token_name: tokenName || 'chatgpt' }),
+    });
+    return res.json();
+}

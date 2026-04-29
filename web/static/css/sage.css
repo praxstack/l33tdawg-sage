@@ -2488,6 +2488,62 @@ input[type="range"]::-moz-range-thumb {
     margin-top: 4px;
 }
 
+/* External clients section (Connect ChatGPT / Cursor / Cline / Claude Desktop) — v6.7.3 */
+.ext-clients-section {
+    margin: 18px 0 24px 0;
+    padding: 16px;
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+.ext-clients-header h3 {
+    margin: 0 0 12px 0;
+    font-size: 15px;
+    color: var(--text);
+}
+.ext-clients-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+}
+@media (max-width: 720px) {
+    .ext-clients-grid { grid-template-columns: 1fr; }
+}
+.ext-client-card {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 14px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: border-color 0.15s, transform 0.15s;
+}
+.ext-client-card:hover, .ext-client-card:focus {
+    border-color: var(--accent);
+    outline: none;
+    transform: translateY(-1px);
+}
+.ext-client-icon { font-size: 28px; line-height: 1; }
+.ext-client-info { flex: 1; min-width: 0; }
+.ext-client-title {
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 4px;
+}
+.ext-client-desc {
+    font-size: 12px;
+    color: var(--text-dim);
+    line-height: 1.45;
+}
+.ext-client-cta {
+    font-size: 12px;
+    color: var(--accent);
+    white-space: nowrap;
+    font-weight: 500;
+}
+
 /* Agent list (vertical accordion) */
 .agent-list { display: flex; flex-direction: column; gap: 12px; }
 
