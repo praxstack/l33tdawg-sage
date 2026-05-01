@@ -5937,6 +5937,12 @@ function ChatGPTSetupWizard({ agents, onClose }) {
     const [cloudflaredVersion, setCloudflaredVersion] = useState('');
     const [installLog, setInstallLog] = useState('');
     const [installing, setInstalling] = useState(false);
+    // Platform + per-OS hints come back from /check-cloudflared so the UI can
+    // show Windows-specific guidance (winget install, post-wizard service
+    // install) without baking platform detection into the frontend.
+    const [platform, setPlatform] = useState('');
+    const [installHint, setInstallHint] = useState('');
+    const [autostartHint, setAutostartHint] = useState('');
 
     // Step 3: login
     const [loginURL, setLoginURL] = useState('');
@@ -5969,6 +5975,9 @@ function ChatGPTSetupWizard({ agents, onClose }) {
         wizardCheckCloudflared().then(d => {
             setCloudflaredInstalled(!!d.installed);
             setCloudflaredVersion(d.version || '');
+            setPlatform(d.platform || '');
+            setInstallHint(d.install_hint || '');
+            setAutostartHint(d.autostart_hint || '');
         }).catch(() => setCloudflaredInstalled(false));
     }, [step]);
 
@@ -6013,6 +6022,9 @@ function ChatGPTSetupWizard({ agents, onClose }) {
             const d = await wizardCheckCloudflared();
             setCloudflaredInstalled(!!d.installed);
             setCloudflaredVersion(d.version || '');
+            setPlatform(d.platform || '');
+            setInstallHint(d.install_hint || '');
+            setAutostartHint(d.autostart_hint || '');
         } catch (e) { setError('install failed: ' + e.message); }
         setInstalling(false);
     };
@@ -6101,9 +6113,25 @@ function ChatGPTSetupWizard({ agents, onClose }) {
                             ${cloudflaredInstalled === true && html`
                                 <p style="color:var(--accent-green);">✓ cloudflared is installed.</p>
                                 <pre style="background:var(--bg-elev);padding:8px;border-radius:4px;font-size:12px;color:var(--text-dim);">${cloudflaredVersion}</pre>
+                                ${platform === 'windows' && autostartHint && html`
+                                    <div class="warning-banner" style="margin-top:12px;">
+                                        <strong>Windows autostart note.</strong> ${autostartHint}
+                                    </div>
+                                `}
                             `}
                             ${cloudflaredInstalled === false && html`
-                                <p>cloudflared isn't on your PATH. We'll install it now via your platform's package manager.</p>
+                                <p>
+                                    cloudflared isn't on your PATH. We'll install it now via
+                                    ${platform === 'darwin' ? ' Homebrew.' :
+                                      platform === 'linux' ? ' the static binary into ~/.local/bin.' :
+                                      platform === 'windows' ? ' winget (Cloudflare.cloudflared).' :
+                                      " your platform's package manager."}
+                                </p>
+                                ${platform === 'windows' && installHint && html`
+                                    <div class="warning-banner" style="margin-bottom:12px;">
+                                        <strong>Windows users.</strong> ${installHint}
+                                    </div>
+                                `}
                                 <button class="btn btn-primary" onClick=${startInstall} disabled=${installing}>
                                     ${installing ? 'Installing…' : 'Install cloudflared'}
                                 </button>

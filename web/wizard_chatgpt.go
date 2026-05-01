@@ -176,14 +176,23 @@ func (h *DashboardHandler) RegisterChatGPTWizardRoutes(r interface {
 // ─── /check-cloudflared ──────────────────────────────────────────────────
 
 // handleWizardCheckCloudflared reports whether `cloudflared` is on $PATH and
-// its version string if so. Returns {installed: bool, version: string}.
+// its version string if so. Returns {installed, version, platform, install_hint}.
+// platform is the runtime OS so the frontend can show OS-specific guidance;
+// install_hint is set on Windows because automatic install relies on winget
+// which may not be present on every box.
 func (h *DashboardHandler) handleWizardCheckCloudflared(w http.ResponseWriter, r *http.Request) {
 	bin := cloudflaredBin()
 	if _, err := exec.LookPath(bin); err != nil {
-		writeJSONResp(w, http.StatusOK, map[string]any{
+		resp := map[string]any{
 			"installed": false,
 			"version":   "",
-		})
+			"platform":  runtime.GOOS,
+		}
+		if runtime.GOOS == "windows" {
+			resp["install_hint"] = "On Windows the wizard installs cloudflared via winget. If winget isn't available, install manually: download cloudflared-windows-amd64.exe from https://github.com/cloudflare/cloudflared/releases, rename to cloudflared.exe, and place it on your PATH."
+			resp["autostart_hint"] = "After the wizard completes, open an admin PowerShell and run `cloudflared.exe service install` so the tunnel survives reboot — the wizard's launchd/systemd autostart only runs on macOS/Linux."
+		}
+		writeJSONResp(w, http.StatusOK, resp)
 		return
 	}
 
@@ -192,10 +201,15 @@ func (h *DashboardHandler) handleWizardCheckCloudflared(w http.ResponseWriter, r
 	out, _ := exec.CommandContext(ctx, bin, "--version").CombinedOutput() //nolint:gosec // bin is from env or literal "cloudflared"
 	version := strings.TrimSpace(string(out))
 
-	writeJSONResp(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"installed": true,
 		"version":   version,
-	})
+		"platform":  runtime.GOOS,
+	}
+	if runtime.GOOS == "windows" {
+		resp["autostart_hint"] = "After the wizard completes, open an admin PowerShell and run `cloudflared.exe service install` so the tunnel survives reboot."
+	}
+	writeJSONResp(w, http.StatusOK, resp)
 }
 
 // ─── /install-cloudflared ────────────────────────────────────────────────
@@ -257,6 +271,17 @@ func (h *DashboardHandler) handleWizardInstallCloudflared(w http.ResponseWriter,
 		}
 		url := fmt.Sprintf("https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-%s", arch)
 		cmd = exec.CommandContext(r.Context(), "curl", "-fsSL", "-o", dst, url) //nolint:gosec // url built from constant + GOARCH whitelist
+	case "windows":
+		// winget is the canonical Windows package manager (ships with Windows
+		// 10 1709+ / Windows 11). If it isn't on PATH, point the user at the
+		// manual install — same shape as the macOS/Homebrew fallback above.
+		if _, err := exec.LookPath("winget"); err != nil {
+			writeLine("error", "winget not found. Install cloudflared manually: download cloudflared-windows-amd64.exe from https://github.com/cloudflare/cloudflared/releases, rename to cloudflared.exe, and place it on your PATH (e.g. C:\\Windows\\System32). Then re-run this step.")
+			writeLine("done", "1")
+			return
+		}
+		cmd = exec.CommandContext(r.Context(), "winget", "install", "--id", "Cloudflare.cloudflared", //nolint:gosec // literal args
+			"--accept-source-agreements", "--accept-package-agreements", "--silent")
 	default:
 		writeLine("error", "automatic install not supported on "+runtime.GOOS+" — install manually from https://github.com/cloudflare/cloudflared/releases")
 		writeLine("done", "1")
@@ -887,7 +912,7 @@ func wizardWriteConfig(configPath, tunnelUUID, credPath, hostname string) error 
 	}
 	defer f.Close()
 	return configTemplate.Execute(f, map[string]string{
-		"Version":         "v6.8.0",
+		"Version":         "v6.8.1",
 		"TunnelUUID":      tunnelUUID,
 		"CredentialsFile": credPath,
 		"Hostname":        hostname,
