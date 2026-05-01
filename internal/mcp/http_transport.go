@@ -26,11 +26,20 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+
+	authmw "github.com/l33tdawg/sage/api/rest/middleware"
 )
+
+// ctxAgentID extracts the bearer-resolved agent identity from r.Context().
+// Returns "" for anonymous / stdio invocations.
+func ctxAgentID(ctx context.Context) string {
+	return authmw.ContextAgentID(ctx)
+}
 
 // SSESessionRegistry tracks live SSE sessions so that the paired
 // POST /v1/mcp/messages?sessionId=... endpoint can route a JSON-RPC request's
@@ -42,6 +51,7 @@ type SSESessionRegistry struct {
 
 type sseSession struct {
 	id      string
+	agentID string // bearer-resolved principal at registration time; "" for stdio/anonymous
 	out     chan []byte // serialized JSON-RPC payloads, written to the SSE stream
 	done    chan struct{}
 	created time.Time
@@ -52,9 +62,10 @@ func NewSSESessionRegistry() *SSESessionRegistry {
 	return &SSESessionRegistry{sessions: make(map[string]*sseSession)}
 }
 
-func (r *SSESessionRegistry) register(id string) *sseSession {
+func (r *SSESessionRegistry) register(id, agentID string) *sseSession {
 	sess := &sseSession{
 		id:      id,
+		agentID: agentID,
 		out:     make(chan []byte, 16),
 		done:    make(chan struct{}),
 		created: time.Now(),
@@ -96,17 +107,23 @@ func NewHTTPTransport(server *Server) *HTTPTransport {
 	}
 }
 
-// CORSMiddleware reflects the request Origin (or wildcards if absent) and
-// answers preflight OPTIONS requests. MCP clients are first-class; the
-// usual same-origin paranoia doesn't apply to local development tools.
+// CORSMiddleware echoes the request Origin only when it matches the
+// localhost allowlist. Browser-driven cross-origin scripts that present a
+// stolen bearer no longer get the response back from the MCP transport;
+// non-browser callers (ChatGPT's server-side MCP connector, CLI tools)
+// send no Origin and pass through unchanged.
 func (t *HTTPTransport) CORSMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
 		if origin == "" {
 			// Non-browser clients (ChatGPT MCP connector, Cursor, custom CLIs)
-			// often send no Origin header — wildcard is safe here because we
-			// gate the actual MCP endpoints with bearer-token auth.
-			origin = "*"
+			// don't send Origin; allow through without echoing a wildcard.
+			next.ServeHTTP(w, r)
+			return
+		}
+		if !mcpOriginAllowed(origin) {
+			http.Error(w, `{"error":"origin not allowed"}`, http.StatusForbidden)
+			return
 		}
 		w.Header().Set("Access-Control-Allow-Origin", origin)
 		w.Header().Set("Vary", "Origin")
@@ -120,6 +137,21 @@ func (t *HTTPTransport) CORSMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// mcpOriginAllowed mirrors the dashboard's localhost-only allowlist.
+func mcpOriginAllowed(origin string) bool {
+	switch {
+	case strings.HasPrefix(origin, "http://localhost"):
+		return true
+	case strings.HasPrefix(origin, "http://127.0.0.1"):
+		return true
+	case strings.HasPrefix(origin, "https://localhost"):
+		return true
+	case strings.HasPrefix(origin, "https://127.0.0.1"):
+		return true
+	}
+	return false
 }
 
 // HandleSSE upgrades a GET request into a Server-Sent Events stream. The
@@ -144,7 +176,7 @@ func (t *HTTPTransport) HandleSSE(w http.ResponseWriter, r *http.Request) {
 
 	// Allocate a session ID; client uses it on the paired POST.
 	sessionID := uuid.NewString()
-	sess := t.sessions.register(sessionID)
+	sess := t.sessions.register(sessionID, ctxAgentID(r.Context()))
 	defer t.sessions.unregister(sessionID)
 
 	// First event: tell the client where to POST messages.
@@ -188,6 +220,13 @@ func (t *HTTPTransport) HandleSSEMessages(w http.ResponseWriter, r *http.Request
 	sess := t.sessions.lookup(sessionID)
 	if sess == nil {
 		http.Error(w, `{"error":"unknown sessionId"}`, http.StatusNotFound)
+		return
+	}
+
+	// SSE sessions are bound to the bearer that opened them. A different
+	// bearer-authed caller cannot inject messages into another stream.
+	if sess.agentID != "" && sess.agentID != ctxAgentID(r.Context()) {
+		http.Error(w, `{"error":"sessionId is bound to a different bearer"}`, http.StatusForbidden)
 		return
 	}
 

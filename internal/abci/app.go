@@ -1882,34 +1882,83 @@ func (app *SageApp) processAgentSetPermission(parsedTx *tx.ParsedTx, height int6
 		return &abcitypes.ExecTxResult{Code: 68, Log: fmt.Sprintf("target agent %s not registered", perm.AgentID[:16])}
 	}
 
-	// Auth model (v6.6.9): a caller may write `agent_set_permission` on a
-	// target agent if any of these hold:
-	//   1. Self-set — the caller IS the target.
+	// Read the target's current on-chain permissions so we can detect
+	// privilege-changing fields (clearance raise, org rewrite, etc.) that
+	// require additional authority beyond bare "can write to this row".
+	targetAgent, targetErr := app.badgerStore.GetRegisteredAgent(perm.AgentID)
+	if targetErr != nil {
+		return &abcitypes.ExecTxResult{Code: 68, Log: fmt.Sprintf("target agent %s lookup failed", perm.AgentID[:16])}
+	}
+
+	// Auth model: a caller may write `agent_set_permission` on a target if
+	// any of these hold:
+	//   1. Self-set — the caller IS the target. Cannot raise own clearance,
+	//      cannot move themselves into an org they don't already belong to.
 	//   2. Global admin — caller's on-chain `Role == "admin"` (legacy
-	//      deployment-admin identity from genesis bootstrap / register).
-	//   3. Org admin — caller is an org member with role="admin" in any org
-	//      the target also belongs to.
-	// Anything else is an access-denied error surfaced as a non-zero ABCI
-	// code so REST/CLI callers see a real failure (NOT a silent 200+tx_hash
-	// for a write that never lands).
-	authorized := senderID == perm.AgentID || senderAgent.Role == "admin"
-	if !authorized {
-		// Check org-admin: enumerate orgs the target belongs to and see if
-		// the caller is an admin in any of them. Uses the multi-org reverse
-		// index added in v6.6.8.
+	//      deployment-admin from genesis bootstrap). Treated as max
+	//      clearance.
+	//   3. Org admin — caller is an org member with role="admin" in an org
+	//      the target also belongs to. Cannot raise the target's clearance
+	//      above the caller's own clearance in that org. Cannot move the
+	//      target into an org the caller is not also an admin of.
+	const globalAdminClearance uint8 = 4 // TopSecret — admin's effective ceiling
+	authMode := ""
+	var callerMaxClearance uint8 = senderAgent.Clearance
+	switch {
+	case senderID == perm.AgentID:
+		authMode = "self"
+	case senderAgent.Role == "admin":
+		authMode = "global"
+		callerMaxClearance = globalAdminClearance
+	default:
 		targetOrgs, listErr := app.badgerStore.ListAgentOrgs(perm.AgentID)
 		if listErr == nil {
 			for _, orgID := range targetOrgs {
-				_, role, mErr := app.badgerStore.GetMemberClearance(orgID, senderID)
+				cl, role, mErr := app.badgerStore.GetMemberClearance(orgID, senderID)
 				if mErr == nil && role == "admin" {
-					authorized = true
-					break
+					authMode = "org"
+					if cl > callerMaxClearance {
+						callerMaxClearance = cl
+					}
 				}
 			}
 		}
 	}
-	if !authorized {
-		return &abcitypes.ExecTxResult{Code: 67, Log: fmt.Sprintf("access denied: %s cannot set permissions on %s (not self, global admin, or org admin)", senderID[:16], perm.AgentID[:16])}
+	if authMode == "" {
+		return &abcitypes.ExecTxResult{Code: 67, Log: "access denied"}
+	}
+
+	// Clamp: new clearance must not exceed the caller's effective ceiling.
+	// Self-set callers can lower but not raise; org admins are bounded by
+	// their own clearance in the shared org; global admins go to TopSecret.
+	if perm.Clearance > callerMaxClearance {
+		return &abcitypes.ExecTxResult{Code: 67, Log: "access denied"}
+	}
+
+	// OrgID change requires extra authority: an org admin moving the target
+	// to a different org must also be admin of the destination org; a
+	// self-setter must already belong to the destination org (no
+	// self-onboarding into restricted orgs).
+	if perm.OrgID != "" && perm.OrgID != targetAgent.OrgID {
+		switch authMode {
+		case "org":
+			_, role, _ := app.badgerStore.GetMemberClearance(perm.OrgID, senderID)
+			if role != "admin" {
+				return &abcitypes.ExecTxResult{Code: 67, Log: "access denied"}
+			}
+		case "self":
+			members, _ := app.badgerStore.ListAgentOrgs(senderID)
+			inDest := false
+			for _, m := range members {
+				if m == perm.OrgID {
+					inDest = true
+					break
+				}
+			}
+			if !inDest {
+				return &abcitypes.ExecTxResult{Code: 67, Log: "access denied"}
+			}
+		}
 	}
 
 	// Update permissions on-chain

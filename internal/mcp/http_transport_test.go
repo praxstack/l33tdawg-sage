@@ -225,7 +225,7 @@ func TestCORS_Preflight(t *testing.T) {
 
 	req, err := http.NewRequest(http.MethodOptions, server.URL+"/v1/mcp/sse", nil)
 	require.NoError(t, err)
-	req.Header.Set("Origin", "https://chat.openai.com")
+	req.Header.Set("Origin", "http://localhost:8080")
 	req.Header.Set("Access-Control-Request-Method", "GET")
 	req.Header.Set("Access-Control-Request-Headers", "Authorization")
 
@@ -234,12 +234,12 @@ func TestCORS_Preflight(t *testing.T) {
 	defer resp.Body.Close()
 
 	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
-	assert.Equal(t, "https://chat.openai.com", resp.Header.Get("Access-Control-Allow-Origin"))
+	assert.Equal(t, "http://localhost:8080", resp.Header.Get("Access-Control-Allow-Origin"))
 	assert.Contains(t, resp.Header.Get("Access-Control-Allow-Methods"), "POST")
 	assert.Contains(t, resp.Header.Get("Access-Control-Allow-Headers"), "Authorization")
 }
 
-func TestCORS_HeadersOnNormalRequest(t *testing.T) {
+func TestCORS_RejectsCrossOriginBrowser(t *testing.T) {
 	transport := newTestTransport(t)
 	mux := http.NewServeMux()
 	handler := transport.CORSMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -259,11 +259,13 @@ func TestCORS_HeadersOnNormalRequest(t *testing.T) {
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
-	assert.Equal(t, "https://chatgpt.com", resp.Header.Get("Access-Control-Allow-Origin"))
-	assert.Equal(t, "Origin", resp.Header.Get("Vary"))
+	// Cross-origin browsers (chatgpt.com) are rejected at the CORS layer
+	// regardless of bearer; ChatGPT's MCP connector uses server-to-server
+	// requests with no Origin header, so this does not break the connector.
+	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
 }
 
-func TestCORS_NoOriginWildcard(t *testing.T) {
+func TestCORS_AllowsLocalhostOrigin(t *testing.T) {
 	transport := newTestTransport(t)
 	handler := transport.CORSMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -271,10 +273,28 @@ func TestCORS_NoOriginWildcard(t *testing.T) {
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/mcp/streamable", nil)
-	// no Origin header
+	req.Header.Set("Origin", "http://localhost:8080")
 	handler.ServeHTTP(rr, req)
 
-	assert.Equal(t, "*", rr.Header().Get("Access-Control-Allow-Origin"))
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, "http://localhost:8080", rr.Header().Get("Access-Control-Allow-Origin"))
+}
+
+func TestCORS_NoOriginPassesThrough(t *testing.T) {
+	transport := newTestTransport(t)
+	handler := transport.CORSMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/mcp/streamable", nil)
+	// no Origin header — non-browser caller (server-side fetch, CLI)
+	handler.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+	// Without an Origin header we do NOT echo a wildcard — there's nothing
+	// to echo and no CORS check to satisfy.
+	assert.Empty(t, rr.Header().Get("Access-Control-Allow-Origin"))
 }
 
 // TestDispatchJSONRPC_Shared confirms that the dispatch fn called by the

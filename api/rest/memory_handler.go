@@ -460,7 +460,7 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 	txHash, err := s.broadcastTxCommit(encoded)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to broadcast submit tx")
-		writeProblem(w, broadcastErrorStatus(err), "Broadcast error", err.Error())
+		status, publicMsg := broadcastErrorPublic(err); writeProblem(w, status, "Broadcast error", publicMsg)
 		return
 	}
 
@@ -1095,14 +1095,37 @@ func (s *Server) broadcastTxCommitWithHeight(txBytes []byte) (string, int64, err
 // broadcastErrorStatus maps a broadcastTx/broadcastTxCommit error into an HTTP status.
 // Access-denied rejections surface as 403 so clients don't mistake policy failures for infra failures.
 func broadcastErrorStatus(err error) int {
+	status, _ := broadcastErrorPublic(err)
+	return status
+}
+
+// broadcastErrorPublic returns the HTTP status and a sanitized public
+// message for an error returned by broadcastTxCommit. The raw error string
+// from CometBFT carries the full FinalizeBlock log, which previously leaked
+// agent-id prefixes, internal codes, and "agent X not registered" oracles
+// to REST callers. This helper maps known failure classes to canonical
+// terse strings so the public response stays opaque while the server log
+// retains the full diagnostic.
+func broadcastErrorPublic(err error) (int, string) {
 	if err == nil {
-		return http.StatusInternalServerError
+		return http.StatusInternalServerError, "internal error"
 	}
 	msg := err.Error()
-	if strings.Contains(msg, "access denied") || strings.Contains(msg, "not in the validator set") {
-		return http.StatusForbidden
+	switch {
+	case strings.Contains(msg, "access denied"):
+		return http.StatusForbidden, "access denied"
+	case strings.Contains(msg, "not in the validator set"):
+		return http.StatusForbidden, "access denied"
+	case strings.Contains(msg, "agent identity verification failed"):
+		return http.StatusUnauthorized, "agent identity verification failed"
+	case strings.Contains(msg, "not registered"):
+		return http.StatusNotFound, "not found"
+	case strings.Contains(msg, "tx rejected in CheckTx"):
+		return http.StatusBadRequest, "request rejected"
+	case strings.Contains(msg, "tx rejected in FinalizeBlock"):
+		return http.StatusBadRequest, "request rejected"
 	}
-	return http.StatusInternalServerError
+	return http.StatusInternalServerError, "internal error"
 }
 
 func memoryTypeToTx(mt string) tx.MemoryType {

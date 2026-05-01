@@ -103,7 +103,7 @@ func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 	txHash, height, err := s.broadcastTxCommitWithHeight(encoded)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to broadcast agent register tx")
-		writeProblem(w, broadcastErrorStatus(err), "Broadcast error", err.Error())
+		status, publicMsg := broadcastErrorPublic(err); writeProblem(w, status, "Broadcast error", publicMsg)
 		return
 	}
 
@@ -251,9 +251,11 @@ func (s *Server) handleAgentSetPermission(w http.ResponseWriter, r *http.Request
 	}
 
 	// Pre-flight RBAC: bail out fast with 403 so callers don't get a
-	// 200+tx_hash for a write the chain will refuse. The ABCI handler
-	// re-verifies this in consensus — REST is just the user-friendly
-	// fail-fast path, not the trust boundary.
+	// 200+tx_hash for a write the chain will refuse. The ABCI handler is
+	// the trust boundary — re-verifies the same conditions in consensus —
+	// so when the BadgerDB-backed pre-check is unavailable we let the
+	// request through to the chain (which still rejects access-denied
+	// writes). Pre-flight is a UX optimisation, not a security gate.
 	if s.badgerStore != nil {
 		callerID := middleware.ContextAgentID(r.Context())
 		if callerID == "" {
@@ -261,8 +263,7 @@ func (s *Server) handleAgentSetPermission(w http.ResponseWriter, r *http.Request
 			return
 		}
 		if !s.callerCanSetPermission(callerID, targetID) {
-			writeProblem(w, http.StatusForbidden, "Access denied",
-				"caller is not authorized to set permissions on this agent: must be self, a global admin, or an org admin of the target's org.")
+			writeProblem(w, http.StatusForbidden, "Access denied", "access denied")
 			return
 		}
 	}
@@ -315,7 +316,7 @@ func (s *Server) handleAgentSetPermission(w http.ResponseWriter, r *http.Request
 	txHash, err := s.broadcastTxCommit(encoded)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to broadcast agent set permission tx")
-		writeProblem(w, broadcastErrorStatus(err), "Broadcast error", err.Error())
+		status, publicMsg := broadcastErrorPublic(err); writeProblem(w, status, "Broadcast error", publicMsg)
 		return
 	}
 

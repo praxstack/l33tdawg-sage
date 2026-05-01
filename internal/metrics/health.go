@@ -45,9 +45,11 @@ func (h *HealthChecker) HealthHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(httpStatus)
+	// /health is reachable through the wizard's tunnel allowlist; we keep
+	// it minimal so internet visitors can't easily fingerprint a SAGE node
+	// to a specific version.
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":  status,
-		"version": h.Version,
+		"status": status,
 	})
 }
 

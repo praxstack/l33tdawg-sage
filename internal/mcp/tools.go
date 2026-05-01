@@ -481,8 +481,10 @@ func (s *Server) toolRecall(ctx context.Context, params map[string]any) (any, er
 			if strings.Contains(searchErr.Error(), vaultEncryptedSearchMarker) {
 				fmt.Fprintf(os.Stderr, "SAGE MCP: /v1/memory/search reports vault-encrypted; retrying with semantic path\n")
 				semanticTrue := true
+				s.semanticMu.Lock()
 				s.semanticMode = &semanticTrue
 				s.semanticCacheAge = time.Now()
+				s.semanticMu.Unlock()
 				if retryErr := s.recallSemantic(ctx, query, domain, topK, minConf, &queryResp); retryErr != nil {
 					return nil, retryErr
 				}
@@ -1470,9 +1472,13 @@ func (s *Server) getRecallDefaults(ctx context.Context) (topK int, minConf float
 // isSemanticMode returns true if the embedding provider produces semantically meaningful vectors.
 // Cached for the lifetime of the server (provider doesn't change at runtime).
 func (s *Server) isSemanticMode(ctx context.Context) bool {
+	s.semanticMu.Lock()
 	if s.semanticMode != nil {
-		return *s.semanticMode
+		v := *s.semanticMode
+		s.semanticMu.Unlock()
+		return v
 	}
+	s.semanticMu.Unlock()
 
 	var infoResp struct {
 		Semantic bool `json:"semantic"`
@@ -1481,8 +1487,10 @@ func (s *Server) isSemanticMode(ctx context.Context) bool {
 	if err := s.doSignedJSON(ctx, "GET", "/v1/embed/info", nil, &infoResp); err == nil {
 		semantic = infoResp.Semantic
 	}
+	s.semanticMu.Lock()
 	s.semanticMode = &semantic
 	s.semanticCacheAge = time.Now()
+	s.semanticMu.Unlock()
 	return semantic
 }
 

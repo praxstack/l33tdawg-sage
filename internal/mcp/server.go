@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/l33tdawg/sage/internal/tlsca"
@@ -67,6 +68,9 @@ type Server struct {
 	memoryModeCacheAge time.Time
 
 	// Cached embedding mode — nil means not yet checked.
+	// Concurrent HTTP MCP requests may both write to this cache; the mutex
+	// keeps the cached pointer race-free.
+	semanticMu       sync.Mutex
 	semanticMode     *bool
 	semanticCacheAge time.Time
 

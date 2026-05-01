@@ -521,14 +521,32 @@ func TestProcessAgentSetPermission_SelfSet_Succeeds(t *testing.T) {
 	self := newAgentKey(t)
 	registerAgent(t, app, self, "self-agent", "member")
 
-	ptx := makeAgentSetPermissionTx(t, self, self.id, 3, "", "*", "", "")
+	// Self-set may update non-clearance-raising fields (visible_agents,
+	// domain_access, etc.) at the caller's own clearance level. Raising the
+	// target's clearance above the caller's max is rejected — see
+	// TestProcessAgentSetPermission_SelfSet_RejectsClearanceRaise below.
+	ptx := makeAgentSetPermissionTx(t, self, self.id, 1, "", "*", "", "")
 	result := app.processAgentSetPermission(ptx, 2, time.Now())
 	require.Equal(t, uint32(0), result.Code, "self-set should succeed: %s", result.Log)
 
 	agent, err := app.badgerStore.GetRegisteredAgent(self.id)
 	require.NoError(t, err)
-	assert.Equal(t, uint8(3), agent.Clearance, "self-set must update clearance")
+	assert.Equal(t, uint8(1), agent.Clearance)
 	assert.Equal(t, "*", agent.VisibleAgents, "self-set must update visible_agents")
+}
+
+// v6.8.0: self-set must not raise the target's clearance above the caller's
+// own ceiling. Closes the privilege-escalation path the v6.6.9 widening
+// opened.
+func TestProcessAgentSetPermission_SelfSet_RejectsClearanceRaise(t *testing.T) {
+	app := setupTestApp(t)
+	self := newAgentKey(t)
+	registerAgent(t, app, self, "self-agent", "member")
+
+	ptx := makeAgentSetPermissionTx(t, self, self.id, 4, "", "*", "", "")
+	result := app.processAgentSetPermission(ptx, 2, time.Now())
+	require.NotEqual(t, uint32(0), result.Code, "self-set must not raise clearance to TopSecret")
+	require.Equal(t, uint32(67), result.Code, "expected access-denied (67)")
 }
 
 // v6.6.9: org admins must be able to set permissions on members of an org
