@@ -1903,7 +1903,7 @@ func (app *SageApp) processAgentSetPermission(parsedTx *tx.ParsedTx, height int6
 	//      target into an org the caller is not also an admin of.
 	const globalAdminClearance uint8 = 4 // TopSecret — admin's effective ceiling
 	authMode := ""
-	var callerMaxClearance uint8 = senderAgent.Clearance
+	callerMaxClearance := senderAgent.Clearance
 	switch {
 	case senderID == perm.AgentID:
 		authMode = "self"

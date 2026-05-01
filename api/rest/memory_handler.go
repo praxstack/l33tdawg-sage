@@ -1092,13 +1092,6 @@ func (s *Server) broadcastTxCommitWithHeight(txBytes []byte) (string, int64, err
 	return result.Result.Hash, result.Result.Height, nil
 }
 
-// broadcastErrorStatus maps a broadcastTx/broadcastTxCommit error into an HTTP status.
-// Access-denied rejections surface as 403 so clients don't mistake policy failures for infra failures.
-func broadcastErrorStatus(err error) int {
-	status, _ := broadcastErrorPublic(err)
-	return status
-}
-
 // broadcastErrorPublic returns the HTTP status and a sanitized public
 // message for an error returned by broadcastTxCommit. The raw error string
 // from CometBFT carries the full FinalizeBlock log, which previously leaked
