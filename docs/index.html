@@ -674,12 +674,13 @@ footer a:hover { text-decoration: underline; }
         <p class="section-desc" style="margin:0 auto;">Governed institutional memory &mdash; validated by BFT consensus, scored by confidence, and decay-aware over time.</p>
       </div>
 
-      <!-- What's New in v6.7 -->
+      <!-- What's New -->
       <div class="whats-new reveal">
-        <h3>What's new in <span id="whats-new-version">v6.7</span></h3>
+        <h3>What's new in <span id="whats-new-version">v6.8</span></h3>
         <div class="new-features">
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>HTTP / HTTPS MCP transport</h4><p>SAGE is now addressable as an HTTP/HTTPS MCP server in addition to the existing stdio transport. Clients that prefer remote MCP &mdash; ChatGPT, custom HTTP MCP clients &mdash; connect directly without spawning a subprocess. SSE transport on <code>/v1/mcp/sse</code>, Streamable-HTTP on <code>/v1/mcp/streamable</code>, TLS on <code>:8443</code>.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--teal);"></div><div><h4>OAuth 2.0 + PKCE for ChatGPT</h4><p>RFC-compliant OAuth 2.1 wrapper in front of the bearer-token transport. Authorization server metadata (RFC 8414), Dynamic Client Registration (RFC 7591), and Protected Resource Metadata (RFC 9728) are auto-discovered by ChatGPT&rsquo;s connector. Auth codes are 5-min-TTL, single-use, PKCE-S256 enforced.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>v6.8 hardening release</h4><p>Maintenance pass. OAuth Dynamic Client Registration is now persistent and <code>redirect_uri</code> validates against the registered set; <code>state</code> is mandatory and the consent form ships with a CSRF nonce. The agent picker on the consent screen is gone &mdash; bearers run as the local SAGE node identity. Wizard endpoints gated by strict same-origin; cross-origin browser tabs cannot reach <code>/v1/wizard/chatgpt/*</code>. <code>processAgentSetPermission</code> clamps writes by caller authority; FinalizeBlock log details no longer leak to REST clients. No new features &mdash; existing workflows unchanged.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--teal);"></div><div><h4>HTTP / HTTPS MCP transport</h4><p>SAGE is addressable as an HTTP/HTTPS MCP server in addition to the existing stdio transport. Clients that prefer remote MCP &mdash; ChatGPT, custom HTTP MCP clients &mdash; connect directly without spawning a subprocess. SSE transport on <code>/v1/mcp/sse</code>, Streamable-HTTP on <code>/v1/mcp/streamable</code>, TLS on <code>:8443</code>.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>OAuth 2.0 + PKCE for ChatGPT</h4><p>RFC-compliant OAuth 2.1 wrapper in front of the bearer-token transport. Authorization server metadata (RFC 8414), Dynamic Client Registration (RFC 7591), and Protected Resource Metadata (RFC 9728) are auto-discovered by ChatGPT&rsquo;s connector. Auth codes are 5-min-TTL, single-use, PKCE-S256 enforced.</p></div></div>
           <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>CEREBRUM ChatGPT setup wizard</h4><p>Six-click guided flow inside the Network tab handles cloudflared install, login, hostname picker (Cloudflare zone dropdown), tunnel creation, autostart registration, agent picker, and bearer mint. Replaces a 9-command manual setup. Local-first orchestration &mdash; no SAGE-hosted relay, no phone-home.</p></div></div>
           <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Bearer-token auth for external clients</h4><p>Cursor, Cline, Claude Desktop, and other MCP clients that don&rsquo;t do Ed25519 signing can use <code>Authorization: Bearer &lt;token&gt;</code> instead. Tokens are 32 random bytes; only the SHA-256 digest is stored. Issue and revoke from the dashboard or via <code>sage-gui mcp-token</code>.</p></div></div>
           <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Multi-org membership fix (v6.6.8)</h4><p>Adding an agent to a second organisation no longer silently strips access to the first. <code>HasAccessMultiOrg</code> now iterates all org memberships; <code>agent_orgs</code> reverse index is one-to-many; idempotent backfill on store open handles in-place upgrades.</p></div></div>
@@ -765,7 +766,7 @@ footer a:hover { text-decoration: underline; }
         <div class="reveal" style="text-align:center;">
           <div class="section-tag">ChatGPT</div>
           <h2>Connecting ChatGPT</h2>
-          <p class="section-desc" style="margin:0 auto 32px;">ChatGPT does not speak the same MCP protocol as Claude, Cursor, and Cline. SAGE v6.7.5 ships an OAuth-based connector and a guided 6-step setup wizard that handles the tunnel, OAuth flow, and token issuance for you. A separate browser-extension path is available for users who prefer not to expose SAGE over a tunnel.</p>
+          <p class="section-desc" style="margin:0 auto 32px;">ChatGPT does not speak the same MCP protocol as Claude, Cursor, and Cline. SAGE ships an OAuth-based connector and a guided 6-step setup wizard that handles the tunnel, OAuth flow, and token issuance for you. A separate browser-extension path is available for users who prefer not to expose SAGE over a tunnel.</p>
         </div>
         <div style="text-align:center;" class="reveal">
           <a href="connect.html#chatgpt" class="btn-secondary">ChatGPT setup instructions &rarr;</a>
@@ -1101,7 +1102,7 @@ function copyPrompt(box) {
   // This floor guarantees the counter NEVER drops below the known peak,
   // regardless of browser, device, or localStorage state.
   // To update: set to the current counter value at time of commit.
-  // Last updated: 2026-05-01 (v6.7.5)
+  // Last updated: 2026-05-01 (v6.8.0)
   const HWM_FLOOR = 734;
 
   // GITHUB_AT_FLOOR: what GitHub reported when HWM_FLOOR was recorded.
