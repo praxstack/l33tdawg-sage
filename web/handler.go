@@ -357,6 +357,14 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 			w.Header().Set("Content-Type", "image/x-icon")
 		}
 
+		// Don't let Cloudflare or browsers cache the SPA assets — they ship
+		// with each release and any CDN cache (default max-age=14400) makes
+		// users miss bug fixes for hours after a deploy. The files are tiny;
+		// always-fresh is the right tradeoff.
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("Expires", "0")
+
 		w.Write(f) //nolint:errcheck,gosec // static embedded file, not user input
 	})
 

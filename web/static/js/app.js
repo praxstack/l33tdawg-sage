@@ -4426,7 +4426,7 @@ function HelpOverlay({ onClose, initialSection }) {
 // Login Screen (shown when vault encryption requires auth)
 // ============================================================================
 
-function LoginScreen({ onSuccess }) {
+function LoginScreen({ onSuccess, nextHint }) {
     const [passphrase, setPassphrase] = useState('');
     const [error, setError] = useState('');
     const [loading, setLoading] = useState(false);
@@ -6658,7 +6658,20 @@ function App() {
     useEffect(() => {
         checkAuth().then(res => {
             setIsEncrypted(!!res.auth_required);
+            // OAuth wizard hop: if ?next=<safe-path> is present, the user came
+            // through the /oauth/authorize → /ui/?next=… redirect. Once we know
+            // auth is good, bounce straight to that path so the consent screen
+            // renders. Without this, an already-authed user lands on the
+            // dashboard and the OAuth flow stalls. Same-origin paths only.
             if (!res.auth_required || res.authenticated) {
+                const nextRaw = new URLSearchParams(window.location.search).get('next');
+                const nextSafe = (nextRaw && nextRaw.startsWith('/') && !nextRaw.startsWith('//') && !nextRaw.startsWith('/\\'))
+                    ? nextRaw
+                    : null;
+                if (nextSafe) {
+                    window.location.replace(nextSafe);
+                    return;
+                }
                 setAuthState('ready');
             } else {
                 setAuthState('login');
@@ -6720,9 +6733,27 @@ function App() {
         return html`<div class="login-screen"><div class="login-card" style="text-align:center;"><p style="color:var(--text-muted, #6b7280);">Loading...</p></div></div>`;
     }
 
-    // Show login screen
+    // Show login screen. If ?next=<path> is set in the URL, redirect to that
+    // path after successful login instead of dropping into the dashboard.
+    // This is the OAuth wizard flow: /oauth/authorize → /ui/?next=<authorize>
+    // → user logs in → bounce to /oauth/authorize → user clicks Authorize →
+    // ChatGPT receives the code. Without this hop the user lands on the
+    // dashboard with a stale ?next= in the URL bar and the OAuth flow stalls.
+    // Same-origin paths only — accept /oauth/* and /ui/* prefixes; reject
+    // protocol-relative or absolute URLs to prevent open-redirect.
     if (authState === 'login') {
-        return html`<${LoginScreen} onSuccess=${() => setAuthState('ready')} />`;
+        const nextRaw = new URLSearchParams(window.location.search).get('next');
+        const nextSafe = (nextRaw && nextRaw.startsWith('/') && !nextRaw.startsWith('//') && !nextRaw.startsWith('/\\'))
+            ? nextRaw
+            : null;
+        const onSuccess = () => {
+            if (nextSafe) {
+                window.location.replace(nextSafe);
+            } else {
+                setAuthState('ready');
+            }
+        };
+        return html`<${LoginScreen} onSuccess=${onSuccess} nextHint=${nextSafe} />`;
     }
 
     function navigate(p) {

@@ -13,12 +13,12 @@ package middleware
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
-
-	"database/sql"
 )
 
 // MCPTokenLookup is the storage-side hook the middleware needs. The full
@@ -55,23 +55,44 @@ type MCPTokenLookupFn func(ctx context.Context, tokenSHA256 string) (agentID str
 // we 401. Any other store error 500s — which prevents accidentally
 // auth'ing a request just because the DB is down.
 func MCPBearerAuthMiddleware(lookup MCPTokenLookupFn) func(http.Handler) http.Handler {
+	// writeMCPUnauthorized writes a 401 with a WWW-Authenticate header per the
+	// MCP authorization spec (June 2025 revision). The resource_metadata URL
+	// points at the Protected Resource Metadata document (RFC 9728) which
+	// MCP clients use to discover the OAuth authorization server. Without
+	// this header, ChatGPT's MCP connector hangs at "Continue to SAGE"
+	// because it can't bootstrap the OAuth flow from a bare 401.
+	writeMCPUnauthorized := func(w http.ResponseWriter, r *http.Request, title, detail string) {
+		scheme := "https"
+		if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") != "https" {
+			scheme = "http"
+		}
+		host := r.Host
+		if h := r.Header.Get("X-Forwarded-Host"); h != "" {
+			host = h
+		}
+		resourceMeta := fmt.Sprintf("%s://%s/.well-known/oauth-protected-resource", scheme, host)
+		w.Header().Set("WWW-Authenticate",
+			fmt.Sprintf(`Bearer realm="sage", resource_metadata="%s"`, resourceMeta))
+		writeProblem(w, http.StatusUnauthorized, title, detail)
+	}
+
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			authz := strings.TrimSpace(r.Header.Get("Authorization"))
 			if authz == "" {
-				writeProblem(w, http.StatusUnauthorized, "Missing bearer token",
+				writeMCPUnauthorized(w, r, "Missing bearer token",
 					"Authorization: Bearer <token> is required for /v1/mcp endpoints.")
 				return
 			}
 			parts := strings.SplitN(authz, " ", 2)
 			if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-				writeProblem(w, http.StatusUnauthorized, "Invalid authorization scheme",
+				writeMCPUnauthorized(w, r, "Invalid authorization scheme",
 					"Authorization header must use the Bearer scheme.")
 				return
 			}
 			token := strings.TrimSpace(parts[1])
 			if token == "" {
-				writeProblem(w, http.StatusUnauthorized, "Empty bearer token",
+				writeMCPUnauthorized(w, r, "Empty bearer token",
 					"Authorization: Bearer <token> requires a non-empty token.")
 				return
 			}
@@ -82,12 +103,12 @@ func MCPBearerAuthMiddleware(lookup MCPTokenLookupFn) func(http.Handler) http.Ha
 			agentID, err := lookup(r.Context(), digestHex)
 			if err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
-					writeProblem(w, http.StatusUnauthorized, "Invalid bearer token",
+					writeMCPUnauthorized(w, r, "Invalid bearer token",
 						"This token is not recognized.")
 					return
 				}
 				if errors.Is(err, ErrMCPTokenRevoked) {
-					writeProblem(w, http.StatusUnauthorized, "Revoked bearer token",
+					writeMCPUnauthorized(w, r, "Revoked bearer token",
 						"This token has been revoked.")
 					return
 				}

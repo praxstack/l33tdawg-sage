@@ -40,6 +40,7 @@ import (
 	"encoding/json"
 	"errors"
 	"html/template"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -66,6 +67,9 @@ type OAuthStore interface {
 		code, tokenID, codeChallenge, codeChallengeMethod, redirectURI, clientID, state, bearerPlaintext string,
 		ttl time.Duration) error
 	RedeemAuthCode(ctx context.Context, code, codeVerifier, redirectURI string) (string, error)
+	// Agent listing — for the consent screen's pre-filled dropdown so the
+	// operator doesn't have to copy/paste a 64-char hex pubkey.
+	ListAgents(ctx context.Context) ([]*store.AgentEntry, error)
 }
 
 // OAuthSessionChecker reports whether the inbound request is authenticated
@@ -131,7 +135,99 @@ func (h *OAuthHandler) HandleDiscovery(w http.ResponseWriter, r *http.Request) {
 		"code_challenge_methods_supported":      []string{"S256"},
 		"token_endpoint_auth_methods_supported": []string{"none"},
 		"scopes_supported":                      []string{"mcp"},
-		// We do NOT advertise registration_endpoint — DCR is not implemented.
+		"registration_endpoint":                 issuer + "/oauth/register",
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	_ = json.NewEncoder(w).Encode(doc)
+}
+
+// HandleClientRegister implements RFC 7591 Dynamic Client Registration.
+// ChatGPT's MCP connector REQUIRES this endpoint — without it, the connector
+// silently fails before making any user-visible request, hanging on
+// "Continue to SAGE" indefinitely. We accept the registration metadata
+// verbatim, mint a fresh random client_id, and echo it back. Since we use
+// PKCE on the authorization-code flow, we don't need to authenticate the
+// client at the token endpoint, so client_secret isn't issued (clients are
+// "public" per RFC 7591 §2). Registration is open — anyone can register a
+// client. The actual auth gate is the user's consent decision at /authorize
+// + their valid bearer token at the token endpoint via PKCE verification.
+func (h *OAuthHandler) HandleClientRegister(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		RedirectURIs            []string `json:"redirect_uris,omitempty"`
+		ClientName              string   `json:"client_name,omitempty"`
+		GrantTypes              []string `json:"grant_types,omitempty"`
+		ResponseTypes           []string `json:"response_types,omitempty"`
+		Scope                   string   `json:"scope,omitempty"`
+		TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method,omitempty"`
+		ApplicationType         string   `json:"application_type,omitempty"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+	// Generate a public-client identifier. 16 random bytes base64url-encoded
+	// (~22 chars) is well over the OAuth-spec minimum and unguessable.
+	rawID := make([]byte, 16)
+	if _, err := rand.Read(rawID); err != nil {
+		http.Error(w, "client_id generation failed", http.StatusInternalServerError)
+		return
+	}
+	clientID := base64.RawURLEncoding.EncodeToString(rawID)
+
+	// Default to authorization_code + S256 if the client didn't specify.
+	if len(req.GrantTypes) == 0 {
+		req.GrantTypes = []string{"authorization_code"}
+	}
+	if len(req.ResponseTypes) == 0 {
+		req.ResponseTypes = []string{"code"}
+	}
+	if req.TokenEndpointAuthMethod == "" {
+		req.TokenEndpointAuthMethod = "none"
+	}
+
+	resp := map[string]any{
+		"client_id":                  clientID,
+		"client_id_issued_at":        time.Now().Unix(),
+		"redirect_uris":              req.RedirectURIs,
+		"grant_types":                req.GrantTypes,
+		"response_types":             req.ResponseTypes,
+		"token_endpoint_auth_method": req.TokenEndpointAuthMethod,
+		"client_name":                req.ClientName,
+		"scope":                      req.Scope,
+		// No client_secret — PKCE is the proof-of-possession mechanism.
+		// No expiration — public clients in RFC 7591 §2 may be perpetual.
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// HandleProtectedResource serves the RFC 9728 Protected Resource Metadata
+// document. The MCP authorization spec (June 2025 revision) requires MCP
+// servers to expose this so clients can discover the authorization server
+// associated with the MCP resource. ChatGPT's MCP connector follows the
+// WWW-Authenticate header from a 401 to this URL, parses it, then bootstraps
+// the OAuth flow against the authorization_servers entry — without it the
+// connector hangs at "Continue" with no way to learn how to auth.
+func (h *OAuthHandler) HandleProtectedResource(w http.ResponseWriter, r *http.Request) {
+	issuer := h.IssuerBaseURL(r)
+	doc := map[string]any{
+		// The resource being protected is the MCP transport endpoint. Per
+		// RFC 9728 §3, this is the canonical URL clients use to identify
+		// the resource server.
+		"resource":              issuer + "/v1/mcp/sse",
+		"authorization_servers": []string{issuer},
+		// Clients use bearer tokens issued via the authorization-code flow
+		// against /oauth/token. No DPoP for v6.7.x.
+		"bearer_methods_supported": []string{"header"},
+		"scopes_supported":         []string{"mcp"},
+		// Resource metadata is otherwise free-form; we keep it minimal so the
+		// surface area we maintain matches what we actually implement.
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "public, max-age=3600")
@@ -149,18 +245,25 @@ type authorizeFormParams struct {
 	Scope               string
 }
 
-// parseAuthorizeParams reads + validates the /authorize query. Returns a
-// problem-detail string for the caller to surface as a 400 if invalid.
+// parseAuthorizeParams reads + validates the /authorize parameters from
+// either the URL query (GET render of the consent screen) or the form body
+// (POST submission of the consent form). r.FormValue checks form first then
+// URL — perfect since the consent form's hidden inputs carry the original
+// query params verbatim, but the GET path only has them in the query.
+//
+// Returns a problem-detail string for the caller to surface as a 400 if
+// invalid.
 func parseAuthorizeParams(r *http.Request) (authorizeFormParams, string) {
-	q := r.URL.Query()
+	// Parse form body for POST; FormValue auto-handles GET via r.URL.Query.
+	_ = r.ParseForm()
 	p := authorizeFormParams{
-		ClientID:            strings.TrimSpace(q.Get("client_id")),
-		RedirectURI:         strings.TrimSpace(q.Get("redirect_uri")),
-		State:               q.Get("state"),
-		CodeChallenge:       strings.TrimSpace(q.Get("code_challenge")),
-		CodeChallengeMethod: strings.ToUpper(strings.TrimSpace(q.Get("code_challenge_method"))),
-		ResponseType:        strings.ToLower(strings.TrimSpace(q.Get("response_type"))),
-		Scope:               strings.TrimSpace(q.Get("scope")),
+		ClientID:            strings.TrimSpace(r.FormValue("client_id")),
+		RedirectURI:         strings.TrimSpace(r.FormValue("redirect_uri")),
+		State:               r.FormValue("state"),
+		CodeChallenge:       strings.TrimSpace(r.FormValue("code_challenge")),
+		CodeChallengeMethod: strings.ToUpper(strings.TrimSpace(r.FormValue("code_challenge_method"))),
+		ResponseType:        strings.ToLower(strings.TrimSpace(r.FormValue("response_type"))),
+		Scope:               strings.TrimSpace(r.FormValue("scope")),
 	}
 	if p.ClientID == "" {
 		return p, "client_id is required"
@@ -263,7 +366,23 @@ var consentTemplate = template.Must(template.New("consent").Parse(`<!doctype htm
 
   {{if .Error}}<p class="err">{{.Error}}</p>{{end}}
 
-  <form method="POST" action="/oauth/authorize?{{.QueryString}}">
+  <form method="POST" action="/oauth/authorize">
+    <!-- OAuth params travel as hidden inputs, NOT as a query-string suffix on
+         the action URL. html/template treats the action attribute as URL
+         context and would double-encode an interpolated raw query string, so
+         we use hidden inputs instead. Submission posts them as
+         application/x-www-form-urlencoded which the POST handler reads via
+         r.FormValue. (Note: keep template actions out of HTML comments —
+         html/template parses through comments and a stale field reference in
+         a comment will fail Execute even though the comment never reaches
+         the browser.) -->
+    <input type="hidden" name="client_id" value="{{.ClientID}}">
+    <input type="hidden" name="redirect_uri" value="{{.RedirectURI}}">
+    <input type="hidden" name="response_type" value="{{.ResponseType}}">
+    <input type="hidden" name="scope" value="{{.Scope}}">
+    <input type="hidden" name="state" value="{{.State}}">
+    <input type="hidden" name="code_challenge" value="{{.CodeChallenge}}">
+    <input type="hidden" name="code_challenge_method" value="{{.CodeChallengeMethod}}">
     <h2 style="font-size: 1.1em;">Mint a new bearer for this client</h2>
     <p class="meta">A new <code>mcp_tokens</code> row is created for this connection — you can revoke it at any time from <code>sage-gui mcp-token revoke &lt;id&gt;</code> or the dashboard.</p>
     <p>
@@ -272,8 +391,20 @@ var consentTemplate = template.Must(template.New("consent").Parse(`<!doctype htm
       </label>
     </p>
     <p>
-      <label>Agent ID (64-char hex ed25519 pubkey)<br>
-        <input type="text" name="agent_id" required placeholder="64 hex chars" style="width: 100%; box-sizing: border-box;">
+      <label>Run as agent
+        {{if .Agents}}
+        <br><select name="agent_id" required style="width: 100%; box-sizing: border-box; padding: 0.5em;">
+          {{range .Agents}}
+          <option value="{{.AgentID}}"{{if eq .AgentID $.DefaultAgentID}} selected{{end}}>
+            {{.Name}} ({{.Role}}{{if .RegisteredName}} · {{.RegisteredName}}{{end}}) — {{slice .AgentID 0 8}}…
+          </option>
+          {{end}}
+        </select>
+        <span class="meta">ChatGPT will act as this agent. Pick admin for full access.</span>
+        {{else}}
+        <br><input type="text" name="agent_id" required placeholder="64 hex chars" style="width: 100%; box-sizing: border-box;">
+        <span class="meta">No active agents found. Paste a 64-char hex ed25519 pubkey.</span>
+        {{end}}
       </label>
     </p>
     <p><button type="submit">Authorize</button></p>
@@ -287,22 +418,70 @@ var consentTemplate = template.Must(template.New("consent").Parse(`<!doctype htm
 // renderConsent writes the GET-side HTML form.
 func (h *OAuthHandler) renderConsent(w http.ResponseWriter, r *http.Request, p authorizeFormParams, errMsg string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
+	// Build the agent dropdown list. Pull active agents from the store, sort
+	// admins first so the most-privileged shows at top, and pre-select the
+	// first admin as default. If listing fails (e.g. corrupt store), fall
+	// through with empty list — the template degrades to the raw text input.
+	var (
+		visibleAgents  []consentAgent
+		defaultAgentID string
+	)
+	if all, err := h.Store.ListAgents(r.Context()); err == nil {
+		var admins, others []consentAgent
+		for _, a := range all {
+			if a == nil || a.Status != "active" {
+				continue
+			}
+			ca := consentAgent{
+				AgentID:        a.AgentID,
+				Name:           a.Name,
+				Role:           a.Role,
+				RegisteredName: a.RegisteredName,
+			}
+			if a.Role == "admin" {
+				admins = append(admins, ca)
+			} else {
+				others = append(others, ca)
+			}
+		}
+		visibleAgents = append(admins, others...)
+		if len(visibleAgents) > 0 {
+			defaultAgentID = visibleAgents[0].AgentID
+		}
+	}
+
 	// Preserve the inbound query so the POST round-trip can read the same
 	// PKCE / redirect parameters back out.
 	data := struct {
-		ClientID    string
-		RedirectURI string
-		Scope       string
-		QueryString string
-		Error       string
+		ClientID            string
+		RedirectURI         string
+		Scope               string
+		State               string
+		ResponseType        string
+		CodeChallenge       string
+		CodeChallengeMethod string
+		Error               string
+		Agents              []consentAgent
+		DefaultAgentID      string
 	}{
-		ClientID:    p.ClientID,
-		RedirectURI: p.RedirectURI,
-		Scope:       p.Scope,
-		QueryString: r.URL.RawQuery,
-		Error:       errMsg,
+		ClientID:            p.ClientID,
+		RedirectURI:         p.RedirectURI,
+		Scope:               p.Scope,
+		State:               p.State,
+		ResponseType:        p.ResponseType,
+		CodeChallenge:       p.CodeChallenge,
+		CodeChallengeMethod: p.CodeChallengeMethod,
+		Error:               errMsg,
+		Agents:              visibleAgents,
+		DefaultAgentID:      defaultAgentID,
 	}
 	if err := consentTemplate.Execute(w, data); err != nil {
+		// Surface the real template error to logs so we can diagnose render
+		// failures (the headers may already be flushed at this point — the
+		// http.Error WriteHeader will be a superfluous-call warning, but the
+		// log line is the only place the cause is visible).
+		log.Printf("oauth: consentTemplate.Execute failed: %v (data=%+v)", err, data)
 		http.Error(w, "failed to render consent page", http.StatusInternalServerError)
 	}
 }
@@ -388,6 +567,13 @@ func (h *OAuthHandler) processConsent(w http.ResponseWriter, r *http.Request, p 
 // status is the real lifetime gate, and the OAuth spec does NOT require a
 // non-zero value.
 func (h *OAuthHandler) HandleToken(w http.ResponseWriter, r *http.Request) {
+	// Trace logging — OAuth routes don't pass through the JSON request
+	// logger, so without these prints we can't tell from the log whether
+	// ChatGPT (or any other client) ever made it to /oauth/token.
+	log.Printf("oauth: /oauth/token hit method=%s remote=%s ua=%q ct=%q origin=%q",
+		r.Method, r.RemoteAddr, r.Header.Get("User-Agent"),
+		r.Header.Get("Content-Type"), r.Header.Get("Origin"))
+
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
 		writeOAuthError(w, http.StatusMethodNotAllowed, "invalid_request", "method not allowed")
@@ -395,12 +581,14 @@ func (h *OAuthHandler) HandleToken(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16) // 64KB cap on /token form bodies
 	if err := r.ParseForm(); err != nil {
+		log.Printf("oauth: /oauth/token form parse failed: %v", err)
 		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "invalid form body")
 		return
 	}
 
 	grantType := r.FormValue("grant_type")
 	if grantType != "authorization_code" {
+		log.Printf("oauth: /oauth/token unsupported grant_type=%q", grantType)
 		writeOAuthError(w, http.StatusBadRequest, "unsupported_grant_type",
 			"only authorization_code is supported")
 		return
@@ -408,14 +596,20 @@ func (h *OAuthHandler) HandleToken(w http.ResponseWriter, r *http.Request) {
 	code := strings.TrimSpace(r.FormValue("code"))
 	codeVerifier := strings.TrimSpace(r.FormValue("code_verifier"))
 	redirectURI := strings.TrimSpace(r.FormValue("redirect_uri"))
+	clientID := strings.TrimSpace(r.FormValue("client_id"))
 	if code == "" || codeVerifier == "" || redirectURI == "" {
+		log.Printf("oauth: /oauth/token missing required fields code_present=%v verifier_present=%v redirect_present=%v client_id=%q",
+			code != "", codeVerifier != "", redirectURI != "", clientID)
 		writeOAuthError(w, http.StatusBadRequest, "invalid_request",
 			"code, code_verifier, redirect_uri are required")
 		return
 	}
+	log.Printf("oauth: /oauth/token redeeming code=%s... redirect_uri=%s client_id=%s verifier_len=%d",
+		safePrefix(code, 8), redirectURI, clientID, len(codeVerifier))
 
 	bearer, err := h.Store.RedeemAuthCode(r.Context(), code, codeVerifier, redirectURI)
 	if err != nil {
+		log.Printf("oauth: /oauth/token redeem failed: %v", err)
 		switch {
 		case errors.Is(err, store.ErrAuthCodeNotFound),
 			errors.Is(err, store.ErrAuthCodeUsed),
@@ -433,6 +627,7 @@ func (h *OAuthHandler) HandleToken(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	log.Printf("oauth: /oauth/token success — bearer issued for code=%s...", safePrefix(code, 8))
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
@@ -459,13 +654,68 @@ func writeOAuthError(w http.ResponseWriter, status int, code, description string
 
 // MountOAuthRoutes wires the OAuth endpoints onto a chi-compatible router.
 // Caller is responsible for mounting at the host root (NOT under /v1/mcp/).
+//
+// All endpoints get a CORS shim — ChatGPT's MCP connector does an OPTIONS
+// preflight on /oauth/token (and sometimes /oauth/authorize) before
+// initiating the user-visible auth flow. Without `Access-Control-Allow-Origin`
+// in the preflight response the browser silently rejects the response and
+// the connector hangs at "Continue" with a never-resolving spinner. These
+// endpoints don't read cookies (token: bearer in body; authorize: query+
+// form params + a dashboard cookie that's only checked AFTER the form is
+// rendered), so wildcard Origin doesn't open any CSRF vector.
 func MountOAuthRoutes(r interface {
 	Get(pattern string, h http.HandlerFunc)
 	Post(pattern string, h http.HandlerFunc)
+	Options(pattern string, h http.HandlerFunc)
 }, h *OAuthHandler) {
-	r.Get("/.well-known/oauth-authorization-server", h.HandleDiscovery)
-	r.Get("/oauth/authorize", h.HandleAuthorize)
-	r.Post("/oauth/authorize", h.HandleAuthorize)
-	r.Post("/oauth/token", h.HandleToken)
+	wrap := oauthCORSMiddleware
+	r.Get("/.well-known/oauth-authorization-server", wrap(h.HandleDiscovery))
+	r.Options("/.well-known/oauth-authorization-server", wrap(oauthPreflightHandler))
+	r.Get("/.well-known/oauth-protected-resource", wrap(h.HandleProtectedResource))
+	r.Options("/.well-known/oauth-protected-resource", wrap(oauthPreflightHandler))
+	r.Post("/oauth/register", wrap(h.HandleClientRegister))
+	r.Options("/oauth/register", wrap(oauthPreflightHandler))
+	r.Get("/oauth/authorize", wrap(h.HandleAuthorize))
+	r.Post("/oauth/authorize", wrap(h.HandleAuthorize))
+	r.Options("/oauth/authorize", wrap(oauthPreflightHandler))
+	r.Post("/oauth/token", wrap(h.HandleToken))
+	r.Options("/oauth/token", wrap(oauthPreflightHandler))
+}
+
+// consentAgent is the slim view of an agent shown in the consent dropdown.
+// We deliberately avoid leaking org/clearance/bundle paths into the public
+// consent page — name + role + first-8-of-id is enough to disambiguate.
+type consentAgent struct {
+	AgentID        string
+	Name           string
+	Role           string
+	RegisteredName string
+}
+
+// safePrefix returns the first n bytes of s — for logging code values
+// without leaking the full secret. Returns "" for empty input.
+func safePrefix(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
+// oauthCORSMiddleware is a passthrough — CORS is handled by the parent
+// chi/cors middleware (see node.go), which echoes the origin back when it
+// matches the allowlist. We deliberately do NOT set Access-Control-Allow-
+// Origin here: writing `*` would override the parent's per-origin echo and
+// produce a preflight/actual-response ACAO mismatch (preflight was
+// origin-specific, actual was wildcard) that some browsers and OAuth
+// clients reject — which is exactly the bug v6.7.5 hit, where ChatGPT
+// completed consent but never POSTed /oauth/token.
+func oauthCORSMiddleware(h http.HandlerFunc) http.HandlerFunc {
+	return h
+}
+
+// oauthPreflightHandler is the no-op OPTIONS responder — the middleware
+// above has already written the CORS headers.
+func oauthPreflightHandler(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusNoContent)
 }
 

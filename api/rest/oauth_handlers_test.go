@@ -62,9 +62,9 @@ func TestOAuth_DiscoveryDocShape(t *testing.T) {
 	assert.ElementsMatch(t, []any{"code"}, doc["response_types_supported"])
 	assert.ElementsMatch(t, []any{"S256"}, doc["code_challenge_methods_supported"])
 	assert.ElementsMatch(t, []any{"authorization_code"}, doc["grant_types_supported"])
-	// DCR not implemented: registration_endpoint must NOT be present.
-	_, hasReg := doc["registration_endpoint"]
-	assert.False(t, hasReg, "v6.7.2 doesn't advertise registration_endpoint (DCR not implemented)")
+	// DCR added in v6.7.5 for ChatGPT's MCP connector — must advertise the
+	// registration_endpoint and the DCR-specific auth method.
+	assert.Equal(t, "https://sage.test/oauth/register", doc["registration_endpoint"])
 }
 
 func TestOAuth_Authorize_MissingParams_400(t *testing.T) {

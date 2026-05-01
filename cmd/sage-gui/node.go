@@ -397,9 +397,15 @@ func runServe() error {
 	// Build combined router
 	r := chi.NewRouter()
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"http://localhost:*", "http://127.0.0.1:*"},
+		// External MCP clients (ChatGPT's connector, Cursor, Cline) issue
+		// browser-side OAuth preflights from their host origins. AllowCredentials
+		// stays false so cookies never flow cross-origin — adding these origins
+		// only authorizes the BROWSER to read CORS responses, doesn't expand
+		// auth surface (bearer tokens + ed25519 signatures still gate every
+		// non-public endpoint).
+		AllowedOrigins:   []string{"http://localhost:*", "http://127.0.0.1:*", "https://chatgpt.com", "https://*.chatgpt.com", "https://cursor.sh", "https://*.anthropic.com"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Content-Type", "X-Agent-ID", "X-Signature", "X-Timestamp", "X-Nonce"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Agent-ID", "X-Signature", "X-Timestamp", "X-Nonce", "Mcp-Session-Id"},
 		AllowCredentials: false,
 	}))
 
