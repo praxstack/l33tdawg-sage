@@ -310,7 +310,13 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 		// non-power-users can wire SAGE up to ChatGPT's MCP connector
 		// without touching a terminal. Local-first orchestration only —
 		// no SAGE-hosted relay, the user owns the tunnel end-to-end.
-		h.RegisterChatGPTWizardRoutes(r)
+		// wizardSecurityGate adds a strict same-origin check on top of
+		// the parent authMiddleware so cross-origin browser tabs cannot
+		// drive subprocess execution.
+		r.Group(func(r chi.Router) {
+			r.Use(h.wizardSecurityGate)
+			h.RegisterChatGPTWizardRoutes(r)
+		})
 	})
 
 	// Launch endpoint — redirects to CEREBRUM dashboard.
@@ -374,26 +380,86 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 	}) // end securityHeaders group
 }
 
-// authMiddleware checks for a valid session cookie when encryption is active.
-// Always wired in the middleware chain — skips auth dynamically when encryption is off.
-// MCP agents authenticate via Ed25519 signatures (X-Agent-ID + X-Signature + X-Timestamp)
-// and bypass the session cookie requirement.
+// authMiddleware gates dashboard routes based on encryption state.
+//
+// Encryption ON — require either a valid session cookie or a fresh Ed25519
+// signature.
+//
+// Encryption OFF — fail-open is unsafe because the dashboard CORS allowlist
+// includes localhost-bound origins for the SPA, and any non-browser client
+// can still trigger state-changing endpoints. Instead we require either:
+//   - a same-origin / no-Origin request (the SPA itself, or a CLI), OR
+//   - a valid Ed25519 signature.
+//
+// This keeps the SPA and CLI workflows exactly as before while denying any
+// browser tab whose Origin is not localhost / 127.0.0.1.
 func (h *DashboardHandler) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !h.Encrypted.Load() {
-			next.ServeHTTP(w, r)
+			if isLocalRequest(r) || h.validAgentSignature(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			writeUnauthorized(w)
 			return
 		}
-		// Allow MCP agents with valid Ed25519 signatures to bypass cookie auth.
 		if h.validAgentSignature(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
 		cookie, err := r.Cookie(sessionCookieName)
 		if err != nil || !h.validSession(cookie.Value) {
+			writeUnauthorized(w)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// writeUnauthorized writes the canonical 401 envelope.
+func writeUnauthorized(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnauthorized)
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": "unauthorized", "login_required": true})
+}
+
+// isLocalRequest returns true for requests that originate from the same
+// machine as the SAGE node — the dashboard SPA, a CLI invocation, or any
+// non-browser caller. Browser tabs running on a different origin (e.g. a
+// chatgpt.com tab attempting to fetch localhost:8080) are rejected.
+//
+// Sec-Fetch-Site is the canonical signal; we fall back to an Origin
+// allowlist for older browsers that don't emit it.
+func isLocalRequest(r *http.Request) bool {
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "cross-site":
+		return false
+	case "same-origin", "same-site", "none":
+		return true
+	}
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		// No Origin header: same-origin GET, or non-browser caller.
+		return true
+	}
+	return strings.HasPrefix(origin, "http://localhost") ||
+		strings.HasPrefix(origin, "http://127.0.0.1") ||
+		strings.HasPrefix(origin, "https://localhost") ||
+		strings.HasPrefix(origin, "https://127.0.0.1")
+}
+
+// wizardSecurityGate is a defence-in-depth layer specifically for the
+// /v1/wizard/chatgpt/* endpoints. The wizard orchestrates `cloudflared` and
+// platform autostart subprocesses, so even with authMiddleware in front of
+// it we add a strict same-origin check that rejects any browser request
+// whose Origin / Sec-Fetch-Site is not local — independent of cookie or
+// session state.
+func (h *DashboardHandler) wizardSecurityGate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isLocalRequest(r) {
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			json.NewEncoder(w).Encode(map[string]any{"error": "unauthorized", "login_required": true}) //nolint:errcheck
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": "forbidden"})
 			return
 		}
 		next.ServeHTTP(w, r)

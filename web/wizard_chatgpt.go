@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -35,24 +36,30 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"testing"
 	"text/template"
 	"time"
 )
 
 // cloudflaredBin returns the path/name of the cloudflared binary to invoke.
-// Honors SAGE_CLOUDFLARED_BIN for tests; otherwise relies on $PATH lookup.
+// SAGE_CLOUDFLARED_BIN is honoured ONLY when running under `go test` — in
+// production we always invoke the system `cloudflared` from $PATH.
 func cloudflaredBin() string {
-	if v := strings.TrimSpace(os.Getenv("SAGE_CLOUDFLARED_BIN")); v != "" {
-		return v
+	if testing.Testing() {
+		if v := strings.TrimSpace(os.Getenv("SAGE_CLOUDFLARED_BIN")); v != "" {
+			return v
+		}
 	}
 	return "cloudflared"
 }
 
 // browserOpenBin returns the OS-specific binary used to open URLs in the
-// user's default browser. Tests override via SAGE_BROWSER_OPEN_BIN.
+// user's default browser. SAGE_BROWSER_OPEN_BIN is honoured only under tests.
 func browserOpenBin() (string, []string) {
-	if v := strings.TrimSpace(os.Getenv("SAGE_BROWSER_OPEN_BIN")); v != "" {
-		return v, nil
+	if testing.Testing() {
+		if v := strings.TrimSpace(os.Getenv("SAGE_BROWSER_OPEN_BIN")); v != "" {
+			return v, nil
+		}
 	}
 	switch runtime.GOOS {
 	case "darwin":
@@ -65,22 +72,61 @@ func browserOpenBin() (string, []string) {
 }
 
 // cloudflaredHome is where cloudflared stores cert.pem, tunnel credentials,
-// and config.yml. Always ~/.cloudflared/ — that's what cloudflared itself
-// uses regardless of platform. Tests override via cloudflaredHomeOverride.
+// and config.yml. Always ~/.cloudflared/ in production. cloudflaredHomeOverride
+// is consulted only under `go test`.
 func cloudflaredHome() string {
-	if cloudflaredHomeOverride != "" {
+	if testing.Testing() && cloudflaredHomeOverride != "" {
 		return cloudflaredHomeOverride
 	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".cloudflared")
 }
 
-// Test seams — set by wizard_chatgpt_test.go to point at fixtures, NEVER set
-// in production code paths.
+// cloudflareAPIBaseURL returns the Cloudflare API root. The mutable
+// cloudflareAPIBase is consulted only under `go test`; production binaries
+// always hit the real API endpoint.
+func cloudflareAPIBaseURL() string {
+	if testing.Testing() {
+		return cloudflareAPIBase
+	}
+	return "https://api.cloudflare.com"
+}
+
+// Test seams — only consulted under `go test`. See cloudflaredBin /
+// browserOpenBin / cloudflaredHome / cloudflareAPIBaseURL.
 var (
 	cloudflaredHomeOverride string
 	cloudflareAPIBase       = "https://api.cloudflare.com"
 )
+
+// validCloudflareLoginHost matches dash.cloudflare.com and any subdomain.
+// Used to reject any URL that isn't a real Cloudflare login page before we
+// hand it to the browser opener.
+var validCloudflareLoginHostRe = regexp.MustCompile(`^([a-z0-9-]+\.)*cloudflare\.com$`)
+
+// validateCloudflareLoginURL parses raw and confirms it points at a Cloudflare
+// login page over HTTPS. Anything else is rejected — the URL is read out of
+// cloudflared's stdout/stderr so a poisoned binary or a future cloudflared
+// regression must not be allowed to redirect the user's browser elsewhere.
+func validateCloudflareLoginURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	raw = strings.TrimRight(raw, ".,;:)")
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid login URL: %w", err)
+	}
+	if u.Scheme != "https" {
+		return "", fmt.Errorf("login URL must be https (got %q)", u.Scheme)
+	}
+	host := strings.ToLower(u.Hostname())
+	if !validCloudflareLoginHostRe.MatchString(host) {
+		return "", fmt.Errorf("login URL host must be cloudflare.com or a subdomain (got %q)", host)
+	}
+	if u.User != nil {
+		return "", errors.New("login URL must not contain userinfo")
+	}
+	return u.String(), nil
+}
 
 // loginCapture holds the in-flight `cloudflared tunnel login` subprocess
 // state. Created on POST /login, cleared once cert.pem materializes.
@@ -366,17 +412,24 @@ func (h *DashboardHandler) handleWizardLogin(w http.ResponseWriter, r *http.Requ
 	// Wait up to 10s for the URL to appear.
 	select {
 	case loginURL := <-urlCh:
-		activeLoginCapture.url = loginURL
+		safeURL, verr := validateCloudflareLoginURL(loginURL)
+		if verr != nil {
+			_ = cmd.Process.Kill()
+			activeLoginCapture.err = "rejected login URL from cloudflared: " + verr.Error()
+			writeError(w, http.StatusBadGateway, activeLoginCapture.err)
+			return
+		}
+		activeLoginCapture.url = safeURL
 		// Best-effort browser open. Background ctx because the open command
 		// is fire-and-forget — the user's browser must outlive this request.
-		go func() {
+		go func(target string) {
 			openBin, openArgs := browserOpenBin()
 			args := append([]string{}, openArgs...)
-			args = append(args, loginURL)
-			_ = exec.CommandContext(context.Background(), openBin, args...).Start() //nolint:gosec,noctx // openBin from env or platform constant; fire-and-forget
-		}()
+			args = append(args, target)
+			_ = exec.CommandContext(context.Background(), openBin, args...).Start() //nolint:gosec,noctx // openBin from env or platform constant; target validated against cloudflare.com host allowlist
+		}(safeURL)
 		writeJSONResp(w, http.StatusOK, map[string]any{
-			"url":     loginURL,
+			"url":     safeURL,
 			"started": activeLoginCapture.started.Format(time.RFC3339),
 		})
 	case <-time.After(10 * time.Second):
@@ -426,7 +479,7 @@ func (h *DashboardHandler) handleWizardLoginStatus(w http.ResponseWriter, r *htt
 // list so the frontend falls back to the manual-entry input.
 func listCloudflareZones() []map[string]string {
 	certPath := filepath.Join(cloudflaredHome(), "cert.pem")
-	pem, err := os.ReadFile(certPath)
+	pem, err := readCloudflaredCertFile(certPath)
 	if err != nil {
 		return []map[string]string{}
 	}
@@ -439,6 +492,33 @@ func listCloudflareZones() []map[string]string {
 		return []map[string]string{}
 	}
 	return zones
+}
+
+// readCloudflaredCertFile reads ~/.cloudflared/cert.pem with symlink protection
+// and a size cap. The file embeds an API bearer; we don't want a symlink
+// attack to redirect the read at /etc/passwd, and we don't want a malicious
+// pre-existing oversize file to balloon memory.
+func readCloudflaredCertFile(path string) ([]byte, error) {
+	li, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if li.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("cert.pem is a symlink; refusing to follow")
+	}
+	if !li.Mode().IsRegular() {
+		return nil, fmt.Errorf("cert.pem is not a regular file")
+	}
+	const maxCertSize = 64 << 10 // 64 KiB — cloudflared cert.pem is ~2 KiB
+	if li.Size() > maxCertSize {
+		return nil, fmt.Errorf("cert.pem unexpectedly large (%d bytes)", li.Size())
+	}
+	f, err := openNoFollow(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(io.LimitReader(f, maxCertSize))
 }
 
 // cloudflaredCertToken is the JSON payload embedded in cert.pem.
@@ -496,7 +576,7 @@ func fetchCloudflareZones(apiToken string) ([]map[string]string, error) {
 	httpClient := &http.Client{Timeout: 10 * time.Second}
 	out := []map[string]string{}
 	for page := 1; page <= 4; page++ {
-		url := fmt.Sprintf("%s/client/v4/zones?per_page=50&page=%d&status=active", cloudflareAPIBase, page)
+		url := fmt.Sprintf("%s/client/v4/zones?per_page=50&page=%d&status=active", cloudflareAPIBaseURL(), page)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
@@ -510,11 +590,16 @@ func fetchCloudflareZones(apiToken string) ([]map[string]string, error) {
 			cancel()
 			return nil, fmt.Errorf("cloudflare api call: %w", err)
 		}
-		body, _ := io.ReadAll(resp.Body)
+		// Cap the response body — Cloudflare's per-page reply is on the order
+		// of tens of KB; anything dramatically larger is a sign of trouble.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 5<<20))
 		_ = resp.Body.Close()
 		cancel()
 		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("cloudflare api status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+			// Don't echo the API body to callers — it can contain the bearer's
+			// account context. Generic message + status code is enough for the
+			// wizard frontend to surface a "your token expired" hint.
+			return nil, fmt.Errorf("cloudflare api status %d", resp.StatusCode)
 		}
 		var page1 struct {
 			Result []struct {
@@ -768,6 +853,15 @@ ingress:
     originRequest:
       noTLSVerify: true
 
+  # OAuth Protected Resource Metadata (RFC 9728) — ChatGPT follows the
+  # WWW-Authenticate: resource_metadata=... pointer back to this endpoint
+  # during the bootstrap probe.
+  - hostname: {{.Hostname}}
+    path: ^/\.well-known/oauth-protected-resource/?$
+    service: https://localhost:8443
+    originRequest:
+      noTLSVerify: true
+
   # Minimal liveness probe — no chain stats, no memory counts
   - hostname: {{.Hostname}}
     path: ^/health/?$
@@ -787,13 +881,13 @@ func wizardWriteConfig(configPath, tunnelUUID, credPath, hostname string) error 
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
 		return err
 	}
-	f, err := os.Create(configPath) //nolint:gosec // configPath is user's home directory
+	f, err := os.OpenFile(configPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600) //nolint:gosec // configPath is user's home directory
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 	return configTemplate.Execute(f, map[string]string{
-		"Version":         "v6.7.3",
+		"Version":         "v6.8.0",
 		"TunnelUUID":      tunnelUUID,
 		"CredentialsFile": credPath,
 		"Hostname":        hostname,
@@ -858,11 +952,11 @@ func wizardInstallAutostart(ctx context.Context, _ string, log func(step, msg st
 	switch runtime.GOOS {
 	case "darwin":
 		dir := launchAgentsDir()
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
 		plistPath := filepath.Join(dir, "com.cloudflared.sage.plist")
-		f, err := os.Create(plistPath) //nolint:gosec // plistPath is in user's home
+		f, err := os.OpenFile(plistPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600) //nolint:gosec // plistPath is in user's home
 		if err != nil {
 			return err
 		}
@@ -889,11 +983,11 @@ func wizardInstallAutostart(ctx context.Context, _ string, log func(step, msg st
 	case "linux":
 		home, _ := os.UserHomeDir()
 		dir := filepath.Join(home, ".config", "systemd", "user")
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
 		unitPath := filepath.Join(dir, "cloudflared-sage.service")
-		f, err := os.Create(unitPath) //nolint:gosec // path under user's home
+		f, err := os.OpenFile(unitPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600) //nolint:gosec // path under user's home
 		if err != nil {
 			return err
 		}
