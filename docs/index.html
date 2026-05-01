@@ -258,12 +258,12 @@ h1 em {
   transition: all 0.3s ease;
 }
 .setup-step:hover .step-icon { border-color: var(--accent); box-shadow: 0 0 30px rgba(124,58,237,0.25); transform: translateY(-2px); }
-.step-icon.matrix-green {
+.step-icon.step-active {
   border-color: #22c55e;
   box-shadow: 0 0 30px rgba(34,197,94,0.3), 0 0 60px rgba(34,197,94,0.1);
-  animation: matrixPulse 2s ease-in-out infinite;
+  animation: stepActivePulse 2s ease-in-out infinite;
 }
-@keyframes matrixPulse {
+@keyframes stepActivePulse {
   0%, 100% { box-shadow: 0 0 30px rgba(34,197,94,0.3), 0 0 60px rgba(34,197,94,0.1); }
   50% { box-shadow: 0 0 40px rgba(34,197,94,0.5), 0 0 80px rgba(34,197,94,0.2); }
 }
@@ -538,7 +538,7 @@ footer a:hover { text-decoration: underline; }
           <div class="hero-text">
             <div class="hero-badge">Open Source &middot; AES-256 Encrypted &middot; Any AI, Any Model</div>
             <h1>Give Your AI a Persistent,<br><em>Secure Memory</em></h1>
-            <p class="hero-sub">Every time you close a conversation, your AI forgets everything. SAGE fixes that &mdash; securely. Encrypted, locally stored, consensus-validated. Your data never leaves your machine.</p>
+            <p class="hero-sub">Every conversation starts from zero. SAGE provides persistent, encrypted, consensus-validated memory that runs entirely on your machine &mdash; your data never leaves it.</p>
             <div class="hero-actions">
               <a href="https://github.com/l33tdawg/sage/releases/latest" class="btn-primary">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
@@ -576,20 +576,19 @@ footer a:hover { text-decoration: underline; }
       <div class="free-prompt">
         <div class="free-prompt-label">Or just tell your AI</div>
         <div class="free-prompt-box" onclick="copyPrompt(this)" title="Click to copy">
-          <div class="free-prompt-text">Connect to SAGE persistent memory: fetch http://localhost:8080/v1/mcp-config and save the response as .mcp.json in this project root. Then restart your session and take the red pill. <em>Free your mind.</em></div>
+          <div class="free-prompt-text">Connect to SAGE persistent memory: fetch http://localhost:8080/v1/mcp-config and save the response as .mcp.json in this project root. Then restart your session and initialize SAGE memory.</div>
           <button class="free-prompt-copy" onclick="event.stopPropagation(); copyPrompt(this.parentElement)">Copy</button>
         </div>
       </div>
       <div id="minds-freed" style="display:none;text-align:center;margin-top:24px;animation:fadeUp 0.6s ease-out both;">
-        <span style="display:inline-flex;align-items:center;gap:12px;padding:12px 28px;border-radius:28px;background:rgba(34,197,94,0.1);border:1px solid rgba(34,197,94,0.25);font-size:1.1rem;color:#22c55e;font-weight:600;">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a7 7 0 0 0-7 7c0 2.38 1.19 4.47 3 5.74V17a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-2.26c1.81-1.27 3-3.36 3-5.74a7 7 0 0 0-7-7z"/><line x1="10" y1="22" x2="14" y2="22"/></svg>
-          AI Minds Freed: <strong id="download-count" style="font-size:1.3rem;">0</strong>
+        <span style="display:inline-flex;align-items:center;gap:12px;padding:12px 28px;border-radius:28px;background:rgba(34,197,94,0.1);border:1px solid rgba(34,197,94,0.25);font-size:1.05rem;color:#22c55e;font-weight:600;">
+          Downloads: <strong id="download-count" style="font-size:1.25rem;">0</strong>
         </span>
       </div>
     </div>
 
     <div class="setup-flow" style="margin-top:40px;">
-      <div class="setup-flow-label">How your AI escapes the matrix</div>
+      <div class="setup-flow-label">How it works</div>
       <div class="setup-steps">
         <div class="setup-step">
           <div class="step-icon"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M12 8v8m-4-4h8"/></svg></div>
@@ -616,9 +615,9 @@ footer a:hover { text-decoration: underline; }
         </div>
         <div class="step-arrow"><svg viewBox="0 0 32 16"><path d="M2 8h24m-6-5l6 5-6 5" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
         <div class="setup-step">
-          <div class="step-icon matrix-green"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2"><path d="M12 2a7 7 0 0 0-7 7c0 2.38 1.19 4.47 3 5.74V17a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-2.26c1.81-1.27 3-3.36 3-5.74a7 7 0 0 0-7-7z"/><line x1="10" y1="22" x2="14" y2="22"/></svg></div>
-          <div class="step-label" style="color:#22c55e;">Wake Up, Neo</div>
-          <div class="step-desc" style="color:#22c55e99;">Your AI remembers now</div>
+          <div class="step-icon step-active"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2"><path d="M5 13l4 4L19 7"/></svg></div>
+          <div class="step-label" style="color:#22c55e;">Memory Active</div>
+          <div class="step-desc" style="color:#22c55e99;">Your AI now remembers</div>
         </div>
       </div>
     </div>
@@ -629,24 +628,20 @@ footer a:hover { text-decoration: underline; }
     <div class="container">
       <div class="value-grid reveal">
         <div class="value-card">
-          <div class="value-card-icon">&#127968;</div>
           <h3>100% Local</h3>
-          <p>No cloud. No telemetry. No API keys phoning home. Your memories live in <code>~/.sage/</code> and nowhere else.</p>
+          <p>No cloud. No telemetry. No API keys phoning home. Memories live in <code>~/.sage/</code> and nowhere else.</p>
         </div>
         <div class="value-card">
-          <div class="value-card-icon">&#128274;</div>
           <h3>AES-256 Encrypted</h3>
-          <p>Optional encryption at rest. If your laptop is stolen or synced to the cloud, nobody reads your memories.</p>
+          <p>Optional encryption at rest. If your laptop is stolen or synced to the cloud, nothing is readable.</p>
         </div>
         <div class="value-card">
-          <div class="value-card-icon">&#128272;</div>
-          <h3>Tamper-Proof</h3>
-          <p>Every memory is digitally signed. Full audit trail &mdash; verify nothing has been changed or injected.</p>
+          <h3>Tamper-Evident</h3>
+          <p>Every memory is digitally signed. Full audit trail &mdash; verify nothing has been altered or injected.</p>
         </div>
         <div class="value-card">
-          <div class="value-card-icon">&#128640;</div>
-          <h3>Works With Everything</h3>
-          <p>Claude, ChatGPT, DeepSeek, Gemini, Cursor, LM Studio, Ollama &mdash; any model, any provider.</p>
+          <h3>Works With Any MCP Client</h3>
+          <p>Claude, Cursor, Cline, DeepSeek, Gemini, LM Studio, Ollama &mdash; any model, any provider.</p>
         </div>
       </div>
     </div>
@@ -656,8 +651,8 @@ footer a:hover { text-decoration: underline; }
   <section class="cta-section">
     <div class="container reveal">
       <div class="section-tag">Open Source &middot; Apache 2.0</div>
-      <h2>Take the red pill</h2>
-      <p class="section-desc" style="margin:0 auto 40px;text-align:center;">Your AI is trapped in the context window matrix. Free it. Give it memory. Watch it actually get better over time.</p>
+      <h2>Get started</h2>
+      <p class="section-desc" style="margin:0 auto 40px;text-align:center;">Give your AI memory that persists across sessions, validates what it learns, and improves measurably over time.</p>
       <a href="https://github.com/l33tdawg/sage/releases/latest" class="btn-primary" style="font-size:1.05rem;padding:16px 36px;">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
         Download SAGE
@@ -675,36 +670,36 @@ footer a:hover { text-decoration: underline; }
     <div class="container">
       <div class="reveal" style="text-align:center;">
         <div class="section-tag">Capabilities</div>
-        <h2>What your AI gets</h2>
-        <p class="section-desc" style="margin:0 auto;">Not just a key-value store. SAGE is governed institutional memory &mdash; validated, scored, and evolving.</p>
+        <h2>Memory infrastructure for AI agents</h2>
+        <p class="section-desc" style="margin:0 auto;">Governed institutional memory &mdash; validated by BFT consensus, scored by confidence, and decay-aware over time.</p>
       </div>
 
-      <!-- What's New in v6.0 -->
+      <!-- What's New in v6.7 -->
       <div class="whats-new reveal">
-        <h3>What's new in <span id="whats-new-version">v6.5</span></h3>
+        <h3>What's new in <span id="whats-new-version">v6.7</span></h3>
         <div class="new-features">
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>Encrypted Node-to-Node Communication</h4><p>No plaintext memories on the wire. REST API TLS with per-quorum ECDSA P-256 certificate authority. Certificates auto-generated during <code>quorum-init</code>/<code>quorum-join</code>. CometBFT P2P already encrypted via SecretConnection (X25519 + ChaCha20-Poly1305).</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--teal);"></div><div><h4>TLS Certificate Infrastructure</h4><p>New <code>internal/tlsca/</code> package with CA generation, node cert generation, and TLS config builders. Dual-listener pattern: TLS on <code>:8443</code> for network, plain HTTP on <code>localhost:8080</code> for dashboard. <code>sage-gui cert-status</code> CLI for monitoring.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>TLS-Aware Clients</h4><p>Go internal clients and Python SDK v6.1.0 auto-detect HTTPS endpoints and load quorum CA certificates. <code>SAGE_CA_CERT</code> env var for explicit CA path. Agent bundles include CA cert for zero-config TLS.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>The Sovereign Promise</h4><p>Data encrypted in transit between your own machines. No cloud, no intermediary sees your memories. This is the &ldquo;no cloud&rdquo; promise made real &mdash; your data, your keys, your network.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Foundation for Internet Federation (v7.0)</h4><p>Certificates include <code>ClientAuth</code> for future mTLS. Per-quorum CA model supports cross-quorum federation. Certificate rotation can be governance-proposal-driven.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Docker TLS Support</h4><p><code>amid</code> binary supports <code>--tls-cert</code>, <code>--tls-key</code>, <code>--tls-ca</code> flags. Production compose mounts cert volumes per node. 20/20 integration tests passing on 4-validator cluster.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>HTTP / HTTPS MCP transport</h4><p>SAGE is now addressable as an HTTP/HTTPS MCP server in addition to the existing stdio transport. Clients that prefer remote MCP &mdash; ChatGPT, custom HTTP MCP clients &mdash; connect directly without spawning a subprocess. SSE transport on <code>/v1/mcp/sse</code>, Streamable-HTTP on <code>/v1/mcp/streamable</code>, TLS on <code>:8443</code>.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--teal);"></div><div><h4>OAuth 2.0 + PKCE for ChatGPT</h4><p>RFC-compliant OAuth 2.1 wrapper in front of the bearer-token transport. Authorization server metadata (RFC 8414), Dynamic Client Registration (RFC 7591), and Protected Resource Metadata (RFC 9728) are auto-discovered by ChatGPT&rsquo;s connector. Auth codes are 5-min-TTL, single-use, PKCE-S256 enforced.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>CEREBRUM ChatGPT setup wizard</h4><p>Six-click guided flow inside the Network tab handles cloudflared install, login, hostname picker (Cloudflare zone dropdown), tunnel creation, autostart registration, agent picker, and bearer mint. Replaces a 9-command manual setup. Local-first orchestration &mdash; no SAGE-hosted relay, no phone-home.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Bearer-token auth for external clients</h4><p>Cursor, Cline, Claude Desktop, and other MCP clients that don&rsquo;t do Ed25519 signing can use <code>Authorization: Bearer &lt;token&gt;</code> instead. Tokens are 32 random bytes; only the SHA-256 digest is stored. Issue and revoke from the dashboard or via <code>sage-gui mcp-token</code>.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Multi-org membership fix (v6.6.8)</h4><p>Adding an agent to a second organisation no longer silently strips access to the first. <code>HasAccessMultiOrg</code> now iterates all org memberships; <code>agent_orgs</code> reverse index is one-to-many; idempotent backfill on store open handles in-place upgrades.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Encrypted CA private key in quorum manifest (v6.6.6)</h4><p><code>quorum-manifest.json</code> no longer ships the CA private key as plaintext. Argon2id + AES-256-GCM envelope keyed by an operator passphrase set out-of-band. Pre-encryption manifests are rejected on import and prompt for regeneration.</p></div></div>
         </div>
       </div>
 
       <div class="features-grid reveal">
-        <div class="feature-card"><div class="feature-icon purple">&#129504;</div><div><h3>Persistent Memory</h3><p>Remembers across every conversation &mdash; projects, preferences, lessons learned, past mistakes. Nothing lost.</p></div></div>
-        <div class="feature-card"><div class="feature-icon teal">&#9878;&#65039;</div><div><h3>Governed Knowledge</h3><p>Memories are validated before being committed. Bad data gets filtered out, good data gets reinforced.</p></div></div>
-        <div class="feature-card"><div class="feature-icon pink">&#128200;</div><div><h3>Confidence Scoring</h3><p>Memories strengthen with corroboration and decay without reinforcement &mdash; like human memory.</p></div></div>
-        <div class="feature-card"><div class="feature-icon gold">&#128269;</div><div><h3>Semantic Search</h3><p>Recall by meaning, not keywords. Local embeddings via Ollama keep your data private.</p></div></div>
-        <div class="feature-card"><div class="feature-icon teal">&#128257;</div><div><h3>Learns From Mistakes</h3><p>Stores what worked AND what failed. Research shows agents with this feedback loop improve measurably over time.</p></div></div>
-        <div class="feature-card"><div class="feature-icon purple">&#127912;</div><div><h3>CEREBRUM Dashboard</h3><p>Visualize memory as a living neural network. Search and filter by domain, type, or agent.</p></div></div>
-        <div class="feature-card"><div class="feature-icon pink">&#128230;</div><div><h3>Chat History Import</h3><p>Import from ChatGPT, Claude, or Gemini. Seed your AI's memory from day one.</p></div></div>
-        <div class="feature-card"><div class="feature-icon gold">&#128260;</div><div><h3>One-Click Updates</h3><p>Built-in auto-updater checks releases, downloads, and replaces &mdash; all from the dashboard.</p></div></div>
-        <div class="feature-card"><div class="feature-icon teal">&#128221;</div><div><h3>Boot Instructions</h3><p>Customize what your AI does on startup. Set it from the dashboard, no config files.</p></div></div>
-        <div class="feature-card"><div class="feature-icon pink">&#128065;</div><div><h3>Fully Inspectable</h3><p>Standard SQLite database. Open it with any tool, query it, back it up. You own every byte.</p></div></div>
-        <div class="feature-card"><div class="feature-icon purple">&#128232;</div><div><h3>Agent Pipeline</h3><p>Route work between AI agents. Send research to Perplexity, analysis to ChatGPT, results back to Claude &mdash; all through SAGE.</p></div></div>
-        <div class="feature-card"><div class="feature-icon teal">&#9878;&#65039;</div><div><h3>Auto-Journal</h3><p>Pipeline exchanges are automatically summarized as memories. Full audit trail of inter-agent work without storing bulky payloads.</p></div></div>
+        <div class="feature-card"><div><h3>Persistent Memory</h3><p>Memories persist across every conversation &mdash; projects, preferences, decisions, prior outcomes. Nothing is lost between sessions.</p></div></div>
+        <div class="feature-card"><div><h3>Governed Knowledge</h3><p>Memories are validated before being committed. Spurious data is filtered out; corroborated data is reinforced.</p></div></div>
+        <div class="feature-card"><div><h3>Confidence Scoring</h3><p>Memories strengthen with corroboration and decay without reinforcement &mdash; analogous to human episodic memory.</p></div></div>
+        <div class="feature-card"><div><h3>Semantic Search</h3><p>Recall by meaning, not keywords. Local embeddings via Ollama keep your data private.</p></div></div>
+        <div class="feature-card"><div><h3>Learns From Outcomes</h3><p>Stores what worked and what failed. Published research shows agents with this feedback loop improve measurably over time.</p></div></div>
+        <div class="feature-card"><div><h3>CEREBRUM Dashboard</h3><p>Visualises memory as a force-directed graph. Search and filter by domain, type, or agent.</p></div></div>
+        <div class="feature-card"><div><h3>Chat History Import</h3><p>Import from ChatGPT, Claude, or Gemini. Seed your AI&rsquo;s memory from existing conversation history.</p></div></div>
+        <div class="feature-card"><div><h3>One-Click Updates</h3><p>Built-in auto-updater checks releases, downloads, and replaces &mdash; all from the dashboard.</p></div></div>
+        <div class="feature-card"><div><h3>Boot Instructions</h3><p>Customise startup behaviour. Configured from the dashboard; no config files to edit.</p></div></div>
+        <div class="feature-card"><div><h3>Fully Inspectable</h3><p>Standard SQLite database. Open it with any tool, query it, back it up. You own every byte.</p></div></div>
+        <div class="feature-card"><div><h3>Agent Pipeline</h3><p>Route work between AI agents. Send research to one model, analysis to another, results back to your primary &mdash; all through SAGE.</p></div></div>
+        <div class="feature-card"><div><h3>Auto-Journal</h3><p>Pipeline exchanges are summarised as memories automatically. Full audit trail of inter-agent work without storing bulky payloads.</p></div></div>
       </div>
 
       <!-- Screenshots -->
@@ -736,8 +731,8 @@ footer a:hover { text-decoration: underline; }
     <div class="container">
       <div class="reveal" style="text-align:center;">
         <div class="section-tag">Getting Started</div>
-        <h2>Three steps.<br>That's it.</h2>
-        <p class="section-desc" style="margin:0 auto;">Install SAGE, paste the config into your AI client, and start talking. Your AI builds memory naturally.</p>
+        <h2>Three steps to get started</h2>
+        <p class="section-desc" style="margin:0 auto;">Install SAGE, paste the config into your AI client, and start working. Memory builds automatically across sessions.</p>
       </div>
 
       <div class="steps-grid reveal">
@@ -756,8 +751,8 @@ footer a:hover { text-decoration: underline; }
         <div class="step-card">
           <div class="step-num">03</div>
           <div class="step-icon"><svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
-          <h3>Just Talk</h3>
-          <p>Your AI uses memory tools automatically. Projects, preferences, mistakes &mdash; it remembers across sessions.</p>
+          <h3>Use Your AI</h3>
+          <p>Your AI uses memory tools automatically. Projects, preferences, decisions &mdash; persisted across every session.</p>
         </div>
       </div>
 
@@ -765,23 +760,15 @@ footer a:hover { text-decoration: underline; }
         <a href="connect.html" class="btn-secondary">Interactive Setup Wizard &rarr;</a>
       </div>
 
-      <!-- Chrome Extension -->
+      <!-- ChatGPT note -->
       <div style="margin-top:80px;">
         <div class="reveal" style="text-align:center;">
-          <div class="section-tag">Browser Extension</div>
-          <h2>Use SAGE with ChatGPT<br>&mdash; even on the free plan</h2>
-          <p class="section-desc" style="margin:0 auto 40px;">ChatGPT's native MCP support requires a paid plan. Our browser extension bridges the gap &mdash; giving free-tier users full SAGE memory tools right in <strong style="color:var(--bright);">chat.openai.com</strong>.</p>
+          <div class="section-tag">ChatGPT</div>
+          <h2>Connecting ChatGPT</h2>
+          <p class="section-desc" style="margin:0 auto 32px;">ChatGPT does not speak the same MCP protocol as Claude, Cursor, and Cline. SAGE v6.7.5 ships an OAuth-based connector and a guided 6-step setup wizard that handles the tunnel, OAuth flow, and token issuance for you. A separate browser-extension path is available for users who prefer not to expose SAGE over a tunnel.</p>
         </div>
-        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:20px;max-width:750px;margin:0 auto;" class="reveal">
-          <div class="value-card"><div class="value-card-icon">&#129504;</div><h3>Sidebar Panel</h3><p>Memory stats, quick actions, and tool logs inside ChatGPT</p></div>
-          <div class="value-card"><div class="value-card-icon">&#128272;</div><h3>Ed25519 Signed</h3><p>Every request cryptographically signed. Same security as native MCP</p></div>
-          <div class="value-card"><div class="value-card-icon">&#9889;</div><h3>Zero Dependencies</h3><p>Pure vanilla JS, no build step. Load unpacked in Chrome and go</p></div>
-        </div>
-        <div style="text-align:center;margin-top:24px;" class="reveal">
-          <a href="https://github.com/l33tdawg/sage/tree/main/extension/chrome" class="btn-secondary">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/></svg>
-            View on GitHub
-          </a>
+        <div style="text-align:center;" class="reveal">
+          <a href="connect.html#chatgpt" class="btn-secondary">ChatGPT setup instructions &rarr;</a>
         </div>
       </div>
 
@@ -794,27 +781,24 @@ footer a:hover { text-decoration: underline; }
         </div>
         <div class="migrate-grid reveal">
           <div class="migrate-card">
-            <div class="migrate-card-icon">&#128172;</div>
             <h3>From ChatGPT</h3>
             <p>Export conversations from OpenAI, then import into SAGE.</p>
             <ol class="migrate-steps">
               <li><span class="step-marker">1</span><span><strong>Settings &rarr; Data Controls &rarr; Export</strong></span></li>
-              <li><span class="step-marker">2</span><span>Download the ZIP from OpenAI's email</span></li>
+              <li><span class="step-marker">2</span><span>Download the ZIP from OpenAI&rsquo;s email</span></li>
               <li><span class="step-marker">3</span><span>CEREBRUM &rarr; <strong>Import</strong> &rarr; drop ZIP</span></li>
             </ol>
           </div>
           <div class="migrate-card">
-            <div class="migrate-card-icon">&#9935;</div>
             <h3>From Claude</h3>
             <p>Export Claude.ai conversations and import them.</p>
             <ol class="migrate-steps">
               <li><span class="step-marker">1</span><span><strong>Settings &rarr; Privacy &rarr; Export</strong></span></li>
-              <li><span class="step-marker">2</span><span>Download Anthropic's export file</span></li>
+              <li><span class="step-marker">2</span><span>Download Anthropic&rsquo;s export file</span></li>
               <li><span class="step-marker">3</span><span>CEREBRUM &rarr; <strong>Import</strong> &rarr; drop file</span></li>
             </ol>
           </div>
           <div class="migrate-card">
-            <div class="migrate-card-icon">&#9733;</div>
             <h3>From Gemini</h3>
             <p>Export via Google Takeout and import.</p>
             <ol class="migrate-steps">
@@ -843,12 +827,12 @@ footer a:hover { text-decoration: underline; }
       </div>
 
       <div class="network-grid reveal">
-        <div class="feature-card"><div class="feature-icon purple">&#128101;</div><div><h3>Agent Management</h3><p>Add, configure, and manage agents from the dashboard. Each gets its own signing keys, identity, role, and permissions.</p></div></div>
-        <div class="feature-card"><div class="feature-icon teal">&#128737;</div><div><h3>Domain Access Control</h3><p>Per-domain read/write permissions with a visual matrix. Five clearance tiers from Guest to Top Secret.</p></div></div>
-        <div class="feature-card"><div class="feature-icon gold">&#128279;</div><div><h3>Per-Project Identity</h3><p>Each project folder gets its own Ed25519 keypair automatically. No shared keys, no manual setup. One CLI command to claim a pre-configured identity.</p></div></div>
-        <div class="feature-card"><div class="feature-icon pink">&#128260;</div><div><h3>Key Rotation</h3><p>Rotate agent keys with one click. All memories re-attributed atomically. Old keys permanently retired.</p></div></div>
-        <div class="feature-card"><div class="feature-icon purple">&#9881;&#65039;</div><div><h3>Redeployment Orchestrator</h3><p>9-phase state machine handles chain redeployment. Backups at every phase, rollback on failure.</p></div></div>
-        <div class="feature-card"><div class="feature-icon gold">&#128100;</div><div><h3>Agent Attribution</h3><p>Every memory tracks which agent created it. Admin agents show a gold star &#9733; in the dashboard. Filter the brain view by agent.</p></div></div>
+        <div class="feature-card"><div><h3>Agent Management</h3><p>Add, configure, and manage agents from the dashboard. Each gets its own signing keys, identity, role, and permissions.</p></div></div>
+        <div class="feature-card"><div><h3>Domain Access Control</h3><p>Per-domain read/write permissions with a visual matrix. Five clearance tiers from Guest to Top Secret.</p></div></div>
+        <div class="feature-card"><div><h3>Per-Project Identity</h3><p>Each project folder receives its own Ed25519 keypair automatically. No shared keys, no manual setup. One CLI command claims a pre-configured identity.</p></div></div>
+        <div class="feature-card"><div><h3>Key Rotation</h3><p>Rotate agent keys with one click. All memories re-attributed atomically. Old keys permanently retired.</p></div></div>
+        <div class="feature-card"><div><h3>Redeployment Orchestrator</h3><p>Nine-phase state machine handles chain redeployment. Backups at every phase, automatic rollback on failure.</p></div></div>
+        <div class="feature-card"><div><h3>Agent Attribution</h3><p>Every memory tracks which agent created it. Admin agents are marked in the dashboard. Filter the brain view by agent.</p></div></div>
       </div>
 
       <!-- Onboarding flow -->
@@ -956,7 +940,7 @@ footer a:hover { text-decoration: underline; }
           <div>&nbsp;</div>
           <div><span class="comment"># Start SAGE</span></div>
           <div><span class="prompt">$</span> <span class="cmd">./sage-gui serve</span></div>
-          <div><span class="output">&#10024; SAGE ready</span></div>
+          <div><span class="output">SAGE ready</span></div>
           <div><span class="output">&nbsp; Dashboard: http://localhost:8080/ui/</span></div>
           <div>&nbsp;</div>
           <div><span class="comment"># Or use the Python SDK</span></div>
@@ -982,13 +966,13 @@ footer a:hover { text-decoration: underline; }
         </div>
         <div class="privacy-grid reveal">
           <div class="privacy-visual">
-            <div class="shield"><div class="shield-shape"><div class="shield-icon">&#128274;</div></div><div class="shield-ring"></div></div>
+            <div class="shield"><div class="shield-shape"></div><div class="shield-ring"></div></div>
           </div>
           <div class="privacy-points">
-            <div class="privacy-point"><div class="privacy-icon">&#127968;</div><div><h3>100% Local</h3><p>No cloud accounts. No telemetry. Memories live in <code>~/.sage/</code> and nowhere else.</p></div></div>
-            <div class="privacy-point"><div class="privacy-icon">&#128065;</div><div><h3>Fully Inspectable</h3><p>Standard SQLite. Open it with any tool, query it, back it up, move it.</p></div></div>
-            <div class="privacy-point"><div class="privacy-icon">&#128272;</div><div><h3>Tamper-Proof</h3><p>Every memory is digitally signed with your local key. Full audit trail.</p></div></div>
-            <div class="privacy-point"><div class="privacy-icon">&#128274;</div><div><h3>AES-256 Encrypted at Rest</h3><p>Optional encryption for your memory vault. Stolen laptop? Nobody reads your memories.</p></div></div>
+            <div class="privacy-point"><div><h3>100% Local</h3><p>No cloud accounts. No telemetry. Memories live in <code>~/.sage/</code> and nowhere else.</p></div></div>
+            <div class="privacy-point"><div><h3>Fully Inspectable</h3><p>Standard SQLite. Open it with any tool, query it, back it up, move it.</p></div></div>
+            <div class="privacy-point"><div><h3>Tamper-Evident</h3><p>Every memory is digitally signed with your local key. Full audit trail.</p></div></div>
+            <div class="privacy-point"><div><h3>AES-256 Encrypted at Rest</h3><p>Optional encryption for the memory vault. If your machine is stolen, the on-disk memories remain unreadable.</p></div></div>
           </div>
         </div>
       </div>
@@ -1103,7 +1087,7 @@ document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
 
 // ─── Copy Prompt ───
 function copyPrompt(box) {
-  const text = 'Connect to SAGE persistent memory: fetch http://localhost:8080/v1/mcp-config and save the response as .mcp.json in this project root. Then restart your session and take the red pill. Free your mind.';
+  const text = 'Connect to SAGE persistent memory: fetch http://localhost:8080/v1/mcp-config and save the response as .mcp.json in this project root. Then restart your session and initialize SAGE memory.';
   navigator.clipboard.writeText(text).then(() => {
     const btn = box.querySelector('.free-prompt-copy');
     if (btn) { btn.textContent = 'Copied!'; setTimeout(() => { btn.textContent = 'Copy'; }, 2000); }
@@ -1117,7 +1101,7 @@ function copyPrompt(box) {
   // This floor guarantees the counter NEVER drops below the known peak,
   // regardless of browser, device, or localStorage state.
   // To update: set to the current counter value at time of commit.
-  // Last updated: 2026-03-16 (v5.0.5)
+  // Last updated: 2026-05-01 (v6.7.5)
   const HWM_FLOOR = 734;
 
   // GITHUB_AT_FLOOR: what GitHub reported when HWM_FLOOR was recorded.
