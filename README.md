@@ -57,6 +57,17 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
+## What's New in v6.8
+
+- **Hardening release (6.8.0)** — A maintenance pass focused on tightening the OAuth flow, the CEREBRUM ChatGPT setup wizard, and a couple of long-standing RBAC ergonomics. No new user-facing features; existing workflows stay the same.
+  - **OAuth Dynamic Client Registration is now persistent.** `/oauth/register` writes the issued `client_id` and the supplied `redirect_uris[]` to a new `oauth_clients` table; `/oauth/authorize` and `/oauth/token` validate that an inbound `redirect_uri` belongs to the registered set for that `client_id`. `redirect_uris` are constrained to HTTPS only, no userinfo, no fragment. A small per-IP rate limit on `/oauth/register` keeps the open endpoint from being a noise source.
+  - **`state` is mandatory on `/oauth/authorize`,** and the consent form now ships with an HMAC-signed CSRF nonce that the POST submission verifies. The agent-picker dropdown that earlier revisions rendered is gone — bearers issued through the OAuth flow run as the local SAGE node identity, and the consent screen makes that explicit. The previous behaviour was misleading because the underlying transport always signed with the node key regardless of which agent the operator picked.
+  - **CEREBRUM wizard endpoints are gated by a strict same-origin check** in addition to the existing dashboard auth. `chatgpt.com`, `cursor.sh`, and `*.anthropic.com` were dropped from the dashboard CORS allowlist; the HTTP MCP transport at `/v1/mcp/*` keeps its own (now localhost-only) CORS layer. The `dashboard authMiddleware` no longer fail-opens on unencrypted nodes — same-origin or signed requests are required regardless of vault state.
+  - **Wizard subprocess seams locked down.** `SAGE_CLOUDFLARED_BIN`, `SAGE_BROWSER_OPEN_BIN`, and `cloudflareAPIBase` overrides are honoured only under `go test`. The login URL captured from cloudflared is validated as `https://*.cloudflare.com` before being passed to the browser opener. `~/.cloudflared/cert.pem` is read with symlink protection and a size cap; the launchd plist, systemd unit, and `config.yml` are written at 0600. Cloudflare API responses are bounded with `io.LimitReader`. The wizard's tunnel ingress regex now covers `/.well-known/oauth-protected-resource` (RFC 9728) — also a v6.7.5 functional bug fix.
+  - **`processAgentSetPermission` clamps writes by caller authority.** The auth widening shipped in v6.6.9 (self-set / global admin / org admin) is preserved, but the new clearance can no longer exceed the caller's own ceiling, and an org admin moving a target into a different org must also be admin of the destination. Self-onboarding into an org the caller doesn't already belong to is rejected. Privilege-escalation tests in `internal/abci/app_test.go`.
+  - **REST broadcast errors are sanitised before reaching clients.** FinalizeBlock log strings (which carried agent-id prefixes and CometBFT internals) stay in the server log; the client receives canonical strings — `access denied`, `not found`, `request rejected`. SSE sessions are bound to the bearer that opened them so a different bearer holder can't hijack a session. `/health` responds with `{"status":"ok"}` only.
+  - **Operator note.** v6.7.5 is yanked from Releases. Upgrade to v6.8.0.
+
 ## What's New in v6.7
 
 - **ChatGPT MCP connector — DCR, discovery, consent UX (6.7.5)** —
