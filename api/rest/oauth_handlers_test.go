@@ -43,6 +43,72 @@ func pkceChallenge(verifier string) string {
 	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
+// registerOAuthClient drives /oauth/register and returns the issued client_id.
+// Helper for tests that exercise downstream /authorize + /token flows.
+func registerOAuthClient(t *testing.T, r http.Handler, redirectURIs ...string) string {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"redirect_uris": redirectURIs,
+		"client_name":   "test-client",
+	})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/oauth/register", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code, "register failed: %s", rr.Body.String())
+	var resp map[string]any
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp))
+	id, _ := resp["client_id"].(string)
+	require.NotEmpty(t, id)
+	return id
+}
+
+// fetchCSRFNonce GETs /oauth/authorize with the given query string and yanks
+// the csrf_nonce hidden input out of the rendered form. Tests need the nonce
+// to round-trip via the POST submission.
+func fetchCSRFNonce(t *testing.T, r http.Handler, authURL string) string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, authURL, nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, "consent render failed: %s", rr.Body.String())
+	body := rr.Body.String()
+	const marker = `name="csrf_nonce" value="`
+	i := strings.Index(body, marker)
+	require.GreaterOrEqual(t, i, 0, "csrf_nonce hidden input not present in consent body")
+	rest := body[i+len(marker):]
+	end := strings.Index(rest, `"`)
+	require.GreaterOrEqual(t, end, 0)
+	return rest[:end]
+}
+
+// mintAuthCode runs the full GET→POST consent flow against r and returns
+// the freshly-minted authorization code. Caller must have already registered
+// the client_id for the given redirect.
+func mintAuthCode(t *testing.T, r http.Handler, clientID, redirect, challenge, state, agentHex string) string {
+	t.Helper()
+	authURL := "/oauth/authorize?client_id=" + url.QueryEscape(clientID) +
+		"&redirect_uri=" + url.QueryEscape(redirect) +
+		"&code_challenge=" + challenge +
+		"&code_challenge_method=S256&response_type=code&state=" + url.QueryEscape(state)
+	nonce := fetchCSRFNonce(t, r, authURL)
+	form := url.Values{}
+	form.Set("agent_id", agentHex)
+	form.Set("token_name", "test-token")
+	form.Set("csrf_nonce", nonce)
+	req := httptest.NewRequest(http.MethodPost, authURL, strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusFound, rr.Code, "consent post failed: %s", rr.Body.String())
+	parsed, err := url.Parse(rr.Header().Get("Location"))
+	require.NoError(t, err)
+	code := parsed.Query().Get("code")
+	require.NotEmpty(t, code)
+	return code
+}
+
 func TestOAuth_DiscoveryDocShape(t *testing.T) {
 	_, r, _ := newOAuthRouter(t, true, "")
 
@@ -85,9 +151,11 @@ func TestOAuth_Authorize_MissingParams_400(t *testing.T) {
 
 func TestOAuth_Authorize_Unauthed_RedirectsToLogin(t *testing.T) {
 	_, r, _ := newOAuthRouter(t, false, "/ui/?next=/oauth/authorize?stub")
+	clientID := registerOAuthClient(t, r, "https://x/cb")
 
 	req := httptest.NewRequest(http.MethodGet,
-		"/oauth/authorize?client_id=chatgpt&redirect_uri=https://x/cb&code_challenge=abc&code_challenge_method=S256&response_type=code",
+		"/oauth/authorize?client_id="+url.QueryEscape(clientID)+
+			"&redirect_uri=https://x/cb&code_challenge=abc&code_challenge_method=S256&response_type=code&state=xyz",
 		nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -97,8 +165,11 @@ func TestOAuth_Authorize_Unauthed_RedirectsToLogin(t *testing.T) {
 
 func TestOAuth_Authorize_GET_RendersConsent(t *testing.T) {
 	_, r, _ := newOAuthRouter(t, true, "")
+	clientID := registerOAuthClient(t, r, "https://x/cb")
+
 	req := httptest.NewRequest(http.MethodGet,
-		"/oauth/authorize?client_id=chatgpt&redirect_uri=https://x/cb&code_challenge=abc&code_challenge_method=S256&response_type=code&state=xyz",
+		"/oauth/authorize?client_id="+url.QueryEscape(clientID)+
+			"&redirect_uri=https://x/cb&code_challenge=abc&code_challenge_method=S256&response_type=code&state=xyz",
 		nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
@@ -106,75 +177,45 @@ func TestOAuth_Authorize_GET_RendersConsent(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code)
 	body := rr.Body.String()
 	assert.Contains(t, body, "Authorize MCP Client")
-	assert.Contains(t, body, "chatgpt")
+	assert.Contains(t, body, clientID)
 	assert.Contains(t, body, "https://x/cb")
+	assert.Contains(t, body, `name="csrf_nonce"`)
 	assert.Contains(t, rr.Header().Get("Content-Type"), "text/html")
 }
 
 func TestOAuth_Authorize_POST_RedirectsWithCode(t *testing.T) {
 	_, r, memStore := newOAuthRouter(t, true, "")
+	redirect := "https://chat.openai.com/cb"
+	clientID := registerOAuthClient(t, r, redirect)
 
 	verifier := "verifier-with-enough-length-aaaaaa-bbbbbb"
 	challenge := pkceChallenge(verifier)
-
-	form := url.Values{}
-	form.Set("agent_id", strings.Repeat("a", 64))
-	form.Set("token_name", "chatgpt-test")
-
-	authURL := "/oauth/authorize?client_id=chatgpt&redirect_uri=https%3A%2F%2Fchat.openai.com%2Fcb&code_challenge=" +
-		challenge + "&code_challenge_method=S256&response_type=code&state=opaque-state"
-	req := httptest.NewRequest(http.MethodPost, authURL, strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	rr := httptest.NewRecorder()
-	r.ServeHTTP(rr, req)
-
-	require.Equal(t, http.StatusFound, rr.Code, "body=%s", rr.Body.String())
-	loc := rr.Header().Get("Location")
-	require.Contains(t, loc, "https://chat.openai.com/cb?")
-	assert.Contains(t, loc, "code=")
-	assert.Contains(t, loc, "state=opaque-state")
-
-	// Parse the code out for the token-exchange test.
-	parsed, err := url.Parse(loc)
-	require.NoError(t, err)
-	code := parsed.Query().Get("code")
+	code := mintAuthCode(t, r, clientID, redirect, challenge, "opaque-state", strings.Repeat("a", 64))
 	require.NotEmpty(t, code)
 
 	// Confirm a mcp_tokens row was minted.
 	tokens, err := memStore.ListMCPTokens(context.Background())
 	require.NoError(t, err)
 	require.Len(t, tokens, 1)
-	assert.Equal(t, "chatgpt-test", tokens[0].Name)
+	assert.Equal(t, "test-token", tokens[0].Name)
 	assert.Equal(t, strings.Repeat("a", 64), tokens[0].AgentID)
 }
 
 func TestOAuth_Token_Happy(t *testing.T) {
 	_, r, _ := newOAuthRouter(t, true, "")
+	redirect := "https://chat.openai.com/cb"
+	clientID := registerOAuthClient(t, r, redirect)
 
 	verifier := "verifier-token-happy-path-aaaaaa-bbbbbb"
 	challenge := pkceChallenge(verifier)
-	redirect := "https://chat.openai.com/cb"
+	code := mintAuthCode(t, r, clientID, redirect, challenge, "happy", strings.Repeat("b", 64))
 
-	// Drive the /authorize POST to mint the code.
-	form := url.Values{}
-	form.Set("agent_id", strings.Repeat("b", 64))
-	authURL := "/oauth/authorize?client_id=chatgpt&redirect_uri=" + url.QueryEscape(redirect) +
-		"&code_challenge=" + challenge + "&code_challenge_method=S256&response_type=code&state=happy"
-	req := httptest.NewRequest(http.MethodPost, authURL, strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	rr := httptest.NewRecorder()
-	r.ServeHTTP(rr, req)
-	require.Equal(t, http.StatusFound, rr.Code)
-	parsed, _ := url.Parse(rr.Header().Get("Location"))
-	code := parsed.Query().Get("code")
-
-	// Now exchange.
 	tokenForm := url.Values{}
 	tokenForm.Set("grant_type", "authorization_code")
 	tokenForm.Set("code", code)
 	tokenForm.Set("code_verifier", verifier)
 	tokenForm.Set("redirect_uri", redirect)
-	tokenForm.Set("client_id", "chatgpt")
+	tokenForm.Set("client_id", clientID)
 
 	tokReq := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(tokenForm.Encode()))
 	tokReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -190,34 +231,26 @@ func TestOAuth_Token_Happy(t *testing.T) {
 
 func TestOAuth_Token_ReusedCode_400(t *testing.T) {
 	_, r, _ := newOAuthRouter(t, true, "")
+	redirect := "https://chat.openai.com/cb"
+	clientID := registerOAuthClient(t, r, redirect)
 
 	verifier := "verifier-for-reuse-test-aaaaaa-bbbbbb"
 	challenge := pkceChallenge(verifier)
-	redirect := "https://chat.openai.com/cb"
+	code := mintAuthCode(t, r, clientID, redirect, challenge, "reuse-state", strings.Repeat("c", 64))
 
-	// Mint a code.
-	form := url.Values{}
-	form.Set("agent_id", strings.Repeat("c", 64))
-	authURL := "/oauth/authorize?client_id=chatgpt&redirect_uri=" + url.QueryEscape(redirect) +
-		"&code_challenge=" + challenge + "&code_challenge_method=S256&response_type=code"
-	req := httptest.NewRequest(http.MethodPost, authURL, strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	rr := httptest.NewRecorder()
-	r.ServeHTTP(rr, req)
-	parsed, _ := url.Parse(rr.Header().Get("Location"))
-	code := parsed.Query().Get("code")
-
-	// First redeem succeeds.
 	tokenForm := url.Values{}
 	tokenForm.Set("grant_type", "authorization_code")
 	tokenForm.Set("code", code)
 	tokenForm.Set("code_verifier", verifier)
 	tokenForm.Set("redirect_uri", redirect)
-	tokenForm.Set("client_id", "chatgpt")
+	tokenForm.Set("client_id", clientID)
 
-	tokReq := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(tokenForm.Encode()))
-	tokReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	r.ServeHTTP(httptest.NewRecorder(), tokReq)
+	// First redeem succeeds.
+	tokReq1 := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(tokenForm.Encode()))
+	tokReq1.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokRR1 := httptest.NewRecorder()
+	r.ServeHTTP(tokRR1, tokReq1)
+	require.Equal(t, http.StatusOK, tokRR1.Code, "first redeem should succeed: %s", tokRR1.Body.String())
 
 	// Second redeem fails 400.
 	tokReq2 := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(tokenForm.Encode()))
@@ -231,29 +264,19 @@ func TestOAuth_Token_ReusedCode_400(t *testing.T) {
 
 func TestOAuth_Token_BadVerifier_400(t *testing.T) {
 	_, r, _ := newOAuthRouter(t, true, "")
+	redirect := "https://chat.openai.com/cb"
+	clientID := registerOAuthClient(t, r, redirect)
 
 	correctVerifier := "correct-verifier-correct-verifier-aaaaaa"
 	challenge := pkceChallenge(correctVerifier)
-	redirect := "https://chat.openai.com/cb"
+	code := mintAuthCode(t, r, clientID, redirect, challenge, "bad-verifier", strings.Repeat("d", 64))
 
-	form := url.Values{}
-	form.Set("agent_id", strings.Repeat("d", 64))
-	authURL := "/oauth/authorize?client_id=chatgpt&redirect_uri=" + url.QueryEscape(redirect) +
-		"&code_challenge=" + challenge + "&code_challenge_method=S256&response_type=code"
-	req := httptest.NewRequest(http.MethodPost, authURL, strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	rr := httptest.NewRecorder()
-	r.ServeHTTP(rr, req)
-	parsed, _ := url.Parse(rr.Header().Get("Location"))
-	code := parsed.Query().Get("code")
-
-	// Submit with WRONG verifier.
 	tokenForm := url.Values{}
 	tokenForm.Set("grant_type", "authorization_code")
 	tokenForm.Set("code", code)
 	tokenForm.Set("code_verifier", "totally-different-verifier-aaaaaa-bbbb")
 	tokenForm.Set("redirect_uri", redirect)
-	tokenForm.Set("client_id", "chatgpt")
+	tokenForm.Set("client_id", clientID)
 
 	tokReq := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(tokenForm.Encode()))
 	tokReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -267,29 +290,23 @@ func TestOAuth_Token_BadVerifier_400(t *testing.T) {
 
 func TestOAuth_Token_RedirectMismatch_400(t *testing.T) {
 	_, r, _ := newOAuthRouter(t, true, "")
+	originalRedirect := "https://chat.openai.com/cb"
+	clientID := registerOAuthClient(t, r, originalRedirect, "https://attacker.example.com/cb")
 
 	verifier := "verifier-redirect-mismatch-aaaaaa-bbbbbb"
 	challenge := pkceChallenge(verifier)
-	originalRedirect := "https://chat.openai.com/cb"
+	code := mintAuthCode(t, r, clientID, originalRedirect, challenge, "rm-state", strings.Repeat("e", 64))
 
-	form := url.Values{}
-	form.Set("agent_id", strings.Repeat("e", 64))
-	authURL := "/oauth/authorize?client_id=chatgpt&redirect_uri=" + url.QueryEscape(originalRedirect) +
-		"&code_challenge=" + challenge + "&code_challenge_method=S256&response_type=code"
-	req := httptest.NewRequest(http.MethodPost, authURL, strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	rr := httptest.NewRecorder()
-	r.ServeHTTP(rr, req)
-	parsed, _ := url.Parse(rr.Header().Get("Location"))
-	code := parsed.Query().Get("code")
-
-	// Tamper redirect_uri at /token.
+	// /token uses a redirect that's a registered URI for the client (so the
+	// resolveClient check passes) but DOES NOT match the URI bound to the
+	// auth code at /authorize. The auth-code store enforces the per-code
+	// redirect match independently.
 	tokenForm := url.Values{}
 	tokenForm.Set("grant_type", "authorization_code")
 	tokenForm.Set("code", code)
 	tokenForm.Set("code_verifier", verifier)
 	tokenForm.Set("redirect_uri", "https://attacker.example.com/cb")
-	tokenForm.Set("client_id", "chatgpt")
+	tokenForm.Set("client_id", clientID)
 
 	tokReq := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(tokenForm.Encode()))
 	tokReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -343,14 +360,19 @@ func TestOAuth_Token_GET_405(t *testing.T) {
 
 func TestOAuth_Authorize_BadAgentID_RerendersConsent(t *testing.T) {
 	_, r, _ := newOAuthRouter(t, true, "")
+	clientID := registerOAuthClient(t, r, "https://x/cb")
 
 	verifier := "verifier-bad-agent-id-test-aaaaaa-bbbb"
 	challenge := pkceChallenge(verifier)
 
+	authURL := "/oauth/authorize?client_id=" + url.QueryEscape(clientID) +
+		"&redirect_uri=https%3A%2F%2Fx%2Fcb&code_challenge=" + challenge +
+		"&code_challenge_method=S256&response_type=code&state=bad-agent"
+	nonce := fetchCSRFNonce(t, r, authURL)
+
 	form := url.Values{}
 	form.Set("agent_id", "too-short")
-	authURL := "/oauth/authorize?client_id=chatgpt&redirect_uri=https%3A%2F%2Fx%2Fcb&code_challenge=" +
-		challenge + "&code_challenge_method=S256&response_type=code"
+	form.Set("csrf_nonce", nonce)
 	req := httptest.NewRequest(http.MethodPost, authURL, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rr := httptest.NewRecorder()

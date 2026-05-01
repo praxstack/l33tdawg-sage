@@ -639,6 +639,19 @@ func (h *DashboardHandler) IsRequestAuthenticated(r *http.Request) (bool, string
 	return false, "/ui/?next=" + url.QueryEscape(next)
 }
 
+// HasValidSessionCookie reports whether the request carries a real dashboard
+// session cookie, independent of encryption state. Used by the OAuth handler
+// to decide whether to render the privileged agent-roster dropdown — when
+// no cookie is present the consent screen falls back to the free-text input
+// so unauthenticated tunnel visitors never see the agent list.
+func (h *DashboardHandler) HasValidSessionCookie(r *http.Request) bool {
+	cookie, err := r.Cookie(sessionCookieName)
+	if err != nil {
+		return false
+	}
+	return h.validSession(cookie.Value)
+}
+
 func (h *DashboardHandler) validSession(token string) bool {
 	val, ok := h.sessions.Load(token)
 	if !ok {

@@ -33,17 +33,21 @@ package rest
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"html/template"
 	"log"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -54,6 +58,19 @@ import (
 // AuthCodeTTL is the lifetime of an issued OAuth authorization code. RFC
 // 6749 §4.1.2 recommends ≤10 minutes; SAGE uses 5.
 const AuthCodeTTL = 5 * time.Minute
+
+// csrfTTL bounds how long a rendered consent form can be submitted. Mirrors
+// AuthCodeTTL — anything older is treated as a stale tab.
+const csrfTTL = 5 * time.Minute
+
+// dcrRegisterPerIPLimit is the maximum number of /oauth/register calls
+// accepted from a single remote address per dcrRegisterWindow. Legitimate
+// clients register once per connector setup; bursty traffic is a sign of
+// abuse.
+const (
+	dcrRegisterPerIPLimit = 10
+	dcrRegisterWindow     = 1 * time.Hour
+)
 
 // OAuthStore is the storage surface OAuthHandler needs. The full
 // SQLiteStore satisfies it.
@@ -67,6 +84,10 @@ type OAuthStore interface {
 		code, tokenID, codeChallenge, codeChallengeMethod, redirectURI, clientID, state, bearerPlaintext string,
 		ttl time.Duration) error
 	RedeemAuthCode(ctx context.Context, code, codeVerifier, redirectURI string) (string, error)
+	// OAuth client (DCR) table — persisted at /oauth/register, looked up at
+	// /oauth/authorize and /oauth/token to validate redirect_uri.
+	InsertOAuthClient(ctx context.Context, clientID string, redirectURIs []string, clientName string) error
+	GetOAuthClient(ctx context.Context, clientID string) (*store.OAuthClient, error)
 	// Agent listing — for the consent screen's pre-filled dropdown so the
 	// operator doesn't have to copy/paste a 64-char hex pubkey.
 	ListAgents(ctx context.Context) ([]*store.AgentEntry, error)
@@ -81,12 +102,25 @@ type OAuthStore interface {
 // authenticated, so this returns (true, "") and /authorize serves directly.
 type OAuthSessionChecker func(r *http.Request) (authenticated bool, loginRedirect string)
 
+// OAuthDashboardSession reports whether the inbound request carries a real
+// dashboard session cookie — independent of encryption state. We use this to
+// decide whether the consent screen should render the agent roster
+// (privileged information) versus a raw text input. Returns false when
+// encryption is off and the dashboard's catch-all "everyone is authed"
+// branch is in play, so an unauthenticated tunnel-exposed visitor never
+// sees the agent list.
+type OAuthDashboardSession func(r *http.Request) bool
+
 // OAuthHandler bundles the OAuth 2.0 endpoints. Built once at server start,
 // mounted on the chi router at the host root.
 type OAuthHandler struct {
-	Store         OAuthStore
-	IsAuthed      OAuthSessionChecker
-	IssuerBaseURL func(r *http.Request) string // e.g. "https://host:8443" — derived per request
+	Store              OAuthStore
+	IsAuthed           OAuthSessionChecker
+	HasDashboardCookie OAuthDashboardSession
+	IssuerBaseURL      func(r *http.Request) string // e.g. "https://host:8443" — derived per request
+
+	csrfKey   []byte // process-lifetime random for HMAC-signing the consent CSRF nonce
+	dcrLimits *ipRateLimiter
 }
 
 // NewOAuthHandler constructs a handler with sensible defaults.
@@ -101,7 +135,32 @@ func NewOAuthHandler(s OAuthStore, isAuthed OAuthSessionChecker, issuer func(r *
 	if issuer == nil {
 		issuer = inferIssuer
 	}
-	return &OAuthHandler{Store: s, IsAuthed: isAuthed, IssuerBaseURL: issuer}
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		// Reading from crypto/rand should never fail; if it does, fall back to
+		// a deterministic-looking key so the handler still functions but logs
+		// the condition. Production binaries will have crypto/rand available.
+		log.Printf("oauth: failed to seed CSRF key from crypto/rand: %v", err)
+	}
+	return &OAuthHandler{
+		Store:         s,
+		IsAuthed:      isAuthed,
+		IssuerBaseURL: issuer,
+		csrfKey:       key,
+		dcrLimits:     newIPRateLimiter(dcrRegisterPerIPLimit, dcrRegisterWindow),
+	}
+}
+
+// hasDashboardCookie returns true if the OAuthHandler has a dashboard-session
+// checker wired up AND the current request carries a valid session cookie.
+// Falls open to false when no checker is set, which means encryption-off
+// nodes that don't pass a checker default to the safer behaviour (no agent
+// roster rendered).
+func (h *OAuthHandler) hasDashboardCookie(r *http.Request) bool {
+	if h == nil || h.HasDashboardCookie == nil {
+		return false
+	}
+	return h.HasDashboardCookie(r)
 }
 
 // inferIssuer reconstructs `scheme://host` from the request. Honors
@@ -143,21 +202,27 @@ func (h *OAuthHandler) HandleDiscovery(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleClientRegister implements RFC 7591 Dynamic Client Registration.
-// ChatGPT's MCP connector REQUIRES this endpoint — without it, the connector
-// silently fails before making any user-visible request, hanging on
-// "Continue to SAGE" indefinitely. We accept the registration metadata
-// verbatim, mint a fresh random client_id, and echo it back. Since we use
-// PKCE on the authorization-code flow, we don't need to authenticate the
-// client at the token endpoint, so client_secret isn't issued (clients are
-// "public" per RFC 7591 §2). Registration is open — anyone can register a
-// client. The actual auth gate is the user's consent decision at /authorize
-// + their valid bearer token at the token endpoint via PKCE verification.
+// ChatGPT's MCP connector REQUIRES this endpoint — without it the connector
+// silently fails before making any user-visible request. Registrations
+// persist to the oauth_clients table so /oauth/authorize and /oauth/token
+// can validate that an inbound redirect_uri belongs to the registered set.
+//
+// Per RFC 7591 §2 we issue public clients (no client_secret) — PKCE is the
+// proof-of-possession mechanism. Per-IP rate limiting prevents anonymous
+// abuse of the open endpoint.
 func (h *OAuthHandler) HandleClientRegister(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if h.dcrLimits != nil && !h.dcrLimits.allow(remoteIP(r)) {
+		w.Header().Set("Retry-After", "3600")
+		writeOAuthError(w, http.StatusTooManyRequests, "rate_limited",
+			"too many client registrations from this address — try again in an hour")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
 	var req struct {
 		RedirectURIs            []string `json:"redirect_uris,omitempty"`
 		ClientName              string   `json:"client_name,omitempty"`
@@ -170,6 +235,11 @@ func (h *OAuthHandler) HandleClientRegister(w http.ResponseWriter, r *http.Reque
 	if r.Body != nil {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 	}
+	cleanRedirects, vErr := validateRedirectURIs(req.RedirectURIs)
+	if vErr != nil {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_redirect_uri", vErr.Error())
+		return
+	}
 	// Generate a public-client identifier. 16 random bytes base64url-encoded
 	// (~22 chars) is well over the OAuth-spec minimum and unguessable.
 	rawID := make([]byte, 16)
@@ -178,6 +248,12 @@ func (h *OAuthHandler) HandleClientRegister(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	clientID := base64.RawURLEncoding.EncodeToString(rawID)
+
+	if err := h.Store.InsertOAuthClient(r.Context(), clientID, cleanRedirects, req.ClientName); err != nil {
+		log.Printf("oauth: persist DCR client failed: %v", err)
+		writeOAuthError(w, http.StatusInternalServerError, "server_error", "failed to persist client registration")
+		return
+	}
 
 	// Default to authorization_code + S256 if the client didn't specify.
 	if len(req.GrantTypes) == 0 {
@@ -193,7 +269,7 @@ func (h *OAuthHandler) HandleClientRegister(w http.ResponseWriter, r *http.Reque
 	resp := map[string]any{
 		"client_id":                  clientID,
 		"client_id_issued_at":        time.Now().Unix(),
-		"redirect_uris":              req.RedirectURIs,
+		"redirect_uris":              cleanRedirects,
 		"grant_types":                req.GrantTypes,
 		"response_types":             req.ResponseTypes,
 		"token_endpoint_auth_method": req.TokenEndpointAuthMethod,
@@ -205,6 +281,106 @@ func (h *OAuthHandler) HandleClientRegister(w http.ResponseWriter, r *http.Reque
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// validateRedirectURIs enforces the constraints we care about for OAuth
+// redirect targets:
+//   - at least one URI required
+//   - HTTPS only (no http:// — clear-text redirects leak codes; localhost
+//     development paths can use the bearer-token CLI flow instead)
+//   - no userinfo (user:pass@host) — never a legitimate OAuth target
+//   - no fragment — RFC 6749 §3.1.2 forbids fragments
+//   - parseable as an absolute URL
+//
+// Returns the cleaned (TrimSpace, lowercased scheme/host) URIs.
+func validateRedirectURIs(in []string) ([]string, error) {
+	if len(in) == 0 {
+		return nil, errors.New("redirect_uris must list at least one URL")
+	}
+	out := make([]string, 0, len(in))
+	for _, raw := range in {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		u, err := url.Parse(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid redirect_uri %q: %w", raw, err)
+		}
+		if !u.IsAbs() {
+			return nil, fmt.Errorf("redirect_uri %q must be an absolute URL", raw)
+		}
+		if strings.ToLower(u.Scheme) != "https" {
+			return nil, fmt.Errorf("redirect_uri %q must use https", raw)
+		}
+		if u.User != nil {
+			return nil, fmt.Errorf("redirect_uri %q must not contain userinfo", raw)
+		}
+		if u.Fragment != "" {
+			return nil, fmt.Errorf("redirect_uri %q must not contain a fragment", raw)
+		}
+		u.Scheme = strings.ToLower(u.Scheme)
+		u.Host = strings.ToLower(u.Host)
+		out = append(out, u.String())
+	}
+	if len(out) == 0 {
+		return nil, errors.New("redirect_uris must contain at least one non-empty URL")
+	}
+	return out, nil
+}
+
+// remoteIP extracts the caller IP (best-effort) for rate limiting. Not used
+// for any auth decision — only as a soft DOS bucket key.
+func remoteIP(r *http.Request) string {
+	if xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); xff != "" {
+		if i := strings.Index(xff, ","); i > 0 {
+			return strings.TrimSpace(xff[:i])
+		}
+		return xff
+	}
+	host := r.RemoteAddr
+	if i := strings.LastIndex(host, ":"); i > 0 {
+		return host[:i]
+	}
+	return host
+}
+
+// ipRateLimiter is a small fixed-window per-IP counter. Not perfectly
+// accurate, but cheap and adequate for the DCR endpoint where legitimate
+// usage is sparse.
+type ipRateLimiter struct {
+	mu     sync.Mutex
+	limit  int
+	window time.Duration
+	hits   map[string]*ipRateBucket
+}
+
+type ipRateBucket struct {
+	count    int
+	resetsAt time.Time
+}
+
+func newIPRateLimiter(limit int, window time.Duration) *ipRateLimiter {
+	return &ipRateLimiter{limit: limit, window: window, hits: map[string]*ipRateBucket{}}
+}
+
+func (l *ipRateLimiter) allow(ip string) bool {
+	if l == nil {
+		return true
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	b, ok := l.hits[ip]
+	if !ok || now.After(b.resetsAt) {
+		l.hits[ip] = &ipRateBucket{count: 1, resetsAt: now.Add(l.window)}
+		return true
+	}
+	if b.count >= l.limit {
+		return false
+	}
+	b.count++
+	return true
 }
 
 // HandleProtectedResource serves the RFC 9728 Protected Resource Metadata
@@ -259,7 +435,7 @@ func parseAuthorizeParams(r *http.Request) (authorizeFormParams, string) {
 	p := authorizeFormParams{
 		ClientID:            strings.TrimSpace(r.FormValue("client_id")),
 		RedirectURI:         strings.TrimSpace(r.FormValue("redirect_uri")),
-		State:               r.FormValue("state"),
+		State:               strings.TrimSpace(r.FormValue("state")),
 		CodeChallenge:       strings.TrimSpace(r.FormValue("code_challenge")),
 		CodeChallengeMethod: strings.ToUpper(strings.TrimSpace(r.FormValue("code_challenge_method"))),
 		ResponseType:        strings.ToLower(strings.TrimSpace(r.FormValue("response_type"))),
@@ -271,8 +447,21 @@ func parseAuthorizeParams(r *http.Request) (authorizeFormParams, string) {
 	if p.RedirectURI == "" {
 		return p, "redirect_uri is required"
 	}
-	if _, err := url.Parse(p.RedirectURI); err != nil {
-		return p, "redirect_uri must be a valid URL"
+	u, err := url.Parse(p.RedirectURI)
+	if err != nil || !u.IsAbs() {
+		return p, "redirect_uri must be a valid absolute URL"
+	}
+	if u.User != nil {
+		return p, "redirect_uri must not contain userinfo"
+	}
+	if u.Fragment != "" {
+		return p, "redirect_uri must not contain a fragment"
+	}
+	if p.State == "" {
+		// RFC 6749 §10.12 strongly recommends state for CSRF protection on
+		// the OAuth client side; we make it mandatory so a vulnerable client
+		// cannot omit it.
+		return p, "state is required"
 	}
 	if p.ResponseType == "" {
 		p.ResponseType = "code"
@@ -292,6 +481,29 @@ func parseAuthorizeParams(r *http.Request) (authorizeFormParams, string) {
 	return p, ""
 }
 
+// resolveClient looks up the DCR-registered client for clientID and confirms
+// redirectURI belongs to its registered set. Returns the matched URI on
+// success (which may differ in casing from the input — we use the stored
+// value at the redirect step so the response always points at a known URI)
+// or a problem-detail string for the caller to surface as a 400.
+func (h *OAuthHandler) resolveClient(ctx context.Context, clientID, redirectURI string) (*store.OAuthClient, string, string) {
+	client, err := h.Store.GetOAuthClient(ctx, clientID)
+	if err != nil {
+		if errors.Is(err, store.ErrOAuthClientNotFound) {
+			return nil, "", "client_id is not registered — call /oauth/register first"
+		}
+		log.Printf("oauth: client lookup failed: %v", err)
+		return nil, "", "internal client lookup error"
+	}
+	wanted := strings.TrimSpace(redirectURI)
+	for _, registered := range client.RedirectURIs {
+		if registered == wanted {
+			return client, registered, ""
+		}
+	}
+	return nil, "", "redirect_uri does not match a registered URI for this client_id"
+}
+
 // HandleAuthorize serves the consent screen (GET) and processes consent
 // submission (POST). The user must be authenticated to the dashboard
 // (when encryption is on) — IsAuthed gates that.
@@ -299,6 +511,13 @@ func (h *OAuthHandler) HandleAuthorize(w http.ResponseWriter, r *http.Request) {
 	params, problem := parseAuthorizeParams(r)
 	if problem != "" {
 		http.Error(w, problem, http.StatusBadRequest)
+		return
+	}
+	// redirect_uri MUST belong to a DCR-registered client. We do this BEFORE
+	// the dashboard auth redirect so an attacker can't use the redirect to
+	// recover the validation error (i.e. probe whether a client_id exists).
+	if _, _, clientErr := h.resolveClient(r.Context(), params.ClientID, params.RedirectURI); clientErr != "" {
+		http.Error(w, clientErr, http.StatusBadRequest)
 		return
 	}
 
@@ -326,6 +545,66 @@ func (h *OAuthHandler) HandleAuthorize(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Allow", "GET, POST")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// signCSRFNonce returns "value.iat.mac" — a self-contained signed token
+// that processConsent can verify on POST without server-side state.
+func (h *OAuthHandler) signCSRFNonce(p authorizeFormParams) string {
+	nonce := make([]byte, 16)
+	_, _ = rand.Read(nonce)
+	value := base64.RawURLEncoding.EncodeToString(nonce)
+	iat := time.Now().Unix()
+	iatStr := fmt.Sprintf("%d", iat)
+	mac := hmac.New(sha256.New, h.csrfKey)
+	mac.Write([]byte(p.ClientID))
+	mac.Write([]byte("|"))
+	mac.Write([]byte(p.RedirectURI))
+	mac.Write([]byte("|"))
+	mac.Write([]byte(p.State))
+	mac.Write([]byte("|"))
+	mac.Write([]byte(p.CodeChallenge))
+	mac.Write([]byte("|"))
+	mac.Write([]byte(value))
+	mac.Write([]byte("|"))
+	mac.Write([]byte(iatStr))
+	return value + "." + iatStr + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+// verifyCSRFNonce confirms the POSTed nonce was signed by THIS handler with
+// the same authorize params it was rendered for, within csrfTTL.
+func (h *OAuthHandler) verifyCSRFNonce(p authorizeFormParams, token string) error {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return errors.New("malformed csrf nonce")
+	}
+	value, iatStr, macB64 := parts[0], parts[1], parts[2]
+	gotMAC, err := base64.RawURLEncoding.DecodeString(macB64)
+	if err != nil {
+		return errors.New("malformed csrf nonce mac")
+	}
+	mac := hmac.New(sha256.New, h.csrfKey)
+	mac.Write([]byte(p.ClientID))
+	mac.Write([]byte("|"))
+	mac.Write([]byte(p.RedirectURI))
+	mac.Write([]byte("|"))
+	mac.Write([]byte(p.State))
+	mac.Write([]byte("|"))
+	mac.Write([]byte(p.CodeChallenge))
+	mac.Write([]byte("|"))
+	mac.Write([]byte(value))
+	mac.Write([]byte("|"))
+	mac.Write([]byte(iatStr))
+	if subtle.ConstantTimeCompare(mac.Sum(nil), gotMAC) != 1 {
+		return errors.New("csrf nonce signature mismatch")
+	}
+	var iat int64
+	if _, perr := fmt.Sscanf(iatStr, "%d", &iat); perr != nil {
+		return errors.New("csrf nonce iat parse")
+	}
+	if time.Since(time.Unix(iat, 0)) > csrfTTL {
+		return errors.New("csrf nonce expired — refresh the consent page and resubmit")
+	}
+	return nil
 }
 
 // consentTemplate is the minimal HTML form. Lists existing active tokens as
@@ -383,6 +662,7 @@ var consentTemplate = template.Must(template.New("consent").Parse(`<!doctype htm
     <input type="hidden" name="state" value="{{.State}}">
     <input type="hidden" name="code_challenge" value="{{.CodeChallenge}}">
     <input type="hidden" name="code_challenge_method" value="{{.CodeChallengeMethod}}">
+    <input type="hidden" name="csrf_nonce" value="{{.CSRFNonce}}">
     <h2 style="font-size: 1.1em;">Mint a new bearer for this client</h2>
     <p class="meta">A new <code>mcp_tokens</code> row is created for this connection — you can revoke it at any time from <code>sage-gui mcp-token revoke &lt;id&gt;</code> or the dashboard.</p>
     <p>
@@ -394,16 +674,17 @@ var consentTemplate = template.Must(template.New("consent").Parse(`<!doctype htm
       <label>Run as agent
         {{if .Agents}}
         <br><select name="agent_id" required style="width: 100%; box-sizing: border-box; padding: 0.5em;">
+          <option value="" selected disabled>— pick an agent —</option>
           {{range .Agents}}
-          <option value="{{.AgentID}}"{{if eq .AgentID $.DefaultAgentID}} selected{{end}}>
+          <option value="{{.AgentID}}">
             {{.Name}} ({{.Role}}{{if .RegisteredName}} · {{.RegisteredName}}{{end}}) — {{slice .AgentID 0 8}}…
           </option>
           {{end}}
         </select>
-        <span class="meta">ChatGPT will act as this agent. Pick admin for full access.</span>
+        <span class="meta">The connector will act as this agent. Required — no default is pre-selected.</span>
         {{else}}
         <br><input type="text" name="agent_id" required placeholder="64 hex chars" style="width: 100%; box-sizing: border-box;">
-        <span class="meta">No active agents found. Paste a 64-char hex ed25519 pubkey.</span>
+        <span class="meta">Paste your 64-char hex ed25519 agent pubkey. Available in the CEREBRUM dashboard&rsquo;s Network tab.</span>
         {{end}}
       </label>
     </p>
@@ -416,38 +697,36 @@ var consentTemplate = template.Must(template.New("consent").Parse(`<!doctype htm
 </html>`))
 
 // renderConsent writes the GET-side HTML form.
+//
+// The agent roster (privileged information — pubkey prefixes, registered
+// names, roles) is only embedded when the request carries a real dashboard
+// session cookie. Otherwise the template falls back to the free-text input
+// so an unauthenticated visitor on a tunnel-exposed unencrypted node never
+// sees the agent list.
 func (h *OAuthHandler) renderConsent(w http.ResponseWriter, r *http.Request, p authorizeFormParams, errMsg string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
-	// Build the agent dropdown list. Pull active agents from the store, sort
-	// admins first so the most-privileged shows at top, and pre-select the
-	// first admin as default. If listing fails (e.g. corrupt store), fall
-	// through with empty list — the template degrades to the raw text input.
-	var (
-		visibleAgents  []consentAgent
-		defaultAgentID string
-	)
-	if all, err := h.Store.ListAgents(r.Context()); err == nil {
-		var admins, others []consentAgent
-		for _, a := range all {
-			if a == nil || a.Status != "active" {
-				continue
+	var visibleAgents []consentAgent
+	if h.hasDashboardCookie(r) {
+		if all, err := h.Store.ListAgents(r.Context()); err == nil {
+			var admins, others []consentAgent
+			for _, a := range all {
+				if a == nil || a.Status != "active" {
+					continue
+				}
+				ca := consentAgent{
+					AgentID:        a.AgentID,
+					Name:           a.Name,
+					Role:           a.Role,
+					RegisteredName: a.RegisteredName,
+				}
+				if a.Role == "admin" {
+					admins = append(admins, ca)
+				} else {
+					others = append(others, ca)
+				}
 			}
-			ca := consentAgent{
-				AgentID:        a.AgentID,
-				Name:           a.Name,
-				Role:           a.Role,
-				RegisteredName: a.RegisteredName,
-			}
-			if a.Role == "admin" {
-				admins = append(admins, ca)
-			} else {
-				others = append(others, ca)
-			}
-		}
-		visibleAgents = append(admins, others...)
-		if len(visibleAgents) > 0 {
-			defaultAgentID = visibleAgents[0].AgentID
+			visibleAgents = append(admins, others...)
 		}
 	}
 
@@ -463,7 +742,7 @@ func (h *OAuthHandler) renderConsent(w http.ResponseWriter, r *http.Request, p a
 		CodeChallengeMethod string
 		Error               string
 		Agents              []consentAgent
-		DefaultAgentID      string
+		CSRFNonce           string
 	}{
 		ClientID:            p.ClientID,
 		RedirectURI:         p.RedirectURI,
@@ -474,13 +753,9 @@ func (h *OAuthHandler) renderConsent(w http.ResponseWriter, r *http.Request, p a
 		CodeChallengeMethod: p.CodeChallengeMethod,
 		Error:               errMsg,
 		Agents:              visibleAgents,
-		DefaultAgentID:      defaultAgentID,
+		CSRFNonce:           h.signCSRFNonce(p),
 	}
 	if err := consentTemplate.Execute(w, data); err != nil {
-		// Surface the real template error to logs so we can diagnose render
-		// failures (the headers may already be flushed at this point — the
-		// http.Error WriteHeader will be a superfluous-call warning, but the
-		// log line is the only place the cause is visible).
 		log.Printf("oauth: consentTemplate.Execute failed: %v (data=%+v)", err, data)
 		http.Error(w, "failed to render consent page", http.StatusInternalServerError)
 	}
@@ -495,12 +770,20 @@ func (h *OAuthHandler) processConsent(w http.ResponseWriter, r *http.Request, p 
 		http.Error(w, "invalid form body", http.StatusBadRequest)
 		return
 	}
+	if err := h.verifyCSRFNonce(p, r.FormValue("csrf_nonce")); err != nil {
+		h.renderConsent(w, r, p, "Consent request could not be verified — please try again. ("+err.Error()+")")
+		return
+	}
 	agentID := strings.TrimSpace(r.FormValue("agent_id"))
 	tokenName := strings.TrimSpace(r.FormValue("token_name"))
 	if tokenName == "" {
 		tokenName = "oauth-" + p.ClientID
 	}
 
+	if agentID == "" {
+		h.renderConsent(w, r, p, "Pick an agent before authorizing.")
+		return
+	}
 	if len(agentID) != 64 {
 		h.renderConsent(w, r, p, "agent_id must be a 64-char hex-encoded ed25519 public key")
 		return
@@ -567,13 +850,6 @@ func (h *OAuthHandler) processConsent(w http.ResponseWriter, r *http.Request, p 
 // status is the real lifetime gate, and the OAuth spec does NOT require a
 // non-zero value.
 func (h *OAuthHandler) HandleToken(w http.ResponseWriter, r *http.Request) {
-	// Trace logging — OAuth routes don't pass through the JSON request
-	// logger, so without these prints we can't tell from the log whether
-	// ChatGPT (or any other client) ever made it to /oauth/token.
-	log.Printf("oauth: /oauth/token hit method=%s remote=%s ua=%q ct=%q origin=%q",
-		r.Method, r.RemoteAddr, r.Header.Get("User-Agent"),
-		r.Header.Get("Content-Type"), r.Header.Get("Origin"))
-
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
 		writeOAuthError(w, http.StatusMethodNotAllowed, "invalid_request", "method not allowed")
@@ -581,14 +857,12 @@ func (h *OAuthHandler) HandleToken(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16) // 64KB cap on /token form bodies
 	if err := r.ParseForm(); err != nil {
-		log.Printf("oauth: /oauth/token form parse failed: %v", err)
 		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "invalid form body")
 		return
 	}
 
 	grantType := r.FormValue("grant_type")
 	if grantType != "authorization_code" {
-		log.Printf("oauth: /oauth/token unsupported grant_type=%q", grantType)
 		writeOAuthError(w, http.StatusBadRequest, "unsupported_grant_type",
 			"only authorization_code is supported")
 		return
@@ -597,24 +871,23 @@ func (h *OAuthHandler) HandleToken(w http.ResponseWriter, r *http.Request) {
 	codeVerifier := strings.TrimSpace(r.FormValue("code_verifier"))
 	redirectURI := strings.TrimSpace(r.FormValue("redirect_uri"))
 	clientID := strings.TrimSpace(r.FormValue("client_id"))
-	if code == "" || codeVerifier == "" || redirectURI == "" {
-		log.Printf("oauth: /oauth/token missing required fields code_present=%v verifier_present=%v redirect_present=%v client_id=%q",
-			code != "", codeVerifier != "", redirectURI != "", clientID)
+	if code == "" || codeVerifier == "" || redirectURI == "" || clientID == "" {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_request",
-			"code, code_verifier, redirect_uri are required")
+			"code, code_verifier, redirect_uri, client_id are required")
 		return
 	}
-	log.Printf("oauth: /oauth/token redeeming code=%s... redirect_uri=%s client_id=%s verifier_len=%d",
-		safePrefix(code, 8), redirectURI, clientID, len(codeVerifier))
+	if _, _, clientErr := h.resolveClient(r.Context(), clientID, redirectURI); clientErr != "" {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", clientErr)
+		return
+	}
 
 	bearer, err := h.Store.RedeemAuthCode(r.Context(), code, codeVerifier, redirectURI)
 	if err != nil {
-		log.Printf("oauth: /oauth/token redeem failed: %v", err)
 		switch {
 		case errors.Is(err, store.ErrAuthCodeNotFound),
 			errors.Is(err, store.ErrAuthCodeUsed),
 			errors.Is(err, store.ErrAuthCodeExpired):
-			writeOAuthError(w, http.StatusBadRequest, "invalid_grant", err.Error())
+			writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "authorization code is invalid, used, or expired")
 		case errors.Is(err, store.ErrAuthCodeRedirectMismatch):
 			writeOAuthError(w, http.StatusBadRequest, "invalid_grant",
 				"redirect_uri does not match the authorization request")
@@ -622,12 +895,12 @@ func (h *OAuthHandler) HandleToken(w http.ResponseWriter, r *http.Request) {
 			writeOAuthError(w, http.StatusBadRequest, "invalid_grant",
 				"PKCE code_verifier does not match code_challenge")
 		default:
+			log.Printf("oauth: /oauth/token unexpected redeem error: %v", err)
 			writeOAuthError(w, http.StatusInternalServerError, "server_error",
 				"failed to redeem authorization code")
 		}
 		return
 	}
-	log.Printf("oauth: /oauth/token success — bearer issued for code=%s...", safePrefix(code, 8))
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")

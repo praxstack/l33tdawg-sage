@@ -552,6 +552,10 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 	// in front of bearer auth (v6.7.2 — ChatGPT MCP connector compat).
 	s.migrateMCPAuthCodes(ctx)
 
+	// Migration: add oauth_clients table for persisted DCR registrations
+	// (v6.8.0 — required so /oauth/authorize can validate redirect_uri).
+	s.migrateOAuthClients(ctx)
+
 	// FTS5 full-text search index on memory content.
 	// Used as a fallback when semantic embeddings are unavailable (hash mode).
 	_, _ = s.writeExecContext(ctx, `

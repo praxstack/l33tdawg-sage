@@ -436,6 +436,11 @@ func runServe() error {
 	// /v1/mcp/sse endpoint, same revocation surface. No changes to the
 	// bearer-auth middleware itself.
 	oauthHandler := rest.NewOAuthHandler(sqliteStore, dashboard.IsRequestAuthenticated, nil)
+	// HasDashboardCookie gates the agent-roster dropdown on the consent screen
+	// so a tunnel-exposed unencrypted node never leaks the agent list to an
+	// unauthenticated visitor; without a real session cookie the consent
+	// screen falls back to the free-text input.
+	oauthHandler.HasDashboardCookie = dashboard.HasValidSessionCookie
 	rest.MountOAuthRoutes(r, oauthHandler)
 	logger.Info().Msg("OAuth 2.0 + PKCE wrapper enabled (/.well-known/oauth-authorization-server, /oauth/authorize, /oauth/token)")
 
@@ -571,6 +576,18 @@ func runServe() error {
 				purged, _ := sqliteStore.PurgePipelines(ctx, time.Now().Add(-24*time.Hour))
 				if expired > 0 || purged > 0 {
 					logger.Debug().Int("expired", expired).Int("purged", purged).Msg("pipeline cleanup")
+				}
+				// Sweep stale OAuth auth-codes (5-min TTL, single-use) — the
+				// store retains rows past use for audit visibility, but the
+				// bearer plaintext is wiped at redemption time. Anything older
+				// than 1h is genuinely abandoned and can drop. Older DCR
+				// registrations also age out (90d window) so a forgotten
+				// connector setup doesn't accumulate state forever.
+				if removed, _ := sqliteStore.PurgeExpiredAuthCodes(ctx); removed > 0 {
+					logger.Debug().Int64("removed", removed).Msg("oauth auth-codes purged")
+				}
+				if removed, _ := sqliteStore.PurgeOldOAuthClients(ctx, 90*24*time.Hour); removed > 0 {
+					logger.Debug().Int64("removed", removed).Msg("oauth clients purged")
 				}
 			}
 		}
