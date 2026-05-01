@@ -132,8 +132,8 @@ func TestOAuth_Authorize_POST_RejectsForgedCSRFNonce(t *testing.T) {
 }
 
 // TestOAuth_Authorize_NoAgentRosterPreAuth confirms a tunnel-exposed visitor
-// without a dashboard cookie does NOT see the agent dropdown — closing the
-// pre-auth roster leak (audit H1).
+// without a dashboard cookie sees only an 8-char hex prefix of the node
+// operator's pubkey, never the full identity or roster.
 func TestOAuth_Authorize_NoAgentRosterPreAuth(t *testing.T) {
 	// HasDashboardCookie is left nil — every request appears unauthenticated
 	// to the consent renderer regardless of IsAuthed's verdict.
@@ -149,9 +149,14 @@ func TestOAuth_Authorize_NoAgentRosterPreAuth(t *testing.T) {
 
 	body := rr.Body.String()
 	require.Equal(t, http.StatusOK, rr.Code)
-	// Free-text input is rendered (no agent roster).
-	assert.Contains(t, body, `placeholder="64 hex chars"`)
+	// No picker / dropdown / free-text input for agent_id.
 	assert.NotContains(t, body, `<select name="agent_id"`)
+	assert.NotContains(t, body, `name="agent_id"`)
+	// The operator label is the 8-char prefix of the test handler's
+	// NodeOperatorAgentID (64×'a' → "aaaaaaaa…").
+	assert.Contains(t, body, "aaaaaaaa")
+	// The full pubkey must NOT be rendered to an unauthenticated visitor.
+	assert.NotContains(t, body, strings.Repeat("a", 64))
 }
 
 // TestOAuth_Register_RateLimited confirms /oauth/register limits abuse from

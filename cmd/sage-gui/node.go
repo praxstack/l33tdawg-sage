@@ -436,11 +436,28 @@ func runServe() error {
 	// /v1/mcp/sse endpoint, same revocation surface. No changes to the
 	// bearer-auth middleware itself.
 	oauthHandler := rest.NewOAuthHandler(sqliteStore, dashboard.IsRequestAuthenticated, nil)
-	// HasDashboardCookie gates the agent-roster dropdown on the consent screen
-	// so a tunnel-exposed unencrypted node never leaks the agent list to an
-	// unauthenticated visitor; without a real session cookie the consent
-	// screen falls back to the free-text input.
+	// HasDashboardCookie gates the consent-screen identity panel — without a
+	// real session cookie we render an 8-char prefix instead of the full hex
+	// pubkey, so an unauthenticated tunnel visitor never sees the operator's
+	// full identity.
 	oauthHandler.HasDashboardCookie = dashboard.HasValidSessionCookie
+	// NodeOperatorAgentID is the identity that OAuth-issued bearers will run
+	// as. The HTTP MCP transport signs every outgoing REST call with the
+	// node's signing key, so this label always matches reality.
+	if keyData, kerr := os.ReadFile(cfg.AgentKey); kerr == nil {
+		var k ed25519.PrivateKey
+		switch len(keyData) {
+		case ed25519.SeedSize:
+			k = ed25519.NewKeyFromSeed(keyData)
+		case ed25519.PrivateKeySize:
+			k = ed25519.PrivateKey(keyData)
+		}
+		if k != nil {
+			if pub, ok := k.Public().(ed25519.PublicKey); ok {
+				oauthHandler.NodeOperatorAgentID = hex.EncodeToString(pub)
+			}
+		}
+	}
 	rest.MountOAuthRoutes(r, oauthHandler)
 	logger.Info().Msg("OAuth 2.0 + PKCE wrapper enabled (/.well-known/oauth-authorization-server, /oauth/authorize, /oauth/token)")
 

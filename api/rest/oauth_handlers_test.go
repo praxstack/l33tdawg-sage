@@ -32,6 +32,9 @@ func newOAuthRouter(t *testing.T, authed bool, redirectURL string) (*OAuthHandle
 
 	checker := func(_ *http.Request) (bool, string) { return authed, redirectURL }
 	h := NewOAuthHandler(memStore, checker, func(_ *http.Request) string { return "https://sage.test" })
+	// Tests assume the node operator's identity is configured — production
+	// reads this from cfg.AgentKey at startup.
+	h.NodeOperatorAgentID = strings.Repeat("a", 64)
 	r := chi.NewRouter()
 	MountOAuthRoutes(r, h)
 	return h, r, memStore
@@ -84,9 +87,10 @@ func fetchCSRFNonce(t *testing.T, r http.Handler, authURL string) string {
 }
 
 // mintAuthCode runs the full GET→POST consent flow against r and returns
-// the freshly-minted authorization code. Caller must have already registered
-// the client_id for the given redirect.
-func mintAuthCode(t *testing.T, r http.Handler, clientID, redirect, challenge, state, agentHex string) string {
+// the freshly-minted authorization code. The agentHex argument is retained
+// for source-compat with older tests but is ignored — the bearer is bound
+// to the OAuthHandler's NodeOperatorAgentID.
+func mintAuthCode(t *testing.T, r http.Handler, clientID, redirect, challenge, state, _ string) string {
 	t.Helper()
 	authURL := "/oauth/authorize?client_id=" + url.QueryEscape(clientID) +
 		"&redirect_uri=" + url.QueryEscape(redirect) +
@@ -94,7 +98,6 @@ func mintAuthCode(t *testing.T, r http.Handler, clientID, redirect, challenge, s
 		"&code_challenge_method=S256&response_type=code&state=" + url.QueryEscape(state)
 	nonce := fetchCSRFNonce(t, r, authURL)
 	form := url.Values{}
-	form.Set("agent_id", agentHex)
 	form.Set("token_name", "test-token")
 	form.Set("csrf_nonce", nonce)
 	req := httptest.NewRequest(http.MethodPost, authURL, strings.NewReader(form.Encode()))
@@ -198,6 +201,8 @@ func TestOAuth_Authorize_POST_RedirectsWithCode(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, tokens, 1)
 	assert.Equal(t, "test-token", tokens[0].Name)
+	// The OAuth flow binds the bearer to the node operator's agent_id, not
+	// to whatever the consent form might have submitted.
 	assert.Equal(t, strings.Repeat("a", 64), tokens[0].AgentID)
 }
 
@@ -358,26 +363,22 @@ func TestOAuth_Token_GET_405(t *testing.T) {
 	assert.Equal(t, http.StatusMethodNotAllowed, rr.Code)
 }
 
-func TestOAuth_Authorize_BadAgentID_RerendersConsent(t *testing.T) {
+// TestOAuth_Authorize_RendersOperatorLabel asserts the consent screen makes
+// the node-operator binding explicit instead of presenting an agent picker.
+func TestOAuth_Authorize_RendersOperatorLabel(t *testing.T) {
 	_, r, _ := newOAuthRouter(t, true, "")
 	clientID := registerOAuthClient(t, r, "https://x/cb")
 
-	verifier := "verifier-bad-agent-id-test-aaaaaa-bbbb"
-	challenge := pkceChallenge(verifier)
-
-	authURL := "/oauth/authorize?client_id=" + url.QueryEscape(clientID) +
-		"&redirect_uri=https%3A%2F%2Fx%2Fcb&code_challenge=" + challenge +
-		"&code_challenge_method=S256&response_type=code&state=bad-agent"
-	nonce := fetchCSRFNonce(t, r, authURL)
-
-	form := url.Values{}
-	form.Set("agent_id", "too-short")
-	form.Set("csrf_nonce", nonce)
-	req := httptest.NewRequest(http.MethodPost, authURL, strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req := httptest.NewRequest(http.MethodGet,
+		"/oauth/authorize?client_id="+url.QueryEscape(clientID)+
+			"&redirect_uri=https://x/cb&code_challenge=abc&code_challenge_method=S256&response_type=code&state=op-label",
+		nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 
-	require.Equal(t, http.StatusOK, rr.Code, "should re-render the consent form, not redirect")
-	assert.Contains(t, rr.Body.String(), "agent_id must be a 64-char hex")
+	require.Equal(t, http.StatusOK, rr.Code)
+	body := rr.Body.String()
+	assert.Contains(t, body, "Operates as:")
+	assert.NotContains(t, body, `name="agent_id"`)
+	assert.NotContains(t, body, "<select")
 }

@@ -113,11 +113,20 @@ type OAuthDashboardSession func(r *http.Request) bool
 
 // OAuthHandler bundles the OAuth 2.0 endpoints. Built once at server start,
 // mounted on the chi router at the host root.
+//
+// NodeOperatorAgentID is the on-chain identity that OAuth-issued bearers
+// operate as. The MCP HTTP transport currently signs every outbound REST
+// call with the node's signing key (cfg.AgentKey), so bearer-authenticated
+// MCP traffic is attributed to that single identity regardless of which
+// agent label the operator selects. We expose this honestly to the consent
+// screen rather than letting the user pick an agent that the bearer will
+// not actually act as.
 type OAuthHandler struct {
-	Store              OAuthStore
-	IsAuthed           OAuthSessionChecker
-	HasDashboardCookie OAuthDashboardSession
-	IssuerBaseURL      func(r *http.Request) string // e.g. "https://host:8443" — derived per request
+	Store               OAuthStore
+	IsAuthed            OAuthSessionChecker
+	HasDashboardCookie  OAuthDashboardSession
+	IssuerBaseURL       func(r *http.Request) string // e.g. "https://host:8443" — derived per request
+	NodeOperatorAgentID string
 
 	csrfKey   []byte // process-lifetime random for HMAC-signing the consent CSRF nonce
 	dcrLimits *ipRateLimiter
@@ -670,25 +679,11 @@ var consentTemplate = template.Must(template.New("consent").Parse(`<!doctype htm
         <input type="text" name="token_name" value="" style="width: 100%; box-sizing: border-box;">
       </label>
     </p>
-    <p>
-      <label>Run as agent
-        {{if .Agents}}
-        <br><select name="agent_id" required style="width: 100%; box-sizing: border-box; padding: 0.5em;">
-          <option value="" selected disabled>— pick an agent —</option>
-          {{range .Agents}}
-          <option value="{{.AgentID}}">
-            {{.Name}} ({{.Role}}{{if .RegisteredName}} · {{.RegisteredName}}{{end}}) — {{slice .AgentID 0 8}}…
-          </option>
-          {{end}}
-        </select>
-        <span class="meta">The connector will act as this agent. Required — no default is pre-selected.</span>
-        {{else}}
-        <br><input type="text" name="agent_id" required placeholder="64 hex chars" style="width: 100%; box-sizing: border-box;">
-        <span class="meta">Paste your 64-char hex ed25519 agent pubkey. Available in the CEREBRUM dashboard&rsquo;s Network tab.</span>
-        {{end}}
-      </label>
-    </p>
-    <p><button type="submit">Authorize</button></p>
+    <div class="card" style="background:#fff;border-color:#cfd8dc;">
+      <p style="margin:0;"><strong>Operates as:</strong> <code>{{.NodeOperatorAgentLabel}}</code></p>
+      <p class="meta" style="margin:0.5em 0 0;">MCP requests from this connection are attributed to the local SAGE node identity. To run as a different agent, register that agent on a separate node and issue a bearer there.</p>
+    </div>
+    <p style="margin-top:1em;"><button type="submit">Authorize</button></p>
   </form>
 
   <p class="meta">After authorization, you'll be redirected to {{.RedirectURI}}.<br>
@@ -698,67 +693,78 @@ var consentTemplate = template.Must(template.New("consent").Parse(`<!doctype htm
 
 // renderConsent writes the GET-side HTML form.
 //
-// The agent roster (privileged information — pubkey prefixes, registered
-// names, roles) is only embedded when the request carries a real dashboard
-// session cookie. Otherwise the template falls back to the free-text input
-// so an unauthenticated visitor on a tunnel-exposed unencrypted node never
-// sees the agent list.
+// The screen shows the operator the canonical "operates as" identity (the
+// node operator's agent_id) so they understand what privileges the bearer
+// will inherit. Earlier revisions allowed the operator to pick an arbitrary
+// agent_id from a dropdown, but the underlying MCP transport always signs
+// outgoing REST calls with the node's signing key — so the picked agent_id
+// only ever functioned as a label. Removing the picker is the honest
+// representation of what the bearer actually does.
 func (h *OAuthHandler) renderConsent(w http.ResponseWriter, r *http.Request, p authorizeFormParams, errMsg string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
-	var visibleAgents []consentAgent
-	if h.hasDashboardCookie(r) {
-		if all, err := h.Store.ListAgents(r.Context()); err == nil {
-			var admins, others []consentAgent
-			for _, a := range all {
-				if a == nil || a.Status != "active" {
-					continue
-				}
-				ca := consentAgent{
-					AgentID:        a.AgentID,
-					Name:           a.Name,
-					Role:           a.Role,
-					RegisteredName: a.RegisteredName,
-				}
-				if a.Role == "admin" {
-					admins = append(admins, ca)
-				} else {
-					others = append(others, ca)
-				}
-			}
-			visibleAgents = append(admins, others...)
-		}
-	}
+	label := h.consentNodeOperatorLabel(r)
 
-	// Preserve the inbound query so the POST round-trip can read the same
-	// PKCE / redirect parameters back out.
 	data := struct {
-		ClientID            string
-		RedirectURI         string
-		Scope               string
-		State               string
-		ResponseType        string
-		CodeChallenge       string
-		CodeChallengeMethod string
-		Error               string
-		Agents              []consentAgent
-		CSRFNonce           string
+		ClientID               string
+		RedirectURI            string
+		Scope                  string
+		State                  string
+		ResponseType           string
+		CodeChallenge          string
+		CodeChallengeMethod    string
+		Error                  string
+		CSRFNonce              string
+		NodeOperatorAgentLabel string
 	}{
-		ClientID:            p.ClientID,
-		RedirectURI:         p.RedirectURI,
-		Scope:               p.Scope,
-		State:               p.State,
-		ResponseType:        p.ResponseType,
-		CodeChallenge:       p.CodeChallenge,
-		CodeChallengeMethod: p.CodeChallengeMethod,
-		Error:               errMsg,
-		Agents:              visibleAgents,
-		CSRFNonce:           h.signCSRFNonce(p),
+		ClientID:               p.ClientID,
+		RedirectURI:            p.RedirectURI,
+		Scope:                  p.Scope,
+		State:                  p.State,
+		ResponseType:           p.ResponseType,
+		CodeChallenge:          p.CodeChallenge,
+		CodeChallengeMethod:    p.CodeChallengeMethod,
+		Error:                  errMsg,
+		CSRFNonce:              h.signCSRFNonce(p),
+		NodeOperatorAgentLabel: label,
 	}
 	if err := consentTemplate.Execute(w, data); err != nil {
 		log.Printf("oauth: consentTemplate.Execute failed: %v (data=%+v)", err, data)
 		http.Error(w, "failed to render consent page", http.StatusInternalServerError)
 	}
+}
+
+// consentNodeOperatorLabel returns a short human-readable label for the
+// operator's agent_id. We render the registered name when authenticated
+// (saves the operator looking up the hex), and an 8-char hex prefix otherwise
+// (avoids rendering the full pubkey to a tunnel-exposed unauthenticated
+// visitor).
+func (h *OAuthHandler) consentNodeOperatorLabel(r *http.Request) string {
+	if h.NodeOperatorAgentID == "" {
+		return "(node identity not configured)"
+	}
+	prefix := h.NodeOperatorAgentID
+	if len(prefix) > 8 {
+		prefix = prefix[:8]
+	}
+	if !h.hasDashboardCookie(r) {
+		return prefix + "…"
+	}
+	if all, err := h.Store.ListAgents(r.Context()); err == nil {
+		for _, a := range all {
+			if a != nil && a.AgentID == h.NodeOperatorAgentID {
+				name := a.Name
+				if name == "" {
+					name = a.RegisteredName
+				}
+				if name != "" {
+					return name + " (" + prefix + "…)"
+				}
+				break
+			}
+		}
+	}
+	return prefix + "…"
 }
 
 // processConsent handles the POST: mint a bearer for the chosen agent, bind
@@ -774,22 +780,21 @@ func (h *OAuthHandler) processConsent(w http.ResponseWriter, r *http.Request, p 
 		h.renderConsent(w, r, p, "Consent request could not be verified — please try again. ("+err.Error()+")")
 		return
 	}
-	agentID := strings.TrimSpace(r.FormValue("agent_id"))
 	tokenName := strings.TrimSpace(r.FormValue("token_name"))
 	if tokenName == "" {
 		tokenName = "oauth-" + p.ClientID
 	}
 
-	if agentID == "" {
-		h.renderConsent(w, r, p, "Pick an agent before authorizing.")
-		return
-	}
+	// The bearer is bound to the node operator's identity — see the comment
+	// on OAuthHandler.NodeOperatorAgentID. We do NOT honour any agent_id the
+	// caller submits; the consent screen no longer offers that choice.
+	agentID := strings.TrimSpace(h.NodeOperatorAgentID)
 	if len(agentID) != 64 {
-		h.renderConsent(w, r, p, "agent_id must be a 64-char hex-encoded ed25519 public key")
+		h.renderConsent(w, r, p, "node operator identity unavailable — bearers cannot be issued")
 		return
 	}
 	if _, decErr := hex.DecodeString(agentID); decErr != nil {
-		h.renderConsent(w, r, p, "agent_id must be hex-encoded")
+		h.renderConsent(w, r, p, "node operator identity is not hex-encoded — server misconfiguration")
 		return
 	}
 
@@ -953,25 +958,6 @@ func MountOAuthRoutes(r interface {
 	r.Options("/oauth/authorize", wrap(oauthPreflightHandler))
 	r.Post("/oauth/token", wrap(h.HandleToken))
 	r.Options("/oauth/token", wrap(oauthPreflightHandler))
-}
-
-// consentAgent is the slim view of an agent shown in the consent dropdown.
-// We deliberately avoid leaking org/clearance/bundle paths into the public
-// consent page — name + role + first-8-of-id is enough to disambiguate.
-type consentAgent struct {
-	AgentID        string
-	Name           string
-	Role           string
-	RegisteredName string
-}
-
-// safePrefix returns the first n bytes of s — for logging code values
-// without leaking the full secret. Returns "" for empty input.
-func safePrefix(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n]
 }
 
 // oauthCORSMiddleware is a passthrough — CORS is handled by the parent
