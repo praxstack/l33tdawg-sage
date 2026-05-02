@@ -653,11 +653,31 @@ func voteDecisionToString(d tx.VoteDecision) string {
 var sharedDomains = map[string]struct{}{
 	"general": {},
 	"self":    {},
+	"meta":    {},
+}
+
+// sharedDomainPrefixes match cross-cutting domain families that follow the
+// same "no single owner" semantics as the entries in sharedDomains. Any domain
+// whose name begins with one of these prefixes is treated as shared and is
+// never auto-registered. Used for SAGE-meta domains like `sage-debugging`,
+// `sage-development`, `sage-rbac-debug`, etc., which are conceptually
+// network-wide rather than agent-owned and got captured by whichever agent
+// happened to write first after a chain reset (see internal post-mortem on
+// post-chain-reset domain ownership capture).
+var sharedDomainPrefixes = []string{
+	"sage-",
 }
 
 func isSharedDomain(name string) bool {
-	_, ok := sharedDomains[name]
-	return ok
+	if _, ok := sharedDomains[name]; ok {
+		return true
+	}
+	for _, p := range sharedDomainPrefixes {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blockTime time.Time) *abcitypes.ExecTxResult {
