@@ -1775,7 +1775,14 @@ func (app *SageApp) processAgentRegister(parsedTx *tx.ParsedTx, height int64, bl
 		regAgentID = agentID
 	}
 
-	// Idempotent: if already registered, still buffer offchain write to backfill on_chain_height
+	// Idempotent: if already registered, still buffer offchain write to backfill on_chain_height.
+	// IMPORTANT (v6.8.4): copy ALL on-chain fields from the existing record — including OrgID,
+	// DeptID, DomainAccess, and VisibleAgents — into the AgentEntry. The flush handler at
+	// case "agent_register" falls back to UpdateAgent on UNIQUE-constraint failure, and
+	// UpdateAgent writes the whole row. Omitting permission fields here silently zeros out
+	// network_agents.{org_id, dept_id, domain_access, visible_agents} in the SQL mirror on
+	// every re-register, breaking cross-agent visibility for any agent whose bridge calls
+	// register_agent() at startup after permissions were granted.
 	if app.badgerStore.IsAgentRegistered(regAgentID) {
 		existing, _ := app.badgerStore.GetRegisteredAgent(regAgentID)
 		if existing != nil {
@@ -1791,6 +1798,10 @@ func (app *SageApp) processAgentRegister(parsedTx *tx.ParsedTx, height int64, bl
 					P2PAddress:     existing.P2PAddress,
 					Status:         "active",
 					Clearance:      int(existing.Clearance),
+					OrgID:          existing.OrgID,
+					DeptID:         existing.DeptID,
+					DomainAccess:   existing.DomainAccess,
+					VisibleAgents:  existing.VisibleAgents,
 					OnChainHeight:  existing.RegisteredAt,
 					CreatedAt:      blockTime,
 				},

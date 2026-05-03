@@ -242,8 +242,8 @@ func (s *Server) handleAgentSetPermission(w http.ResponseWriter, r *http.Request
 		Clearance     *int    `json:"clearance"`
 		DomainAccess  *string `json:"domain_access"`
 		VisibleAgents *string `json:"visible_agents"`
-		OrgID         string  `json:"org_id"`
-		DeptID        string  `json:"dept_id"`
+		OrgID         *string `json:"org_id"`
+		DeptID        *string `json:"dept_id"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
@@ -268,17 +268,55 @@ func (s *Server) handleAgentSetPermission(w http.ResponseWriter, r *http.Request
 		}
 	}
 
+	// PATCH semantics (v6.8.4): when the caller omits a field (JSON null /
+	// missing) we preserve the on-chain value rather than resetting it to a
+	// default. The wire format stays full-replace — Clearance/DomainAccess/
+	// VisibleAgents are non-pointer fields in tx.AgentSetPermission and ABCI
+	// always overwrites them in BadgerDB — so we have to backfill HERE before
+	// signing, otherwise a bridge calling
+	// `set_agent_permission(visible_agents='*')` without specifying clearance
+	// would silently demote the agent to clearance=1, which then propagates
+	// through the network_agents SQL mirror via the agent_register flush. Bug
+	// 2 in the v6.8.4 hotfix bundle (see also processAgentRegister idempotent
+	// path in internal/abci/app.go).
+	var existing *store.OnChainAgent
+	needBackfill := req.Clearance == nil || req.DomainAccess == nil || req.VisibleAgents == nil ||
+		req.OrgID == nil || req.DeptID == nil
+	if needBackfill && s.badgerStore != nil {
+		if e, err := s.badgerStore.GetRegisteredAgent(targetID); err == nil {
+			existing = e
+		}
+	}
+
 	clearance := uint8(1)
 	if req.Clearance != nil {
 		clearance = uint8(*req.Clearance) // #nosec G115 -- validated small int 0-4
+	} else if existing != nil {
+		clearance = existing.Clearance
 	}
 	domainAccess := ""
 	if req.DomainAccess != nil {
 		domainAccess = *req.DomainAccess
+	} else if existing != nil {
+		domainAccess = existing.DomainAccess
 	}
 	visibleAgents := ""
 	if req.VisibleAgents != nil {
 		visibleAgents = *req.VisibleAgents
+	} else if existing != nil {
+		visibleAgents = existing.VisibleAgents
+	}
+	orgID := ""
+	if req.OrgID != nil {
+		orgID = *req.OrgID
+	} else if existing != nil {
+		orgID = existing.OrgID
+	}
+	deptID := ""
+	if req.DeptID != nil {
+		deptID = *req.DeptID
+	} else if existing != nil {
+		deptID = existing.DeptID
 	}
 
 	permTx := &tx.ParsedTx{
@@ -290,8 +328,8 @@ func (s *Server) handleAgentSetPermission(w http.ResponseWriter, r *http.Request
 			Clearance:     clearance,
 			DomainAccess:  domainAccess,
 			VisibleAgents: visibleAgents,
-			OrgID:         req.OrgID,
-			DeptID:        req.DeptID,
+			OrgID:         orgID,
+			DeptID:        deptID,
 		},
 	}
 

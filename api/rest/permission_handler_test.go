@@ -39,6 +39,7 @@ import (
 
 	"github.com/l33tdawg/sage/internal/auth"
 	"github.com/l33tdawg/sage/internal/store"
+	"github.com/l33tdawg/sage/internal/tx"
 )
 
 // permTestCometMock returns an httptest server impersonating CometBFT's
@@ -233,6 +234,84 @@ func TestSetPermission_GlobalAdmin_Succeeds(t *testing.T) {
 	srv.Router().ServeHTTP(rr, req)
 
 	assert.Equal(t, http.StatusOK, rr.Code, "global-admin must keep working; body: %s", rr.Body.String())
+}
+
+// TestSetPermission_PartialUpdate_PreservesClearance is the v6.8.4 regression
+// for Bug 2 in the network_agents-mirror-blanking bundle. Before the fix,
+// calling PUT /v1/agent/{id}/permission with only `visible_agents` in the
+// body silently demoted clearance to 1 (the Go zero-value default in the
+// handler), which then propagated through ABCI -> BadgerDB -> SQL mirror and
+// explained why levelup pipeline agents ended up with
+// network_agents.clearance=1 even after admins had granted them clearance=4.
+//
+// PATCH semantics: missing fields must preserve the on-chain value, not
+// reset it to a default. The wire format (tx.AgentSetPermission) is still
+// full-replace, so the REST handler backfills missing fields from the
+// existing BadgerDB record before signing the tx.
+func TestSetPermission_PartialUpdate_PreservesClearance(t *testing.T) {
+	var capturedTxHex string
+	cometMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedTxHex = r.URL.Query().Get("tx")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"result": map[string]interface{}{
+				"check_tx":  map[string]interface{}{"code": 0},
+				"tx_result": map[string]interface{}{"code": 0},
+				"hash":      "PERMTX_PATCH",
+				"height":    "1",
+			},
+		})
+	}))
+	defer cometMock.Close()
+
+	srv, _, _ := newTestServer(t, cometMock.URL)
+	bs, err := store.NewBadgerStore(t.TempDir())
+	require.NoError(t, err)
+	defer bs.CloseBadger()
+	srv.badgerStore = bs
+
+	pub, priv, err := auth.GenerateKeypair()
+	require.NoError(t, err)
+	agentID := auth.PublicKeyToAgentID(pub)
+
+	// Pre-seed: the agent already has clearance=4, a domain access list,
+	// and an existing org. The bridge's partial PATCH must not stomp any
+	// of these.
+	require.NoError(t, bs.RegisterAgent(agentID, "self-agent", "member", "", "", "", 1))
+	require.NoError(t, bs.SetAgentPermission(agentID, 4, `["crypto","ot_ics"]`, "", "org-A", "dept-B"))
+
+	// Body mirrors what the LevelUp bridge actually sends at startup —
+	// only visible_agents, nothing else.
+	body := []byte(`{"visible_agents":"*"}`)
+	req := signedRequestAs(t, priv, agentID, http.MethodPut, "/v1/agent/"+agentID+"/permission", body)
+
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "partial PUT must succeed; body: %s", rr.Body.String())
+
+	require.NotEmpty(t, capturedTxHex, "broadcast should have been invoked")
+	parsed, err := tx.DecodeTx(decodeHexTxParam(t, capturedTxHex))
+	require.NoError(t, err)
+	require.NotNil(t, parsed.AgentSetPermission)
+
+	assert.Equal(t, "*", parsed.AgentSetPermission.VisibleAgents, "the field caller actually set must be carried verbatim")
+	assert.Equal(t, uint8(4), parsed.AgentSetPermission.Clearance, "Bug 2: missing clearance in partial PATCH must NOT demote to default 1")
+	assert.Equal(t, `["crypto","ot_ics"]`, parsed.AgentSetPermission.DomainAccess, "Bug 2: missing domain_access must NOT reset to empty string")
+	assert.Equal(t, "org-A", parsed.AgentSetPermission.OrgID, "Bug 2: missing org_id must preserve existing org membership")
+	assert.Equal(t, "dept-B", parsed.AgentSetPermission.DeptID, "Bug 2: missing dept_id must preserve existing dept membership")
+}
+
+// decodeHexTxParam strips the leading "0x" CometBFT adds to broadcast tx
+// query params and decodes the rest.
+func decodeHexTxParam(t *testing.T, txHex string) []byte {
+	t.Helper()
+	if len(txHex) < 2 || txHex[:2] != "0x" {
+		t.Fatalf("expected 0x-prefixed tx hex, got %q", txHex)
+	}
+	out, err := hex.DecodeString(txHex[2:])
+	require.NoError(t, err)
+	return out
 }
 
 // TestSetPermission_FinalizeBlockReject_Surfaces403 — defense-in-depth.

@@ -613,6 +613,71 @@ func TestProcessAgentSetPermission_WildcardVisibleAgents_PersistsThroughStack(t 
 	assert.Equal(t, "*", permWrite.VisibleAgents, "pending SQLite write must carry the wildcard")
 }
 
+// TestProcessAgentRegister_IdempotentReregister_PreservesPermissions is the
+// v6.8.4 regression for the network_agents-mirror-blanking bug found by the
+// LevelUp pipeline (RB Saturday + DE Sunday + 6.8.3 verification). Sequence:
+//
+//  1. Agent registers — SQL mirror gets defaults (clearance=1, visible_agents="").
+//  2. An admin sets the agent's permissions (clearance=4, visible_agents="*",
+//     org_id=org-A) — pending agent_permission write flushes those values
+//     into the SQL mirror.
+//  3. The agent's bridge restarts and calls register_agent() again. Prior to
+//     v6.8.4, the idempotent path queued an agent_register pending write whose
+//     AgentEntry omitted OrgID/DeptID/DomainAccess/VisibleAgents. UpdateAgent
+//     wrote the whole row, blanking those columns in the SQL mirror.
+//
+// The test flushes both writes through the real SQLite store and asserts the
+// permission columns survive the re-register.
+func TestProcessAgentRegister_IdempotentReregister_PreservesPermissions(t *testing.T) {
+	app := setupTestApp(t)
+	admin := newAgentKey(t)
+	target := newAgentKey(t)
+
+	registerAgent(t, app, admin, "admin-agent", "admin")
+	registerAgent(t, app, target, "target-agent", "member")
+
+	// Step 1+2: set permissions — clearance=4, visible_agents="*", org_id="org-A".
+	permTx := makeAgentSetPermissionTx(t, admin, target.id, 4, `["crypto"]`, "*", "org-A", "dept-B")
+	res := app.processAgentSetPermission(permTx, 3, time.Now())
+	require.Equal(t, uint32(0), res.Code, "set permission should succeed: %s", res.Log)
+
+	// Flush everything queued so far so the SQL mirror reflects the permissions.
+	ctx := context.Background()
+	require.NoError(t, app.offchainStore.RunInTx(ctx, func(s store.OffchainStore) error {
+		return app.flushPendingWrites(ctx, s, app.pendingWrites)
+	}))
+	app.pendingWrites = nil
+
+	// Sanity: SQL mirror now carries the permission columns.
+	mid, err := app.offchainStore.GetAgent(ctx, target.id)
+	require.NoError(t, err)
+	require.Equal(t, 4, mid.Clearance, "pre-condition: SQL mirror should have clearance=4 after set_permission flush")
+	require.Equal(t, "*", mid.VisibleAgents, "pre-condition: SQL mirror should have visible_agents=*")
+	require.Equal(t, "org-A", mid.OrgID, "pre-condition: SQL mirror should have org_id=org-A")
+	require.Equal(t, "dept-B", mid.DeptID, "pre-condition: SQL mirror should have dept_id=dept-B")
+	require.Equal(t, `["crypto"]`, mid.DomainAccess, "pre-condition: SQL mirror should have domain_access set")
+
+	// Step 3: idempotent re-register — bridge restart pattern.
+	reReg := makeAgentRegisterTx(t, target, "target-agent", "member", "test bio", "test-provider", "/ip4/127.0.0.1/tcp/26656")
+	rr := app.processAgentRegister(reReg, 4, time.Now())
+	require.Equal(t, uint32(0), rr.Code, "idempotent re-register should succeed: %s", rr.Log)
+
+	// Flush the re-register write.
+	require.NoError(t, app.offchainStore.RunInTx(ctx, func(s store.OffchainStore) error {
+		return app.flushPendingWrites(ctx, s, app.pendingWrites)
+	}))
+	app.pendingWrites = nil
+
+	// Permission columns must survive the idempotent re-register.
+	post, err := app.offchainStore.GetAgent(ctx, target.id)
+	require.NoError(t, err)
+	assert.Equal(t, 4, post.Clearance, "Bug 1: idempotent re-register must NOT reset clearance")
+	assert.Equal(t, "*", post.VisibleAgents, "Bug 1: idempotent re-register must NOT blank visible_agents")
+	assert.Equal(t, "org-A", post.OrgID, "Bug 1: idempotent re-register must NOT blank org_id")
+	assert.Equal(t, "dept-B", post.DeptID, "Bug 1: idempotent re-register must NOT blank dept_id")
+	assert.Equal(t, `["crypto"]`, post.DomainAccess, "Bug 1: idempotent re-register must NOT blank domain_access")
+}
+
 // ---------------------------------------------------------------------------
 // Memory submit domain-ownership regression tests (v6.5.5)
 // ---------------------------------------------------------------------------
