@@ -1890,6 +1890,107 @@ func (app *SageApp) processAgentUpdate(parsedTx *tx.ParsedTx, height int64, bloc
 	return &abcitypes.ExecTxResult{Code: 0, Data: []byte(targetID), Log: fmt.Sprintf("agent %s updated", targetID[:16])}
 }
 
+// bootstrapAdminFromSQL handles the v6.8.5 admin-bootstrap escape hatch.
+//
+// Some deployment paths write `network_agents.role='admin'` to SQL out of
+// band and rely on a fire-and-forget chain register tx to materialize the
+// matching on-chain record (cmd/sage-gui/node.go:1145 startup seeding,
+// web/network_handler.go:163 GUI Create Agent form). When the broadcast
+// silently drops — CometBFT not yet ready, network blip, retry budget
+// exhausted — SQL has the admin row but BadgerDB doesn't, and every
+// subsequent admin-only op fails with "sender agent X not registered".
+// Levelup's prod chain hit exactly this state (visibility kept working
+// only via permissions baked in before the divergence).
+//
+// This helper detects the SQL-but-not-chain split and self-heals it.
+// On match (SQL row exists with role="admin") we register the sender
+// on-chain at the current height with the SQL-derived role, mirror the
+// SQL clearance/orgs onto BadgerDB, and buffer an agent_register
+// pendingWrite so on_chain_height is reconciled in the SQL mirror.
+//
+// Security invariants (audited 2026-05-03 — security@ for the picky):
+//   - Trigger requires `sqlAgent.Role == "admin"` (strict equality). No
+//     role-string fuzzing, no escalation from member/observer.
+//   - Only fires when BadgerDB has NO record at all for the sender.
+//     If BadgerDB knows the agent (any role), this is a no-op — no
+//     downgrade-then-upgrade attack.
+//   - SQL `role='admin'` is the existing trust source: only operator-
+//     authenticated paths can set it (sage-gui startup with local
+//     validator key, GUI Create Agent under authMiddleware, direct
+//     filesystem write). This fix introduces no new write path.
+//   - Net hardening: pre-fix, anyone could grab admin on a fresh chain
+//     by being first to call /v1/agent/register with role="admin".
+//     Post-fix, an unregistered set_agent_permission caller still has
+//     to back their claim with a pre-existing operator-blessed SQL row.
+//   - The downstream auth gates in processAgentSetPermission (clearance
+//     ceiling, org-scope check, target-org consent) still run after the
+//     bootstrap. Auto-register only fixes the "is sender on chain at
+//     all" question, not "what is the sender allowed to do".
+//
+// Returns the freshly registered OnChainAgent (suitable for the caller's
+// downstream auth check) and true on success, or (nil, false) if SQL has
+// no admin record for senderID.
+func (app *SageApp) bootstrapAdminFromSQL(senderID string, height int64, blockTime time.Time) (*store.OnChainAgent, bool) {
+	if app.offchainStore == nil {
+		return nil, false
+	}
+	sqlAgent, err := app.offchainStore.GetAgent(context.Background(), senderID)
+	if err != nil || sqlAgent == nil || sqlAgent.Role != "admin" {
+		return nil, false
+	}
+
+	// Register on-chain with the SQL-derived role. Use the SQL display
+	// name as both Name and (via RegisterAgent) RegisteredName.
+	if regErr := app.badgerStore.RegisterAgent(senderID, sqlAgent.Name, "admin", sqlAgent.BootBio, sqlAgent.Provider, sqlAgent.P2PAddress, height); regErr != nil {
+		app.logger.Warn().Err(regErr).Str("agent_id", senderID[:16]).Msg("admin bootstrap: badger RegisterAgent failed")
+		return nil, false
+	}
+
+	// Mirror SQL's clearance + org assignments onto the on-chain record so
+	// downstream auth checks (clearance ceiling, org-scope) match SQL.
+	// Skip when SQL has nothing to mirror — RegisterAgent already seeded
+	// clearance=1 (INTERNAL default).
+	if sqlAgent.Clearance > 0 || sqlAgent.OrgID != "" || sqlAgent.DeptID != "" || sqlAgent.DomainAccess != "" || sqlAgent.VisibleAgents != "" {
+		clearance := uint8(sqlAgent.Clearance) // #nosec G115 -- clearance is 0-4
+		if permErr := app.badgerStore.SetAgentPermission(senderID, clearance, sqlAgent.DomainAccess, sqlAgent.VisibleAgents, sqlAgent.OrgID, sqlAgent.DeptID); permErr != nil {
+			app.logger.Warn().Err(permErr).Str("agent_id", senderID[:16]).Msg("admin bootstrap: badger SetAgentPermission failed (continuing — chain register succeeded)")
+		}
+	}
+
+	// Buffer SQL flush so on_chain_height (and any drift on RegisteredName /
+	// permission columns) is reconciled. Mirrors the v6.8.4 idempotent
+	// re-register path's full-field copy so the SQL mirror doesn't get
+	// blanked.
+	app.pendingWrites = append(app.pendingWrites, pendingWrite{
+		writeType: "agent_register",
+		data: &store.AgentEntry{
+			AgentID:        senderID,
+			Name:           sqlAgent.Name,
+			RegisteredName: sqlAgent.RegisteredName,
+			Role:           "admin",
+			BootBio:        sqlAgent.BootBio,
+			Provider:       sqlAgent.Provider,
+			P2PAddress:     sqlAgent.P2PAddress,
+			Status:         "active",
+			Clearance:      sqlAgent.Clearance,
+			OrgID:          sqlAgent.OrgID,
+			DeptID:         sqlAgent.DeptID,
+			DomainAccess:   sqlAgent.DomainAccess,
+			VisibleAgents:  sqlAgent.VisibleAgents,
+			OnChainHeight:  height,
+			CreatedAt:      blockTime,
+		},
+	})
+
+	app.logger.Info().Str("agent_id", senderID[:16]).Str("name", sqlAgent.Name).Int64("height", height).Msg("admin bootstrap: auto-registered SQL-trusted admin on-chain (v6.8.5)")
+
+	onChain, getErr := app.badgerStore.GetRegisteredAgent(senderID)
+	if getErr != nil || onChain == nil {
+		return nil, false
+	}
+	return onChain, true
+}
+
 func (app *SageApp) processAgentSetPermission(parsedTx *tx.ParsedTx, height int64, blockTime time.Time) *abcitypes.ExecTxResult {
 	perm := parsedTx.AgentSetPermission
 	if perm == nil {
@@ -1902,10 +2003,17 @@ func (app *SageApp) processAgentSetPermission(parsedTx *tx.ParsedTx, height int6
 		return &abcitypes.ExecTxResult{Code: 66, Log: fmt.Sprintf("agent identity verification failed: %v", err)}
 	}
 
-	// Sender must be registered.
+	// Sender must be registered. v6.8.5: when BadgerDB has no record but
+	// SQL has them with role="admin", auto-register on chain (see
+	// bootstrapAdminFromSQL for the security invariants). Symmetric with
+	// v6.8.4's idempotent-re-register graceful-edge-case philosophy.
 	senderAgent, senderErr := app.badgerStore.GetRegisteredAgent(senderID)
 	if senderErr != nil {
-		return &abcitypes.ExecTxResult{Code: 67, Log: fmt.Sprintf("sender agent %s not registered", senderID[:16])}
+		if recovered, ok := app.bootstrapAdminFromSQL(senderID, height, blockTime); ok {
+			senderAgent = recovered
+		} else {
+			return &abcitypes.ExecTxResult{Code: 67, Log: fmt.Sprintf("sender agent %s not registered", senderID[:16])}
+		}
 	}
 
 	// Target agent must be registered (read first so we can compute auth against its org).
@@ -2027,9 +2135,14 @@ func (app *SageApp) processMemoryReassign(parsedTx *tx.ParsedTx, height int64, b
 		return &abcitypes.ExecTxResult{Code: 66, Log: fmt.Sprintf("agent identity verification failed: %v", err)}
 	}
 
+	// v6.8.5: same admin-bootstrap escape hatch as processAgentSetPermission.
 	senderAgent, senderErr := app.badgerStore.GetRegisteredAgent(senderID)
 	if senderErr != nil {
-		return &abcitypes.ExecTxResult{Code: 67, Log: fmt.Sprintf("sender agent %s not registered", senderID[:16])}
+		if recovered, ok := app.bootstrapAdminFromSQL(senderID, height, blockTime); ok {
+			senderAgent = recovered
+		} else {
+			return &abcitypes.ExecTxResult{Code: 67, Log: fmt.Sprintf("sender agent %s not registered", senderID[:16])}
+		}
 	}
 	if senderAgent.Role != "admin" {
 		return &abcitypes.ExecTxResult{Code: 67, Log: fmt.Sprintf("access denied: %s is not an admin", senderID[:16])}

@@ -302,6 +302,95 @@ func TestSetPermission_PartialUpdate_PreservesClearance(t *testing.T) {
 	assert.Equal(t, "dept-B", parsed.AgentSetPermission.DeptID, "Bug 2: missing dept_id must preserve existing dept membership")
 }
 
+// TestSetPermission_BootstrapAdminFromSQL_BypassesPreflight is the v6.8.5
+// regression for the dev-side 403. When BadgerDB doesn't have a record
+// for the caller but the SQL agent store says they're an admin (the
+// SQL-but-not-chain divergence found by LevelUp on prod), the REST
+// pre-flight must NOT 403 — it has to defer to ABCI which will
+// auto-register and process the tx (see ABCI's bootstrapAdminFromSQL
+// for the full security invariants).
+//
+// Without this fix, dev's REST 403s before ABCI ever sees the tx and the
+// chain stays broken even though ABCI has the recovery path wired up.
+func TestSetPermission_BootstrapAdminFromSQL_BypassesPreflight(t *testing.T) {
+	cometMock := permTestCometMock(t, 0, "agent permissions updated")
+	defer cometMock.Close()
+
+	srv, _, _ := newTestServer(t, cometMock.URL)
+	bs, err := store.NewBadgerStore(t.TempDir())
+	require.NoError(t, err)
+	defer bs.CloseBadger()
+	srv.badgerStore = bs
+
+	// Wire a SQL agent store that knows about the caller as 'admin' but
+	// the BadgerDB has NO record for them — exactly the dev-chain state.
+	agentSt := newMockAgentStore()
+	srv.agentStore = agentSt
+
+	adminPub, adminPriv, err := auth.GenerateKeypair()
+	require.NoError(t, err)
+	adminID := auth.PublicKeyToAgentID(adminPub)
+	agentSt.agents[adminID] = &store.AgentEntry{
+		AgentID: adminID,
+		Name:    "sql-admin",
+		Role:    "admin",
+		Status:  "active",
+	}
+
+	targetPub, _, err := auth.GenerateKeypair()
+	require.NoError(t, err)
+	targetID := auth.PublicKeyToAgentID(targetPub)
+	require.NoError(t, bs.RegisterAgent(targetID, "subject", "member", "", "", "", 2))
+
+	req := signedRequestAs(t, adminPriv, adminID, http.MethodPut, "/v1/agent/"+targetID+"/permission", setPermBody)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code, "SQL-trusted admin must bypass REST pre-flight 403; body: %s", rr.Body.String())
+}
+
+// TestSetPermission_SQLNonAdmin_StillReturns403 is the security boundary
+// for v6.8.5: the SQL fallback must ONLY admit role='admin'. Any other
+// SQL role (member, observer, blank) must keep returning 403 — the fix
+// is for SQL-trusted admins recovering chain state, not a generic
+// privilege-escalation primitive.
+func TestSetPermission_SQLNonAdmin_StillReturns403(t *testing.T) {
+	cometMock := permTestCometMock(t, 0, "should not be reached")
+	defer cometMock.Close()
+
+	srv, _, _ := newTestServer(t, cometMock.URL)
+	bs, err := store.NewBadgerStore(t.TempDir())
+	require.NoError(t, err)
+	defer bs.CloseBadger()
+	srv.badgerStore = bs
+
+	agentSt := newMockAgentStore()
+	srv.agentStore = agentSt
+
+	callerPub, callerPriv, err := auth.GenerateKeypair()
+	require.NoError(t, err)
+	callerID := auth.PublicKeyToAgentID(callerPub)
+	// SQL says this caller is a plain member — must NOT trigger the
+	// admin-bootstrap fallback.
+	agentSt.agents[callerID] = &store.AgentEntry{
+		AgentID: callerID,
+		Name:    "sql-member",
+		Role:    "member",
+		Status:  "active",
+	}
+
+	targetPub, _, err := auth.GenerateKeypair()
+	require.NoError(t, err)
+	targetID := auth.PublicKeyToAgentID(targetPub)
+	require.NoError(t, bs.RegisterAgent(targetID, "victim", "member", "", "", "", 2))
+
+	req := signedRequestAs(t, callerPriv, callerID, http.MethodPut, "/v1/agent/"+targetID+"/permission", setPermBody)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusForbidden, rr.Code, "SQL non-admin must still get 403; body: %s", rr.Body.String())
+}
+
 // decodeHexTxParam strips the leading "0x" CometBFT adds to broadcast tx
 // query params and decodes the rest.
 func decodeHexTxParam(t *testing.T, txHex string) []byte {

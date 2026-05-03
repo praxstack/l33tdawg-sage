@@ -1,6 +1,7 @@
 package rest
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"time"
@@ -262,7 +263,7 @@ func (s *Server) handleAgentSetPermission(w http.ResponseWriter, r *http.Request
 			writeProblem(w, http.StatusUnauthorized, "Authentication required", "agent identity required to set permissions.")
 			return
 		}
-		if !s.callerCanSetPermission(callerID, targetID) {
+		if !s.callerCanSetPermission(r.Context(), callerID, targetID) {
 			writeProblem(w, http.StatusForbidden, "Access denied", "access denied")
 			return
 		}
@@ -368,7 +369,13 @@ func (s *Server) handleAgentSetPermission(w http.ResponseWriter, r *http.Request
 // callerCanSetPermission mirrors the consensus-side auth check in
 // processAgentSetPermission. Keep these two implementations in sync —
 // the ABCI handler is the trust boundary, this is the fail-fast UX layer.
-func (s *Server) callerCanSetPermission(callerID, targetID string) bool {
+//
+// v6.8.5: when BadgerDB has no record for the caller, fall through to
+// the SQL agent store. If SQL says role='admin', allow the request to
+// reach ABCI which will self-heal via bootstrapAdminFromSQL (see the
+// security invariants on that helper). Without this fallback the REST
+// pre-flight 403s before ABCI ever gets a chance to recover the chain.
+func (s *Server) callerCanSetPermission(ctx context.Context, callerID, targetID string) bool {
 	if callerID == "" {
 		return false
 	}
@@ -377,12 +384,21 @@ func (s *Server) callerCanSetPermission(callerID, targetID string) bool {
 		return true
 	}
 	// 2. Global admin (legacy deployment-admin identity).
-	if caller, err := s.badgerStore.GetRegisteredAgent(callerID); err == nil && caller != nil && caller.Role == "admin" {
+	caller, err := s.badgerStore.GetRegisteredAgent(callerID)
+	switch {
+	case err == nil && caller != nil && caller.Role == "admin":
 		return true
+	case err != nil && s.agentStore != nil:
+		// BadgerDB miss — check SQL. SQL `role='admin'` is the same trust
+		// source the GUI Create Agent flow already relies on; matching it
+		// here just lets the ABCI bootstrap fix complete end-to-end.
+		if sqlAgent, sqlErr := s.agentStore.GetAgent(ctx, callerID); sqlErr == nil && sqlAgent != nil && sqlAgent.Role == "admin" {
+			return true
+		}
 	}
 	// 3. Org admin in any org the target belongs to.
-	orgs, err := s.badgerStore.ListAgentOrgs(targetID)
-	if err != nil {
+	orgs, listErr := s.badgerStore.ListAgentOrgs(targetID)
+	if listErr != nil {
 		return false
 	}
 	for _, orgID := range orgs {

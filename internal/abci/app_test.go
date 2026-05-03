@@ -678,6 +678,148 @@ func TestProcessAgentRegister_IdempotentReregister_PreservesPermissions(t *testi
 	assert.Equal(t, `["crypto"]`, post.DomainAccess, "Bug 1: idempotent re-register must NOT blank domain_access")
 }
 
+// seedSQLAgent seeds an agent row directly in the SQL mirror, bypassing the
+// chain register path. Mirrors the deployment paths that legitimately write
+// network_agents out of band (sage-gui startup seeding, GUI Create Agent).
+func seedSQLAgent(t *testing.T, app *SageApp, agentID, name, role string, clearance int) {
+	t.Helper()
+	now := time.Now()
+	require.NoError(t, app.offchainStore.CreateAgent(context.Background(), &store.AgentEntry{
+		AgentID:        agentID,
+		Name:           name,
+		RegisteredName: name,
+		Role:           role,
+		Status:         "active",
+		Clearance:      clearance,
+		CreatedAt:      now,
+		FirstSeen:      &now,
+	}))
+}
+
+// TestProcessAgentSetPermission_BootstrapAdminFromSQL is the v6.8.5 regression
+// for the "SQL has admin / chain doesn't" divergence found by LevelUp on prod.
+//
+// Sequence:
+//   1. SQL mirror has admin agent (operator-blessed via GUI / startup seed).
+//   2. The fire-and-forget chain register tx silently dropped — BadgerDB has
+//      no record for that pubkey.
+//   3. Admin's bridge calls set_agent_permission against a chain-registered
+//      target. Pre-fix: code 67 "sender agent X not registered". Post-fix:
+//      ABCI auto-registers from SQL and proceeds.
+func TestProcessAgentSetPermission_BootstrapAdminFromSQL(t *testing.T) {
+	app := setupTestApp(t)
+	target := newAgentKey(t)
+	registerAgent(t, app, target, "target-agent", "member")
+
+	// Admin agent is in SQL only — no chain record yet (the broken-broadcast scenario).
+	admin := newAgentKey(t)
+	seedSQLAgent(t, app, admin.id, "admin-agent", "admin", 4)
+	require.False(t, app.badgerStore.IsAgentRegistered(admin.id), "pre-condition: admin must NOT be on chain yet")
+
+	// Admin calls set_agent_permission against the registered target.
+	permTx := makeAgentSetPermissionTx(t, admin, target.id, 2, `["crypto"]`, "*", "", "")
+	res := app.processAgentSetPermission(permTx, 5, time.Now())
+	require.Equal(t, uint32(0), res.Code, "post-fix: bootstrap-from-SQL should let the call succeed: %s", res.Log)
+
+	// Admin must now be registered on chain with role=admin and SQL-derived clearance.
+	require.True(t, app.badgerStore.IsAgentRegistered(admin.id), "admin should be auto-registered on chain")
+	onChain, err := app.badgerStore.GetRegisteredAgent(admin.id)
+	require.NoError(t, err)
+	assert.Equal(t, "admin", onChain.Role, "admin role mirrored from SQL")
+	assert.Equal(t, uint8(4), onChain.Clearance, "clearance mirrored from SQL")
+
+	// Target permissions also got updated by the original tx.
+	post, err := app.badgerStore.GetRegisteredAgent(target.id)
+	require.NoError(t, err)
+	assert.Equal(t, uint8(2), post.Clearance, "target clearance set by admin")
+	assert.Equal(t, "*", post.VisibleAgents, "target visibility set by admin")
+
+	// SQL should also have an agent_register pending write for the bootstrapped admin.
+	var bootstrapWrite *store.AgentEntry
+	for _, pw := range app.pendingWrites {
+		if pw.writeType == "agent_register" {
+			if e, ok := pw.data.(*store.AgentEntry); ok && e.AgentID == admin.id {
+				bootstrapWrite = e
+				break
+			}
+		}
+	}
+	require.NotNil(t, bootstrapWrite, "expected agent_register pending write for bootstrapped admin")
+	assert.Equal(t, "admin", bootstrapWrite.Role)
+	assert.Equal(t, int64(5), bootstrapWrite.OnChainHeight, "bootstrap write should carry current block height")
+}
+
+// TestProcessAgentSetPermission_NoBootstrap_NonAdminSQL is the security
+// boundary test for v6.8.5: a SQL agent with role!="admin" must NOT be
+// auto-registered as admin via set_agent_permission. The fix is strictly
+// for SQL-trusted admins recovering chain state, not a general-purpose
+// privilege-escalation primitive.
+func TestProcessAgentSetPermission_NoBootstrap_NonAdminSQL(t *testing.T) {
+	app := setupTestApp(t)
+	target := newAgentKey(t)
+	registerAgent(t, app, target, "target-agent", "member")
+
+	// Caller has SQL row but role="member" — must NOT trigger bootstrap.
+	caller := newAgentKey(t)
+	seedSQLAgent(t, app, caller.id, "member-agent", "member", 1)
+
+	permTx := makeAgentSetPermissionTx(t, caller, target.id, 2, "", "*", "", "")
+	res := app.processAgentSetPermission(permTx, 5, time.Now())
+
+	require.Equal(t, uint32(67), res.Code, "non-admin SQL row must NOT bootstrap: %s", res.Log)
+	require.False(t, app.badgerStore.IsAgentRegistered(caller.id), "non-admin caller must remain unregistered on chain")
+}
+
+// TestProcessAgentSetPermission_NoBootstrap_NoSQLRow asserts the original
+// "sender not registered" rejection path still fires when the sender has
+// no SQL record at all (the common attacker case — fresh keypair, no
+// operator-blessed row anywhere). v6.8.5 should not weaken this.
+func TestProcessAgentSetPermission_NoBootstrap_NoSQLRow(t *testing.T) {
+	app := setupTestApp(t)
+	target := newAgentKey(t)
+	registerAgent(t, app, target, "target-agent", "member")
+
+	stranger := newAgentKey(t) // No SQL row, no chain row.
+
+	permTx := makeAgentSetPermissionTx(t, stranger, target.id, 4, "", "*", "", "")
+	res := app.processAgentSetPermission(permTx, 5, time.Now())
+
+	require.Equal(t, uint32(67), res.Code, "stranger with no SQL row must be rejected")
+	require.False(t, app.badgerStore.IsAgentRegistered(stranger.id), "stranger must remain unregistered")
+}
+
+// TestProcessMemoryReassign_BootstrapAdminFromSQL verifies the same
+// admin-bootstrap escape hatch fires for processMemoryReassign too —
+// the fix should cover every admin-only ABCI path that was vulnerable
+// to the silent-broadcast-drop divergence.
+func TestProcessMemoryReassign_BootstrapAdminFromSQL(t *testing.T) {
+	app := setupTestApp(t)
+	source := newAgentKey(t)
+	dest := newAgentKey(t)
+	registerAgent(t, app, source, "source-agent", "member")
+	registerAgent(t, app, dest, "dest-agent", "member")
+
+	admin := newAgentKey(t)
+	seedSQLAgent(t, app, admin.id, "admin-agent", "admin", 4)
+
+	body := []byte(source.id + dest.id)
+	pubKey, sig, bodyHash, ts := signAgentProof(t, admin, body)
+	reassignTx := &tx.ParsedTx{
+		Type: tx.TxTypeMemoryReassign,
+		MemoryReassign: &tx.MemoryReassign{
+			SourceAgentID: source.id,
+			TargetAgentID: dest.id,
+		},
+		AgentPubKey:    pubKey,
+		AgentSig:       sig,
+		AgentBodyHash:  bodyHash,
+		AgentTimestamp: ts,
+	}
+	res := app.processMemoryReassign(reassignTx, 5, time.Now())
+	require.Equal(t, uint32(0), res.Code, "reassign should succeed after admin bootstrap: %s", res.Log)
+	require.True(t, app.badgerStore.IsAgentRegistered(admin.id), "admin should be auto-registered")
+}
+
 // ---------------------------------------------------------------------------
 // Memory submit domain-ownership regression tests (v6.5.5)
 // ---------------------------------------------------------------------------
