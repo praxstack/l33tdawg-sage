@@ -128,6 +128,12 @@ func (c *Client) Semantic() bool {
 	return true
 }
 
+// Name implements embedding.Named so /v1/embed/info reports "ollama" via the
+// explicit method instead of the inferred fallback in the REST handler.
+func (c *Client) Name() string {
+	return "ollama"
+}
+
 // Ping checks if Ollama is reachable.
 func (c *Client) Ping(ctx context.Context) error {
 	httpReq, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/api/tags", nil)

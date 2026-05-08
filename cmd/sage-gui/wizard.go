@@ -694,10 +694,35 @@ label { display: block; margin-top: 1rem; color: #9ca3af; font-size: 0.9rem; }
 
   <!-- Fallback option (always visible at bottom) -->
   <div id="ollama-fallback" style="display:none; margin-top:1.5rem; padding-top:1rem; border-top:1px solid #1f2937">
-    <button class="btn-ghost" onclick="toggleFallback()" id="fallback-toggle">Having trouble? Use basic search instead</button>
+    <button class="btn-ghost" onclick="toggleFallback()" id="fallback-toggle">Having trouble? Use a different provider</button>
     <div id="fallback-info" style="display:none; margin-top:0.75rem; padding:1rem; background:#111827; border-radius:8px; border:1px solid #1f2937">
-      <p style="color:#9ca3af; font-size:0.9rem; margin-bottom:0.75rem">Basic search works without Ollama. It matches by keywords instead of meaning. You can always switch to smart search later by installing Ollama.</p>
-      <button class="btn btn-outline btn-sm" onclick="useHashFallback()">Use basic search for now</button>
+      <p style="color:#9ca3af; font-size:0.9rem; margin-bottom:0.75rem">Two alternatives if Ollama isn't a fit:</p>
+
+      <div style="margin-bottom:1rem; padding:0.75rem; background:#0a0e17; border-radius:6px; border:1px solid #1f2937">
+        <strong style="color:#e5e7eb; font-size:0.9rem">Basic search</strong>
+        <p style="color:#9ca3af; font-size:0.85rem; margin:0.25rem 0 0.5rem">Keyword matching, no AI model. Works anywhere.</p>
+        <button class="btn btn-outline btn-sm" onclick="useHashFallback()">Use basic search</button>
+      </div>
+
+      <div style="padding:0.75rem; background:#0a0e17; border-radius:6px; border:1px solid #1f2937">
+        <strong style="color:#e5e7eb; font-size:0.9rem">OpenAI-compatible endpoint</strong>
+        <p style="color:#9ca3af; font-size:0.85rem; margin:0.25rem 0 0.5rem">Point SAGE at OpenAI, vLLM, LiteLLM, TEI, llama.cpp server, or any backend that speaks <code style="background:#1f2937; padding:0.1rem 0.3rem; border-radius:3px; color:#06b6d4">POST /v1/embeddings</code>. Useful for non-English content with multilingual embedders.</p>
+        <button class="btn btn-outline btn-sm" onclick="toggleOAIForm()" id="oai-form-toggle">Configure</button>
+        <div id="oai-form" style="display:none; margin-top:0.75rem">
+          <label style="font-size:0.85rem">Base URL</label>
+          <input type="text" id="oai-base-url" placeholder="https://api.openai.com" style="font-size:0.9rem; padding:0.5rem 0.75rem">
+          <label style="font-size:0.85rem">Model</label>
+          <input type="text" id="oai-model" placeholder="text-embedding-3-small" style="font-size:0.9rem; padding:0.5rem 0.75rem">
+          <label style="font-size:0.85rem">API key (optional for self-hosted)</label>
+          <input type="password" id="oai-api-key" placeholder="sk-..." style="font-size:0.9rem; padding:0.5rem 0.75rem">
+          <label style="font-size:0.85rem">Dimension</label>
+          <input type="text" id="oai-dimension" placeholder="1536" value="1536" style="font-size:0.9rem; padding:0.5rem 0.75rem">
+          <div style="display:flex; gap:0.5rem; margin-top:0.75rem; align-items:center">
+            <button class="btn btn-sm" onclick="testOAI()" id="oai-test-btn">Test connection</button>
+            <span id="oai-status" class="status"></span>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -1046,6 +1071,64 @@ function toggleFallback() {
   info.style.display = info.style.display === 'none' ? 'block' : 'none';
 }
 
+function toggleOAIForm() {
+  const form = document.getElementById('oai-form');
+  form.style.display = form.style.display === 'none' ? 'block' : 'none';
+}
+
+let oaiConfig = null;
+
+async function testOAI() {
+  const baseURL = document.getElementById('oai-base-url').value.trim();
+  const model = document.getElementById('oai-model').value.trim();
+  const apiKey = document.getElementById('oai-api-key').value;
+  const dim = parseInt(document.getElementById('oai-dimension').value, 10) || 1536;
+  const status = document.getElementById('oai-status');
+  const btn = document.getElementById('oai-test-btn');
+
+  if (!baseURL || !model) {
+    status.textContent = 'Base URL and model are required.';
+    status.className = 'status err';
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Testing...';
+  status.textContent = '';
+  status.className = 'status';
+
+  try {
+    const resp = await fetch('/api/test-provider', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        provider: 'openai-compatible',
+        base_url: baseURL,
+        model: model,
+        api_key: apiKey,
+        dimension: dim,
+      })
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      status.textContent = 'Connected (dimension ' + (data.dimension || dim) + ')';
+      status.className = 'status ok';
+      oaiConfig = { baseURL, model, apiKey, dim };
+      selectedProvider = 'openai-compatible';
+      document.getElementById('provider-next-btn').disabled = false;
+    } else {
+      status.textContent = data.error || 'Connection failed.';
+      status.className = 'status err';
+    }
+  } catch (e) {
+    status.textContent = 'Request failed: ' + e.message;
+    status.className = 'status err';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Test connection';
+  }
+}
+
 function useHashFallback() {
   selectedProvider = 'hash';
   document.getElementById('provider-next-btn').disabled = false;
@@ -1071,6 +1154,11 @@ async function saveAndContinue() {
   if (selectedProvider === 'ollama') {
     body.base_url = document.getElementById('ollama-url').value;
     body.model = 'nomic-embed-text';
+  } else if (selectedProvider === 'openai-compatible' && oaiConfig) {
+    body.base_url = oaiConfig.baseURL;
+    body.model = oaiConfig.model;
+    body.api_key = oaiConfig.apiKey;
+    body.dimension = oaiConfig.dim;
   }
 
   await fetch('/api/save-config', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
@@ -1173,6 +1261,12 @@ function finishSetup() {
     model: selectedProvider === 'ollama' ? 'nomic-embed-text' : '',
     encryption: encryptionEnabled,
   };
+  if (selectedProvider === 'openai-compatible' && oaiConfig) {
+    body.base_url = oaiConfig.baseURL;
+    body.model = oaiConfig.model;
+    body.api_key = oaiConfig.apiKey;
+    body.dimension = oaiConfig.dim;
+  }
 
   // Validate passphrase if encryption enabled
   if (encryptionEnabled) {
