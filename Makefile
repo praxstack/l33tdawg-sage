@@ -73,6 +73,12 @@ benchmark: ## Run authenticated load test (Python, Ed25519 signed)
 benchmark-k6: ## Run k6 load test (requires pre-configured auth bypass or k6 Ed25519 extension)
 	k6 run test/benchmark/load.js
 
+bench-longmemeval-smoke: ## Smoke-test the LongMemEval-S harness against a running SAGE node (5 questions)
+	pip install -q -r bench/longmemeval/requirements.txt && python bench/longmemeval/run.py --limit 5
+
+bench-longmemeval: ## Run full LongMemEval-S benchmark — slow (hours); writes bench/results/longmemeval-<sha>.json
+	pip install -q -r bench/longmemeval/requirements.txt && python bench/longmemeval/run.py
+
 sdk-test: ## Run Python SDK tests
 	cd sdk/python && pip install -e ".[dev]" && pytest -v
 
