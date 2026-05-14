@@ -915,6 +915,190 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// HybridSearchMemoryRequest is the JSON body for POST /v1/memory/hybrid —
+// the unified path that fuses FTS5/BM25 and vector cosine results via
+// weighted Reciprocal Rank Fusion. Callers send both the text query and the
+// precomputed embedding so the server can run both indexes in one round trip.
+type HybridSearchMemoryRequest struct {
+	Query         string    `json:"query"`
+	Embedding     []float32 `json:"embedding"`
+	DomainTag     string    `json:"domain_tag,omitempty"`
+	Provider      string    `json:"provider,omitempty"`
+	MinConfidence float64   `json:"min_confidence,omitempty"`
+	StatusFilter  string    `json:"status_filter,omitempty"`
+	TopK          int       `json:"top_k,omitempty"`
+	Tags          []string  `json:"tags,omitempty"`
+}
+
+// handleHybridSearchMemory handles POST /v1/memory/hybrid.
+// Runs SearchByText and QuerySimilar in parallel and fuses them via RRF.
+// Access control mirrors handleQueryMemory exactly — the only differences are
+// the underlying store call and that the request carries both a query string
+// and an embedding.
+func (s *Server) handleHybridSearchMemory(w http.ResponseWriter, r *http.Request) {
+	var req HybridSearchMemoryRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
+		return
+	}
+	if req.Query == "" && len(req.Embedding) == 0 {
+		writeProblem(w, http.StatusBadRequest, "Missing inputs",
+			"hybrid search requires at least one of `query` or `embedding`")
+		return
+	}
+
+	domainAccessApproved := false
+	if req.DomainTag != "" {
+		agentID := middleware.ContextAgentID(r.Context())
+		if accessErr := checkDomainAccess(r.Context(), s.agentStore, s.badgerStore, agentID, req.DomainTag, "read"); accessErr != nil {
+			writeProblem(w, http.StatusForbidden, "Access denied", accessErr.Error())
+			return
+		}
+		domainAccessApproved = true
+	}
+
+	if req.DomainTag != "" && !domainAccessApproved && s.badgerStore != nil {
+		domainOwner, domainErr := s.badgerStore.GetDomainOwner(req.DomainTag)
+		if domainErr == nil && domainOwner != "" {
+			agentID := middleware.ContextAgentID(r.Context())
+			hasAccess, accessErr := s.badgerStore.HasAccessMultiOrg(req.DomainTag, agentID, 0, time.Now())
+			if accessErr != nil || !hasAccess {
+				writeProblem(w, http.StatusForbidden, "Access denied",
+					fmt.Sprintf("No read access to domain %s", req.DomainTag))
+				return
+			}
+		}
+	}
+
+	queryAgentID := middleware.ContextAgentID(r.Context())
+	allowedAgents, seeAll := s.resolveVisibleAgents(queryAgentID)
+
+	if !seeAll && domainAccessApproved {
+		seeAll = true
+	}
+
+	if !seeAll && req.DomainTag != "" && s.badgerStore != nil {
+		hasGrant, _ := s.badgerStore.HasAccess(req.DomainTag, queryAgentID, 1, time.Now())
+		if hasGrant {
+			seeAll = true
+		} else {
+			hasOrgAccess, _ := s.badgerStore.HasAccessMultiOrg(req.DomainTag, queryAgentID, 0, time.Now())
+			if hasOrgAccess {
+				seeAll = true
+			} else {
+				_, ownerErr := s.badgerStore.GetDomainOwner(req.DomainTag)
+				if ownerErr != nil {
+					seeAll = true
+				}
+			}
+		}
+	}
+
+	start := time.Now()
+
+	opts := store.QueryOptions{
+		DomainTag:     req.DomainTag,
+		Provider:      req.Provider,
+		MinConfidence: req.MinConfidence,
+		StatusFilter:  req.StatusFilter,
+		TopK:          req.TopK,
+		Tags:          req.Tags,
+	}
+	filterApplied := !seeAll
+	if filterApplied {
+		opts.SubmittingAgents = allowedAgents
+	}
+
+	records, err := s.store.SearchHybrid(r.Context(), req.Query, req.Embedding, opts)
+	if err != nil {
+		s.logger.Error().Err(err).Msg("failed to hybrid-search memories")
+		writeProblem(w, http.StatusInternalServerError, "Hybrid search error", err.Error())
+		return
+	}
+
+	metrics.RecordQuery(req.DomainTag, time.Since(start))
+
+	now := time.Now()
+	results := make([]*MemoryResult, 0, len(records))
+	hiddenByClassification := 0
+	for _, rec := range records {
+		var memClass uint8
+		if s.badgerStore != nil {
+			memClass, _ = s.badgerStore.GetMemoryClassification(rec.MemoryID)
+			if memClass > 0 {
+				domainOwner, domErr := s.badgerStore.GetDomainOwner(rec.DomainTag)
+				if domErr == nil && domainOwner != "" {
+					hasAccess, _ := s.badgerStore.HasAccessMultiOrg(rec.DomainTag, queryAgentID, memClass, now)
+					if !hasAccess && rec.SubmittingAgent != queryAgentID {
+						s.logger.Info().
+							Str("memory_id", rec.MemoryID).
+							Str("domain", rec.DomainTag).
+							Str("submitter", rec.SubmittingAgent[:16]).
+							Str("querier", queryAgentID[:16]).
+							Str("domain_owner", domainOwner[:16]).
+							Uint8("classification", memClass).
+							Msg("classification gate hid memory (hybrid path)")
+						hiddenByClassification++
+						continue
+					}
+				}
+			}
+		}
+
+		corrs, _ := s.store.GetCorroborations(r.Context(), rec.MemoryID)
+		currentConf := memory.ComputeConfidence(rec.ConfidenceScore, rec.CreatedAt, now, len(corrs), rec.DomainTag)
+
+		results = append(results, &MemoryResult{
+			MemoryID:        rec.MemoryID,
+			SubmittingAgent: rec.SubmittingAgent,
+			Content:         rec.Content,
+			ContentHash:     hex.EncodeToString(rec.ContentHash),
+			MemoryType:      string(rec.MemoryType),
+			DomainTag:       rec.DomainTag,
+			ConfidenceScore: currentConf,
+			Classification:  int(memClass),
+			Status:          string(rec.Status),
+			ParentHash:      rec.ParentHash,
+			CreatedAt:       rec.CreatedAt,
+			CommittedAt:     rec.CommittedAt,
+		})
+	}
+
+	if queryAgentID != "" && s.agentStore != nil {
+		if updateErr := s.agentStore.UpdateAgentLastSeen(r.Context(), queryAgentID, time.Now()); updateErr != nil {
+			s.logger.Warn().Err(updateErr).Str("agent_id", queryAgentID).Msg("failed to update agent last_seen on hybrid search")
+		}
+	}
+
+	if s.OnEvent != nil && len(results) > 0 {
+		domain := req.DomainTag
+		if domain == "" {
+			domain = results[0].DomainTag
+		}
+		retrieved := make([]map[string]any, 0, len(results))
+		for _, r := range results {
+			retrieved = append(retrieved, map[string]any{
+				"memory_id":  r.MemoryID,
+				"content":    r.Content,
+				"domain":     r.DomainTag,
+				"confidence": r.ConfidenceScore,
+				"type":       r.MemoryType,
+			})
+		}
+		s.OnEvent("hybrid", "", domain, fmt.Sprintf("%d memories retrieved via hybrid search", len(results)), map[string]any{
+			"retrieved": retrieved,
+		})
+	}
+
+	resp := QueryMemoryResponse{
+		Results:    results,
+		TotalCount: len(results),
+	}
+	setFilterInfo(w, &resp, filterApplied, hiddenByClassification)
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
 // handleGetMemory handles GET /v1/memory/{memory_id}.
 func (s *Server) handleGetMemory(w http.ResponseWriter, r *http.Request) {
 	memoryID := chi.URLParam(r, "memory_id")

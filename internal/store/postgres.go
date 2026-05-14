@@ -228,6 +228,16 @@ func (s *PostgresStore) SearchByText(_ context.Context, _ string, _ QueryOptions
 	return nil, fmt.Errorf("text search not available on PostgresStore — use semantic search with Ollama")
 }
 
+// SearchHybrid on Postgres degrades to vector-only since there's no FTS index
+// in this backend. Kept for interface parity so callers don't branch on store
+// type — the merge layer just sees a one-stream input.
+func (s *PostgresStore) SearchHybrid(ctx context.Context, _ string, embedding []float32, opts QueryOptions) ([]*memory.MemoryRecord, error) {
+	if len(embedding) == 0 {
+		return nil, fmt.Errorf("hybrid search on Postgres requires an embedding")
+	}
+	return s.QuerySimilar(ctx, embedding, opts)
+}
+
 func (s *PostgresStore) InsertTriples(ctx context.Context, memoryID string, triples []memory.KnowledgeTriple) error {
 	batch := &pgx.Batch{}
 	for _, t := range triples {

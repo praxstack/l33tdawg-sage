@@ -1096,6 +1096,50 @@ func (s *SQLiteStore) SearchByText(ctx context.Context, query string, opts Query
 	return results, nil
 }
 
+// SearchHybrid runs FTS5/BM25 and vector cosine in parallel, then fuses the
+// two ranked lists via weighted Reciprocal Rank Fusion. When the vault is
+// active the FTS path is unavailable; we fall back to QuerySimilar alone so
+// recall still works. When the query is empty we degrade to vector-only.
+func (s *SQLiteStore) SearchHybrid(ctx context.Context, query string, embedding []float32, opts QueryOptions) ([]*memory.MemoryRecord, error) {
+	if len(embedding) == 0 && query == "" {
+		return nil, fmt.Errorf("hybrid search requires either a query or an embedding")
+	}
+
+	params := ResolveHybridParams()
+	requestedTopK := opts.TopK
+	if requestedTopK <= 0 {
+		requestedTopK = 10
+	}
+
+	// Each underlying index oversamples so the fusion has enough overlap to
+	// rank fairly when the two lists diverge near the tail.
+	subOpts := opts
+	subOpts.TopK = requestedTopK * params.OversampleMul
+	if subOpts.TopK > 100 {
+		subOpts.TopK = 100
+	}
+
+	var bm25Results, vectorResults []*memory.MemoryRecord
+	if query != "" && s.vault == nil {
+		r, err := s.SearchByText(ctx, query, subOpts)
+		if err == nil {
+			bm25Results = r
+		}
+		// BM25 failure is best-effort; vector results alone still produce a recall.
+	}
+
+	if len(embedding) > 0 {
+		r, err := s.QuerySimilar(ctx, embedding, subOpts)
+		if err != nil && len(bm25Results) == 0 {
+			return nil, err
+		}
+		vectorResults = r
+	}
+
+	merged := RRFMerge(bm25Results, vectorResults, requestedTopK, params)
+	return merged, nil
+}
+
 // ftsEscapeQuery wraps individual words in double quotes to escape FTS5 special characters.
 func ftsEscapeQuery(query string) string {
 	words := strings.Fields(query)

@@ -194,6 +194,7 @@ func (s *Server) setupRouter() chi.Router {
 		r.Post("/v1/memory/submit", s.handleSubmitMemory)
 		r.Post("/v1/memory/query", s.handleQueryMemory)
 			r.Post("/v1/memory/search", s.handleSearchMemory)
+		r.Post("/v1/memory/hybrid", s.handleHybridSearchMemory)
 		r.Get("/v1/memory/{memory_id}", s.handleGetMemory)
 		r.Post("/v1/memory/{memory_id}/vote", s.handleVoteMemory)
 		r.Post("/v1/memory/{memory_id}/challenge", s.handleChallengeMemory)

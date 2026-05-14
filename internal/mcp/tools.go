@@ -395,6 +395,23 @@ func (s *Server) toolRemember(ctx context.Context, params map[string]any) (any, 
 		}
 	}
 
+	// Auto-tag with the current git branch when we can detect one. This makes
+	// memories from `feature/x` searchable independently of memories from
+	// `main` without polluting either. User-supplied tags always win; we only
+	// append the branch tag if it isn't already present.
+	if branchTag := currentBranchTag(ctx); branchTag != "" {
+		alreadyPresent := false
+		for _, t := range tags {
+			if t == branchTag {
+				alreadyPresent = true
+				break
+			}
+		}
+		if !alreadyPresent {
+			tags = append(tags, branchTag)
+		}
+	}
+
 	// Submit memory. Tags are attached server-side after commit, so one call.
 	submitBody := map[string]any{
 		"content":          content,
@@ -462,6 +479,17 @@ func (s *Server) toolRecall(ctx context.Context, params map[string]any) (any, er
 		if err := s.recallSemantic(ctx, query, domain, topK, minConf, &queryResp); err != nil {
 			return nil, err
 		}
+	} else if hybridRecallEnabled() {
+		// Hybrid path: BM25 ⊕ vector cosine fused via Reciprocal Rank Fusion.
+		// Falls back to the legacy FTS5-only search path if hybrid 404s or
+		// errors so older nodes still respond. The fallback also catches the
+		// vault-encrypted marker via the legacy retry below.
+		if hybridErr := s.recallHybrid(ctx, query, domain, topK, minConf, &queryResp); hybridErr != nil {
+			fmt.Fprintf(os.Stderr, "SAGE MCP: hybrid recall failed (%v); falling back to FTS5 path\n", hybridErr)
+			if legacyErr := s.recallFTSWithFallback(ctx, query, domain, topK, minConf, &queryResp); legacyErr != nil {
+				return nil, legacyErr
+			}
+		}
 	} else {
 		// FTS5 path: full-text search when embeddings aren't semantic.
 		searchReq, _ := json.Marshal(map[string]any{
@@ -528,6 +556,72 @@ type recallResp struct {
 		CreatedAt       string  `json:"created_at"`
 	} `json:"results"`
 	TotalCount int `json:"total_count"`
+}
+
+// hybridRecallEnabled gates the hybrid recall path. Defaults to ON; set
+// SAGE_RECALL_HYBRID=0 to force the legacy single-index behaviour. Useful as a
+// safety switch while older nodes (without /v1/memory/hybrid) are still in the
+// network, or for A/B benchmarking against the legacy FTS5-only path.
+func hybridRecallEnabled() bool {
+	v := os.Getenv("SAGE_RECALL_HYBRID")
+	if v == "" {
+		return true
+	}
+	return v != "0" && v != "false" && v != "no"
+}
+
+// recallHybrid embeds the query, then asks the node to fuse BM25 + vector
+// results via RRF in one round trip. The node handles ranking and access
+// control; this client just shapes the request and reads the response.
+func (s *Server) recallHybrid(ctx context.Context, query, domain string, topK int, minConf float64, out *recallResp) error {
+	embedReq, _ := json.Marshal(map[string]string{"text": query})
+	var embedResp struct {
+		Embedding []float32 `json:"embedding"`
+	}
+	if err := s.doSignedJSON(ctx, "POST", "/v1/embed", embedReq, &embedResp); err != nil {
+		return fmt.Errorf("get embedding: %w", err)
+	}
+
+	hybridReq, _ := json.Marshal(map[string]any{
+		"query":          query,
+		"embedding":      embedResp.Embedding,
+		"domain_tag":     domain,
+		"provider":       s.provider,
+		"min_confidence": minConf,
+		"status_filter":  "committed",
+		"top_k":          topK,
+	})
+	if err := s.doSignedJSON(ctx, "POST", "/v1/memory/hybrid", hybridReq, out); err != nil {
+		return fmt.Errorf("hybrid recall: %w", err)
+	}
+	return nil
+}
+
+// recallFTSWithFallback runs the legacy FTS5 path and applies the
+// belt-and-braces vault-encrypted retry. Extracted so hybrid recall can
+// fall back to it cleanly when /v1/memory/hybrid isn't available.
+func (s *Server) recallFTSWithFallback(ctx context.Context, query, domain string, topK int, minConf float64, out *recallResp) error {
+	searchReq, _ := json.Marshal(map[string]any{
+		"query":          query,
+		"domain_tag":     domain,
+		"provider":       s.provider,
+		"min_confidence": minConf,
+		"status_filter":  "committed",
+		"top_k":          topK,
+	})
+	if searchErr := s.doSignedJSON(ctx, "POST", "/v1/memory/search", searchReq, out); searchErr != nil {
+		if strings.Contains(searchErr.Error(), vaultEncryptedSearchMarker) {
+			fmt.Fprintf(os.Stderr, "SAGE MCP: /v1/memory/search reports vault-encrypted; retrying with semantic path\n")
+			semanticTrue := true
+			s.semanticMu.Lock()
+			s.semanticMode = &semanticTrue
+			s.semanticCacheAge = time.Now()
+			s.semanticMu.Unlock()
+			return s.recallSemantic(ctx, query, domain, topK, minConf, out)
+		}
+		return fmt.Errorf("search memories: %w", searchErr)
+	}
+	return nil
 }
 
 // recallSemantic runs the embedding + cosine-similarity recall path. Used by

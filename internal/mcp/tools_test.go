@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -63,6 +65,11 @@ func mockSageAPI(t *testing.T) *httptest.Server {
 	})
 
 	mux.HandleFunc("/v1/memory/search", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(mockQueryResults)
+	})
+
+	mux.HandleFunc("/v1/memory/hybrid", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(mockQueryResults)
 	})
@@ -663,6 +670,10 @@ func TestSageRecall_VaultActiveForcesSemantic(t *testing.T) {
 // detect the marker substring, log a warning, and silently retry the semantic
 // path with the same query and params. This protects mixed-version networks.
 func TestSageRecall_RetriesSemanticOnVaultEncryptedFTSError(t *testing.T) {
+	// Pin to the legacy single-index path so this test continues to assert the
+	// vault-encrypted retry boundary exactly. The hybrid path is exercised by
+	// TestSageRecall_HybridPath* below.
+	t.Setenv("SAGE_RECALL_HYBRID", "0")
 	mux := http.NewServeMux()
 
 	// Lie: claim semantic=false even though the node is vault-active.
@@ -740,6 +751,7 @@ func TestSageRecall_RetriesSemanticOnVaultEncryptedFTSError(t *testing.T) {
 // network 500s, validation failures) MUST NOT silently retry and mask real
 // problems — they should propagate to the caller.
 func TestSageRecall_NonVaultErrorPropagates(t *testing.T) {
+	t.Setenv("SAGE_RECALL_HYBRID", "0")
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/embed/info", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -770,4 +782,411 @@ func TestSageRecall_NonVaultErrorPropagates(t *testing.T) {
 	assert.Contains(t, err.Error(), "database is locked",
 		"non-vault errors must propagate, not silently retry")
 	assert.Equal(t, 0, embedHits, "semantic retry must NOT trigger on non-vault errors")
+}
+
+// TestSageRecall_HybridPathPreferredWhenAvailable verifies that on a
+// non-vault, non-semantic node the new hybrid endpoint is preferred over
+// the legacy FTS5 path when the env switch is enabled (the default).
+func TestSageRecall_HybridPathPreferredWhenAvailable(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/embed/info", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"semantic": false, "provider": "hash", "dimension": 768, "ready": true,
+		})
+	})
+	mux.HandleFunc("/v1/embed", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"embedding": []float32{0.1, 0.2, 0.3},
+		})
+	})
+	hybridHits := 0
+	mux.HandleFunc("/v1/memory/hybrid", func(w http.ResponseWriter, r *http.Request) {
+		hybridHits++
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"results": []map[string]any{{
+				"memory_id":        "mem-hybrid-ok",
+				"content":          "from hybrid path",
+				"domain_tag":       "general",
+				"confidence_score": 0.91,
+				"memory_type":      "observation",
+				"status":           "committed",
+				"created_at":       "2026-05-14T00:00:00Z",
+			}},
+			"total_count": 1,
+		})
+	})
+	searchHits := 0
+	mux.HandleFunc("/v1/memory/search", func(w http.ResponseWriter, r *http.Request) {
+		searchHits++
+	})
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+
+	result, err := s.toolRecall(context.Background(), map[string]any{"query": "anything"})
+	require.NoError(t, err)
+	assert.Equal(t, 1, hybridHits, "hybrid endpoint should be called once")
+	assert.Equal(t, 0, searchHits, "legacy FTS5 path should NOT be hit when hybrid succeeds")
+
+	m := result.(map[string]any)
+	memories := m["memories"].([]map[string]any)
+	require.Len(t, memories, 1)
+	assert.Equal(t, "mem-hybrid-ok", memories[0]["memory_id"])
+}
+
+// TestSageRecall_HybridFallsBackToFTS verifies graceful degradation when an
+// older node doesn't expose /v1/memory/hybrid — recall must still succeed by
+// falling back to the FTS5 path automatically.
+func TestSageRecall_HybridFallsBackToFTS(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/embed/info", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"semantic": false, "provider": "hash", "dimension": 768, "ready": true,
+		})
+	})
+	mux.HandleFunc("/v1/embed", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"embedding": []float32{0.1, 0.2, 0.3},
+		})
+	})
+	mux.HandleFunc("/v1/memory/hybrid", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"title": "Not Found", "detail": "/v1/memory/hybrid not registered on this node",
+		})
+	})
+	searchHits := 0
+	mux.HandleFunc("/v1/memory/search", func(w http.ResponseWriter, r *http.Request) {
+		searchHits++
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"results": []map[string]any{{
+				"memory_id":        "mem-fts-fallback",
+				"content":          "from legacy FTS path",
+				"domain_tag":       "general",
+				"confidence_score": 0.8,
+				"memory_type":      "observation",
+				"status":           "committed",
+				"created_at":       "2026-05-14T00:00:00Z",
+			}},
+			"total_count": 1,
+		})
+	})
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+
+	result, err := s.toolRecall(context.Background(), map[string]any{"query": "anything"})
+	require.NoError(t, err, "hybrid failure must fall back to FTS5, not propagate")
+	assert.Equal(t, 1, searchHits, "fallback to /v1/memory/search expected")
+
+	m := result.(map[string]any)
+	memories := m["memories"].([]map[string]any)
+	require.Len(t, memories, 1)
+	assert.Equal(t, "mem-fts-fallback", memories[0]["memory_id"])
+}
+
+// TestToolRemember_AttachesBranchTag verifies that toolRemember auto-tags
+// submitted memories with `branch:<name>` when the MCP server's working
+// directory is a git checkout. The branch is detected via git, cached, and
+// merged into the submission body alongside any user-supplied tags.
+func TestToolRemember_AttachesBranchTag(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	// Build a real git repo on a known branch so currentBranchTag has
+	// something to detect, then chdir into it for the duration of the test.
+	resetBranchCache()
+	t.Setenv("SAGE_BRANCH_TAG", "")
+
+	tmp := t.TempDir()
+	oldWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(oldWd) }()
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = tmp
+		cmd.Env = append(os.Environ(),
+			"GIT_CONFIG_GLOBAL=/dev/null",
+			"GIT_CONFIG_SYSTEM=/dev/null",
+			"HOME="+tmp,
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	runGit("init", "-b", "feature-test-branch")
+	runGit("config", "user.email", "test@example.com")
+	runGit("config", "user.name", "Test")
+	if err := os.WriteFile(tmp+"/f", []byte("x"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	runGit("add", "f")
+	runGit("commit", "-m", "init")
+
+	// Capture the submit body so we can assert what tags the handler sent.
+	var capturedTags []any
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/embed/info", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"semantic": false, "provider": "hash", "dimension": 768, "ready": true,
+		})
+	})
+	mux.HandleFunc("/v1/embed", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"embedding": []float32{0.1, 0.2, 0.3},
+		})
+	})
+	mux.HandleFunc("/v1/memory/pre-validate", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"accepted": true})
+	})
+	mux.HandleFunc("/v1/memory/submit", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if rawTags, ok := body["tags"].([]any); ok {
+			capturedTags = rawTags
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"memory_id": "mem-branch", "status": "proposed", "tx_hash": "abc",
+		})
+	})
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+
+	_, err := s.toolRemember(context.Background(), map[string]any{
+		"content": "branch-test memory",
+		"domain":  "general",
+		"tags":    []any{"user-supplied"},
+	})
+	require.NoError(t, err)
+
+	require.NotNil(t, capturedTags, "submit handler must have received a tags array")
+	stringTags := make([]string, 0, len(capturedTags))
+	for _, t := range capturedTags {
+		if s, ok := t.(string); ok {
+			stringTags = append(stringTags, s)
+		}
+	}
+	assert.Contains(t, stringTags, "user-supplied",
+		"user-supplied tags must be preserved")
+	assert.Contains(t, stringTags, "branch:feature-test-branch",
+		"branch:<name> tag must be auto-attached on git-repo writes")
+}
+
+// TestToolRemember_NoBranchTagOutsideGitRepo verifies that auto-tagging
+// silently no-ops when the working directory isn't a git checkout — the
+// submission still succeeds, but no branch tag is appended.
+func TestToolRemember_NoBranchTagOutsideGitRepo(t *testing.T) {
+	resetBranchCache()
+	t.Setenv("SAGE_BRANCH_TAG", "")
+
+	tmp := t.TempDir()
+	oldWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(oldWd) }()
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	var capturedTags []any
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/embed/info", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"semantic": false, "provider": "hash", "dimension": 768, "ready": true,
+		})
+	})
+	mux.HandleFunc("/v1/embed", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"embedding": []float32{0.1, 0.2, 0.3},
+		})
+	})
+	mux.HandleFunc("/v1/memory/pre-validate", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"accepted": true})
+	})
+	mux.HandleFunc("/v1/memory/submit", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if rawTags, ok := body["tags"].([]any); ok {
+			capturedTags = rawTags
+		} else {
+			capturedTags = nil
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"memory_id": "mem-nobranch", "status": "proposed",
+		})
+	})
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+
+	_, err := s.toolRemember(context.Background(), map[string]any{
+		"content": "outside-repo memory",
+		"domain":  "general",
+	})
+	require.NoError(t, err)
+
+	for _, tag := range capturedTags {
+		if s, ok := tag.(string); ok {
+			assert.NotContains(t, s, "branch:",
+				"no branch tag should be attached outside a git repo")
+		}
+	}
+}
+
+// TestToolRemember_BranchTagDisabledByEnv verifies SAGE_BRANCH_TAG=0 fully
+// suppresses auto-tagging even inside a git checkout.
+func TestToolRemember_BranchTagDisabledByEnv(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	resetBranchCache()
+	t.Setenv("SAGE_BRANCH_TAG", "0")
+
+	tmp := t.TempDir()
+	oldWd, _ := os.Getwd()
+	defer func() { _ = os.Chdir(oldWd) }()
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = tmp
+		cmd.Env = append(os.Environ(),
+			"GIT_CONFIG_GLOBAL=/dev/null",
+			"GIT_CONFIG_SYSTEM=/dev/null",
+			"HOME="+tmp,
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	runGit("init", "-b", "should-not-appear")
+	runGit("config", "user.email", "test@example.com")
+	runGit("config", "user.name", "Test")
+	if err := os.WriteFile(tmp+"/f", []byte("x"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	runGit("add", "f")
+	runGit("commit", "-m", "init")
+
+	var capturedTags []any
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/embed/info", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"semantic": false, "provider": "hash", "dimension": 768, "ready": true,
+		})
+	})
+	mux.HandleFunc("/v1/embed", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"embedding": []float32{0.1, 0.2, 0.3},
+		})
+	})
+	mux.HandleFunc("/v1/memory/pre-validate", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"accepted": true})
+	})
+	mux.HandleFunc("/v1/memory/submit", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if rawTags, ok := body["tags"].([]any); ok {
+			capturedTags = rawTags
+		} else {
+			capturedTags = nil
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"memory_id": "mem-disabled", "status": "proposed",
+		})
+	})
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+
+	_, err := s.toolRemember(context.Background(), map[string]any{
+		"content": "no-tag memory",
+		"domain":  "general",
+	})
+	require.NoError(t, err)
+
+	for _, tag := range capturedTags {
+		if s, ok := tag.(string); ok {
+			assert.NotContains(t, s, "branch:",
+				"SAGE_BRANCH_TAG=0 must fully suppress branch auto-tagging")
+		}
+	}
+}
+
+// TestSageRecall_HybridDisabledByEnv verifies the SAGE_RECALL_HYBRID=0 escape
+// hatch routes straight to the legacy FTS5 path without touching the hybrid
+// endpoint or the embed service.
+func TestSageRecall_HybridDisabledByEnv(t *testing.T) {
+	t.Setenv("SAGE_RECALL_HYBRID", "0")
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/embed/info", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"semantic": false, "provider": "hash", "dimension": 768, "ready": true,
+		})
+	})
+	embedHits := 0
+	mux.HandleFunc("/v1/embed", func(w http.ResponseWriter, r *http.Request) {
+		embedHits++
+	})
+	hybridHits := 0
+	mux.HandleFunc("/v1/memory/hybrid", func(w http.ResponseWriter, r *http.Request) {
+		hybridHits++
+	})
+	mux.HandleFunc("/v1/memory/search", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"results":     []map[string]any{},
+			"total_count": 0,
+		})
+	})
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+
+	_, err := s.toolRecall(context.Background(), map[string]any{"query": "x"})
+	require.NoError(t, err)
+	assert.Equal(t, 0, hybridHits, "hybrid endpoint must NOT be hit when disabled")
+	assert.Equal(t, 0, embedHits, "embed must NOT be hit when hybrid disabled and FTS path chosen")
 }

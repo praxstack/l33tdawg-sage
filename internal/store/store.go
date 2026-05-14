@@ -114,6 +114,11 @@ type MemoryStore interface {
 	UpdateStatus(ctx context.Context, memoryID string, status memory.MemoryStatus, now time.Time) error
 	QuerySimilar(ctx context.Context, embedding []float32, opts QueryOptions) ([]*memory.MemoryRecord, error)
 	SearchByText(ctx context.Context, query string, opts QueryOptions) ([]*memory.MemoryRecord, error)
+	// SearchHybrid fuses BM25 (SearchByText) and vector (QuerySimilar) results
+	// via weighted Reciprocal Rank Fusion. Backends that lack one of the
+	// indexes (e.g. PostgresStore without FTS, or any store with a vault that
+	// blocks FTS) gracefully degrade to whichever stream is available.
+	SearchHybrid(ctx context.Context, query string, embedding []float32, opts QueryOptions) ([]*memory.MemoryRecord, error)
 	InsertTriples(ctx context.Context, memoryID string, triples []memory.KnowledgeTriple) error
 	InsertVote(ctx context.Context, vote *ValidationVote) error
 	GetVotes(ctx context.Context, memoryID string) ([]*ValidationVote, error)

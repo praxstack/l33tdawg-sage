@@ -94,6 +94,10 @@ func (m *mockMemoryStore) SearchByText(_ context.Context, query string, opts sto
 	return nil, nil
 }
 
+func (m *mockMemoryStore) SearchHybrid(ctx context.Context, query string, embedding []float32, opts store.QueryOptions) ([]*memory.MemoryRecord, error) {
+	return m.QuerySimilar(ctx, embedding, opts)
+}
+
 func (m *mockMemoryStore) InsertTriples(_ context.Context, memoryID string, triples []memory.KnowledgeTriple) error {
 	return nil
 }
