@@ -47,6 +47,15 @@ type Server struct {
 	OnEvent     EventCallback           // Optional: called when notable events occur
 	suppCache   SuppCacheWriter         // Bridges off-chain data (embeddings) to ABCI for consensus-first writes
 
+	// nodeOperatorID is the hex-encoded ed25519 public key of the local
+	// node operator (~/.sage/agent.key). When a request's X-Agent-ID
+	// matches this value, the caller is presumed to be the node operator
+	// and bypasses agent-isolation RBAC: the operator owns the node, so
+	// the cross-agent visibility filter doesn't apply to them. Other
+	// access gates (per-domain, classification) still run.
+	// Empty string disables the bypass entirely (preserves pre-v7.1 behaviour).
+	nodeOperatorID string
+
 	// PreValidateFunc runs the 4 app validators without on-chain submission.
 	// Set during node startup. Returns per-validator results.
 	PreValidateFunc func(content, contentHash, domain, memType string, confidence float64) []PreValidateResult
@@ -157,6 +166,22 @@ func loadValidatorSigningKey(logger zerolog.Logger) ed25519.PrivateKey {
 	pubHex := fmt.Sprintf("%x", pub)
 	logger.Info().Str("validator_id", pubHex[:16]+"...").Msg("loaded CometBFT validator signing key")
 	return sk
+}
+
+// SetNodeOperatorID records the hex-encoded ed25519 public key that
+// identifies the local node operator (~/.sage/agent.key). Requests signed
+// with this key bypass agent-isolation RBAC on read paths since the
+// operator owns the node and shouldn't be subject to cross-agent visibility
+// filtering. Domain access and classification gates still apply.
+//
+// Empty string disables the bypass (default — pre-v7.1 behaviour).
+func (s *Server) SetNodeOperatorID(id string) {
+	s.nodeOperatorID = id
+}
+
+// NodeOperatorID returns the configured operator ID for diagnostic use.
+func (s *Server) NodeOperatorID() string {
+	return s.nodeOperatorID
 }
 
 // setupRouter configures the chi router with middleware and routes.

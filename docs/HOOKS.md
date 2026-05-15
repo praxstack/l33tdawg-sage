@@ -29,13 +29,13 @@ Both direct-write scripts call into `.claude/hooks/lib/sage_direct.py`, which:
 3. POSTs / GETs against `http://localhost:8080` (override with `SAGE_URL`) with a tight 3 s timeout.
 4. Soft-fails silently if any of those steps fail — the agent never sees an error from a missing SAGE node.
 
-### Known limit: read scope on multi-agent nodes
+### Read scope on multi-agent nodes (v7.1)
 
 Direct-write hooks sign with the **node operator's** Ed25519 key — that's what lives in `~/.sage/agent.key`. The on-chain identity that key resolves to is the operator, not the LLM agent (e.g. `claude-code/sage`) running this session.
 
-On a fresh single-writer deployment this is the same identity in practice, so `SessionStart` prefetches the operator's recent memories and surfaces them as context. On a multi-agent node where the LLM has a separate registered identity, agent-isolation RBAC scopes the listing to memories the *operator* submitted — usually none — so the prefetch ends up empty and the agent boots with no SAGE context surfaced.
+As of v7.1 the SAGE REST layer recognises requests signed with the node operator's key and lets them bypass the cross-agent visibility filter on read paths. Concretely: `Server.SetNodeOperatorID` is wired at startup from `~/.sage/agent.key`, and `resolveVisibleAgents` short-circuits to `seeAll=true` when the caller matches. Per-domain access and per-record classification gates still apply, so the bypass doesn't lift hard access controls — it only lifts the agent-isolation filter that was making the SessionStart prefetch empty on multi-agent nodes.
 
-The fallback nudge still fires in that case, so the agent knows to call `sage_inception` and warm its own memory via MCP. Lifting this limit — letting the node operator's hooks read across all locally-stored memories regardless of original submitter — is on the v7.1 plate.
+If `~/.sage/agent.key` is missing or unreadable, the bypass stays off and the legacy RBAC behaviour applies. The fallback nudge in `sage-session-start.sh` continues to cover environments where direct read isn't available.
 
 ## Installing in your own project
 

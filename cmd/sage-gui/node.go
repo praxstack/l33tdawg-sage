@@ -296,6 +296,16 @@ func runServe() error {
 	restServer := rest.NewServer(cometRPC, sqliteStore, sqliteStore, badgerStore, health, logger, embedProvider)
 	restServer.SetSuppCache(app.SuppCache)
 
+	// v7.1: tell the REST layer which ed25519 public key identifies the local
+	// node operator. Requests signed with this key bypass the cross-agent
+	// visibility filter so the v7.0 SessionStart-hook prefetch returns
+	// useful context on nodes where the LLM agent is registered separately.
+	// Skip if agent.key is unreadable; the bypass simply stays off.
+	if opKey, opErr := readNodeOperatorKey(); opErr == nil && opKey != "" {
+		restServer.SetNodeOperatorID(opKey)
+		logger.Info().Str("operator_id", opKey[:16]+"...").Msg("node operator key registered for hook read-scope bypass")
+	}
+
 	// Create dashboard handler
 	dashboard := web.NewDashboardHandler(sqliteStore, version)
 	dashboard.BadgerStore = badgerStore // Wire on-chain RBAC for agent isolation
@@ -1284,6 +1294,35 @@ func mountMCPHTTPTransport(r chi.Router, sqliteStore *store.SQLiteStore, cfg *Co
 	mcpTransportRouter.Post("/v1/mcp/streamable", transport.HandleStreamable)
 
 	logger.Info().Msg("HTTP MCP transport enabled (/v1/mcp/sse, /v1/mcp/streamable)")
+}
+
+// readNodeOperatorKey returns the hex-encoded ed25519 public key derived from
+// ~/.sage/agent.key, accepting either the 32-byte seed or the 64-byte expanded
+// private-key form (matches mountMCPHTTPTransport's existing parse). Empty
+// string + nil error means the file isn't present — the caller treats that as
+// "no operator key, hook bypass stays off."
+func readNodeOperatorKey() (string, error) {
+	path := filepath.Join(SageHome(), "agent.key")
+	data, err := os.ReadFile(path) //nolint:gosec // path under operator's own home dir
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	var pk ed25519.PublicKey
+	switch len(data) {
+	case ed25519.SeedSize:
+		pk, _ = ed25519.NewKeyFromSeed(data).Public().(ed25519.PublicKey)
+	case ed25519.PrivateKeySize:
+		pk, _ = ed25519.PrivateKey(data).Public().(ed25519.PublicKey)
+	default:
+		return "", fmt.Errorf("agent.key has unexpected length %d (want 32 or 64)", len(data))
+	}
+	if pk == nil {
+		return "", fmt.Errorf("agent.key did not yield a usable ed25519 public key")
+	}
+	return hex.EncodeToString(pk), nil
 }
 
 // loadNodeSigningKey extracts the Ed25519 private key from CometBFT's priv_validator_key.json.

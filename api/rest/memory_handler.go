@@ -271,6 +271,16 @@ func (s *Server) resolveVisibleAgents(agentID string) ([]string, bool) {
 		return nil, true // No identity = legacy/internal, allow all
 	}
 
+	// v7.1: the node operator (whoever signs with ~/.sage/agent.key) bypasses
+	// the cross-agent visibility filter. The operator owns the node, so the
+	// agent-isolation gate doesn't apply to them — only multi-agent peer
+	// visibility does. Lifts the v7.0 SessionStart-hook prefetch limit on
+	// nodes where the LLM identity is registered separately from the
+	// operator. Per-domain access and classification gates still run.
+	if s.nodeOperatorID != "" && agentID == s.nodeOperatorID {
+		return nil, true
+	}
+
 	// Resolve visible_agents from the best available source.
 	// On-chain (BadgerDB) is checked first, then SQLite as fallback
 	// since dashboard writes may not have been broadcast to chain yet.
