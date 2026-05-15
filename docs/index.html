@@ -536,7 +536,7 @@ footer a:hover { text-decoration: underline; }
             <img src="sage-brain.svg" alt="SAGE Brain">
           </div>
           <div class="hero-text">
-            <div class="hero-badge">Open Source &middot; AES-256 Encrypted &middot; Any AI, Any Model</div>
+            <div class="hero-badge">Open Source &middot; AES-256 Encrypted &middot; Any AI, Any Model &middot; LongMemEval-S R@5 0.9053</div>
             <h1>Give Your AI a Persistent,<br><em>Secure Memory</em></h1>
             <p class="hero-sub">Every conversation starts from zero. SAGE provides persistent, encrypted, consensus-validated memory that runs entirely on your machine &mdash; your data never leaves it.</p>
             <div class="hero-actions">
@@ -676,15 +676,14 @@ footer a:hover { text-decoration: underline; }
 
       <!-- What's New -->
       <div class="whats-new reveal">
-        <h3>What's new in <span id="whats-new-version">v6.8</span></h3>
+        <h3>What's new in <span id="whats-new-version">v7.0</span></h3>
         <div class="new-features">
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>v6.8 hardening release</h4><p>Maintenance pass. OAuth Dynamic Client Registration is now persistent and <code>redirect_uri</code> validates against the registered set; <code>state</code> is mandatory and the consent form ships with a CSRF nonce. The agent picker on the consent screen is gone &mdash; bearers run as the local SAGE node identity. Wizard endpoints gated by strict same-origin; cross-origin browser tabs cannot reach <code>/v1/wizard/chatgpt/*</code>. <code>processAgentSetPermission</code> clamps writes by caller authority; FinalizeBlock log details no longer leak to REST clients. No new features &mdash; existing workflows unchanged.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--teal);"></div><div><h4>HTTP / HTTPS MCP transport</h4><p>SAGE is addressable as an HTTP/HTTPS MCP server in addition to the existing stdio transport. Clients that prefer remote MCP &mdash; ChatGPT, custom HTTP MCP clients &mdash; connect directly without spawning a subprocess. SSE transport on <code>/v1/mcp/sse</code>, Streamable-HTTP on <code>/v1/mcp/streamable</code>, TLS on <code>:8443</code>.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>OAuth 2.0 + PKCE for ChatGPT</h4><p>RFC-compliant OAuth 2.1 wrapper in front of the bearer-token transport. Authorization server metadata (RFC 8414), Dynamic Client Registration (RFC 7591), and Protected Resource Metadata (RFC 9728) are auto-discovered by ChatGPT&rsquo;s connector. Auth codes are 5-min-TTL, single-use, PKCE-S256 enforced.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>CEREBRUM ChatGPT setup wizard</h4><p>Six-click guided flow inside the Network tab handles cloudflared install, login, hostname picker (Cloudflare zone dropdown), tunnel creation, autostart registration, agent picker, and bearer mint. Replaces a 9-command manual setup. Local-first orchestration &mdash; no SAGE-hosted relay, no phone-home.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Bearer-token auth for external clients</h4><p>Cursor, Cline, Claude Desktop, and other MCP clients that don&rsquo;t do Ed25519 signing can use <code>Authorization: Bearer &lt;token&gt;</code> instead. Tokens are 32 random bytes; only the SHA-256 digest is stored. Issue and revoke from the dashboard or via <code>sage-gui mcp-token</code>.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Multi-org membership fix (v6.6.8)</h4><p>Adding an agent to a second organisation no longer silently strips access to the first. <code>HasAccessMultiOrg</code> now iterates all org memberships; <code>agent_orgs</code> reverse index is one-to-many; idempotent backfill on store open handles in-place upgrades.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Encrypted CA private key in quorum manifest (v6.6.6)</h4><p><code>quorum-manifest.json</code> no longer ships the CA private key as plaintext. Argon2id + AES-256-GCM envelope keyed by an operator passphrase set out-of-band. Pre-encryption manifests are rejected on import and prompt for regeneration.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>Hybrid recall (BM25 + vector via RRF)</h4><p><code>sage_recall</code> now fuses FTS5/BM25 and vector cosine results in one round trip via weighted Reciprocal Rank Fusion. New <code>POST /v1/memory/hybrid</code> endpoint backs it, with full RBAC, multi-org, classification, and decay parity vs. the existing query and search paths. Mixed-version networks keep working: older nodes that don&rsquo;t expose <code>/v1/memory/hybrid</code> auto-fall back to the legacy path. Tune at runtime via <code>SAGE_HYBRID_*</code> env vars.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--teal);"></div><div><h4>LongMemEval-S benchmark: R@5 = 0.9053</h4><p>First SAGE benchmark on a public retrieval dataset (Wu et al., ICLR 2025, 500 questions). Stock v7.0 defaults, fresh Docker container, every write through full BFT consensus &mdash; no special tuning. <code>R@5 = 0.9053</code>, <code>R@10 = 0.9332</code>, <code>MRR = 0.9041</code>. Single-session-assistant saturates at 0.98. Reproducer in <code>bench/longmemeval/</code>; full per-question detail in <code>bench/results/longmemeval-full-48e81ec.json</code>.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>Direct-write lifecycle hooks for Claude Code</h4><p>Five hooks under <code>.claude/hooks/</code>: <code>SessionStart</code> and <code>SessionEnd</code> sign REST calls to the local SAGE node directly using <code>~/.sage/agent.key</code> &mdash; no LLM in the loop. <code>PreCompact</code>, <code>UserPromptSubmit</code>, and <code>Stop</code> cover the rest. Install guide and the multi-agent read-scope caveat in <code>docs/HOOKS.md</code>.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>Branch-aware memory tagging</h4><p>Memories written from a git working tree are auto-tagged with <code>branch:&lt;name&gt;</code> so <code>feature/x</code> and <code>main</code> stay separable without manual hygiene. Detection caches for 30 s with a 750 ms hard timeout. Outside a git repo: silent no-op. Opt out per process via <code>SAGE_BRANCH_TAG=0</code>.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Tunable RRF defaults</h4><p>Default <code>RRFK=60</code>, <code>BM25=0.4</code>, <code>Vector=0.6</code>, <code>Oversample=2</code>. Override at runtime: <code>SAGE_HYBRID_RRF_K</code>, <code>SAGE_HYBRID_BM25_WEIGHT</code>, <code>SAGE_HYBRID_VECTOR_WEIGHT</code>, <code>SAGE_HYBRID_OVERSAMPLE</code>. Force the legacy single-index path with <code>SAGE_RECALL_HYBRID=0</code>.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Test coverage</h4><p>36 new tests across <code>internal/store</code>, <code>api/rest</code>, and <code>internal/mcp</code> covering RRF fusion ordering, weight bias, env overrides, hybrid fall-back paths, git-branch detection, tag plumbing, and RBAC parity for the new endpoint. <code>go test ./...</code> green on all 22 packages.</p></div></div>
         </div>
       </div>
 
@@ -884,8 +883,12 @@ footer a:hover { text-decoration: underline; }
         <p class="section-desc" style="margin:0 auto;">AI agents with persistent memory get measurably better over time. Without memory, they show essentially zero improvement no matter how many sessions you run.</p>
       </div>
 
-      <div class="info-note reveal" style="margin-top:40px;margin-bottom:40px;">
+      <div class="info-note reveal" style="margin-top:40px;margin-bottom:24px;">
         <strong>Built on real research, not vibes.</strong> SAGE started as infrastructure for teams and enterprises. SAGE GUI takes the core technology &mdash; governed memory &mdash; and packages it for individuals. Four published papers, real experiments, real data.
+      </div>
+
+      <div class="info-note reveal" style="margin-bottom:40px;border-left:3px solid var(--teal);">
+        <strong>v7.0 retrieval benchmark.</strong> SAGE v7.0 on LongMemEval-S (Wu et al., ICLR 2025, 500 questions): <strong>R@5 = 0.9053, R@10 = 0.9332, MRR = 0.9041</strong>. Stock defaults, fresh Docker container, every write through full BFT consensus &mdash; no special tuning. Reproducer and per-question detail in <a href="https://github.com/l33tdawg/sage/tree/main/bench/longmemeval" target="_blank" rel="noopener" style="color:var(--teal);">bench/longmemeval/</a>.
       </div>
 
       <div class="papers-grid reveal">
@@ -1102,7 +1105,7 @@ function copyPrompt(box) {
   // This floor guarantees the counter NEVER drops below the known peak,
   // regardless of browser, device, or localStorage state.
   // To update: set to the current counter value at time of commit.
-  // Last updated: 2026-05-01 (v6.8.0)
+  // Last updated: 2026-05-15 (v7.0.0)
   const HWM_FLOOR = 734;
 
   // GITHUB_AT_FLOOR: what GitHub reported when HWM_FLOOR was recorded.
