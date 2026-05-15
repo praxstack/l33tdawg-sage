@@ -356,6 +356,29 @@ def git_sha() -> str:
         return "unknown"
 
 
+def probe_reranker_backend(rerank_url: str) -> dict[str, Any] | None:
+    """Best-effort GET of the reranker's /info endpoint so the bench JSON
+    is self-describing about which reranker backend produced the number.
+
+    Translates the docker-internal hostname `host.docker.internal` to
+    `localhost` because the SAGE container reaches the host via the former
+    while the bench harness on the host should use the latter.
+    Returns None on any error - the bench result file is still valid;
+    the field just won't tell you which backend was used.
+    """
+    if not rerank_url:
+        return None
+    probe_url = rerank_url.replace("host.docker.internal", "localhost")
+    info_url = probe_url.rstrip("/") + "/info"
+    try:
+        r = httpx.get(info_url, timeout=3.0)
+        if r.status_code < 200 or r.status_code >= 300:
+            return {"probe_url": probe_url, "status_code": r.status_code}
+        return {"probe_url": probe_url, **r.json()}
+    except Exception as exc:
+        return {"probe_url": probe_url, "error": str(exc)}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -472,12 +495,14 @@ def main() -> int:
     # tell apart "v7.0 stock" runs from "v7.1 reranker enabled" runs.
     rerank_url = os.environ.get("SAGE_RERANK_URL", "")
     rerank_enabled = os.environ.get("SAGE_RERANK_ENABLED", "").lower() in {"1", "true", "yes", "on"}
+    rerank_backend = probe_reranker_backend(rerank_url) if rerank_enabled else None
     payload = {
         "git_sha": git_sha(),
         "sage_url": BASE_URL,
         "embed_model": OPENAI_MODEL,
         "rerank_enabled_env": rerank_enabled,
         "rerank_url_env": rerank_url,
+        "rerank_backend_info": rerank_backend,
         "expand_n": args.expand,
         "top_k": args.top_k,
         "limit": args.limit,

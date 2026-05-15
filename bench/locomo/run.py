@@ -495,6 +495,25 @@ def git_sha() -> str:
         return "unknown"
 
 
+def probe_reranker_backend(rerank_url: str) -> dict[str, Any] | None:
+    """Best-effort GET of the reranker's /info so the bench JSON records
+    which backend produced the number (TEI vs Python sidecar vs other).
+    Translates `host.docker.internal` (the SAGE container's view) to
+    `localhost` for the host-side probe. Returns None on any error.
+    """
+    if not rerank_url:
+        return None
+    probe_url = rerank_url.replace("host.docker.internal", "localhost")
+    info_url = probe_url.rstrip("/") + "/info"
+    try:
+        r = httpx.get(info_url, timeout=3.0)
+        if r.status_code < 200 or r.status_code >= 300:
+            return {"probe_url": probe_url, "status_code": r.status_code}
+        return {"probe_url": probe_url, **r.json()}
+    except Exception as exc:
+        return {"probe_url": probe_url, "error": str(exc)}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -602,6 +621,7 @@ def main() -> int:
     # tell v7.0 stock runs apart from v7.1 reranker-enabled runs.
     rerank_url = os.environ.get("SAGE_RERANK_URL", "")
     rerank_enabled = os.environ.get("SAGE_RERANK_ENABLED", "").lower() in {"1", "true", "yes", "on"}
+    rerank_backend = probe_reranker_backend(rerank_url) if rerank_enabled else None
     payload = {
         "git_sha": git_sha(),
         "sage_url": BASE_URL,
@@ -609,6 +629,7 @@ def main() -> int:
         "dataset": "locomo",
         "rerank_enabled_env": rerank_enabled,
         "rerank_url_env": rerank_url,
+        "rerank_backend_info": rerank_backend,
         "top_k": args.top_k,
         "limit": args.limit,
         "n_total": len(per_q),
