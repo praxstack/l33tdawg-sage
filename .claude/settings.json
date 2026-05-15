@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/sage-session-start.sh",
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/sage-session-start.sh\"",
             "timeout": 5
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/sage-session-start.sh",
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/sage-session-start.sh\"",
             "timeout": 5
           }
         ]
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/sage-session-start.sh",
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/sage-session-start.sh\"",
             "timeout": 5
           }
         ]
@@ -37,7 +37,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/sage-session-end.sh",
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/sage-session-end.sh\"",
             "timeout": 5
           }
         ]
@@ -48,7 +48,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/sage-pre-compact.sh",
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/sage-pre-compact.sh\"",
             "timeout": 5
           }
         ]
@@ -59,7 +59,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/sage-user-prompt.sh",
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/sage-user-prompt.sh\"",
             "timeout": 5
           }
         ]
@@ -70,7 +70,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/sage-stop.sh",
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/sage-stop.sh\"",
             "timeout": 5
           }
         ]
