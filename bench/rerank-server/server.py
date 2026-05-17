@@ -95,12 +95,27 @@ def rerank(req: RerankRequest) -> list[dict[str, Any]]:
 
     Matches TEI's response contract exactly so SAGE's HTTPReranker doesn't
     need to know which backend it's talking to.
+
+    MPS memory hygiene: wrap inference in torch.no_grad() so we don't
+    track gradients (forward-only) and explicitly drain the MPS cache
+    after each call. PyTorch's MPS backend tends to retain allocations
+    across calls otherwise, and a benchmark loop of thousands of /rerank
+    calls hits the high-watermark limit and OOM-crashes the process.
     """
     if not req.texts:
         return []
-    pairs = [(req.query, t) for t in req.texts]
-    # CrossEncoder.predict returns a numpy array of floats, one per pair.
-    scores = model.predict(pairs, show_progress_bar=False)
+    # Cap each text at 2048 chars before tokenization. CrossEncoder
+    # truncates to max_length=512 tokens anyway; this cap bounds the
+    # tokenizer work and keeps per-call allocations stable across very
+    # long haystack sessions.
+    truncated = [t[:2048] for t in req.texts]
+    pairs = [(req.query, t) for t in truncated]
+    with torch.no_grad():
+        scores = model.predict(pairs, show_progress_bar=False)
+    # Drain the MPS cache so per-call allocations don't accumulate across
+    # the bench's ~10k+ rerank calls.
+    if DEVICE == "mps" and hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+        torch.mps.empty_cache()
     indexed = list(enumerate(float(s) for s in scores))
     indexed.sort(key=lambda x: x[1], reverse=True)
     return [{"index": i, "score": s} for i, s in indexed]

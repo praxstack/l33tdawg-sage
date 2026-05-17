@@ -278,6 +278,38 @@ def submit_turn(
         return None
 
 
+def generate_expansions(openai_client: OpenAI, question_text: str, n: int) -> list[str]:
+    """Ask an LLM for `n` paraphrase/entity/temporal variants of the question.
+    Failures or malformed responses return [] so the harness falls back to the
+    single-query recall cleanly. Mirrors bench/longmemeval/run.py."""
+    if n <= 0 or not question_text.strip():
+        return []
+    prompt = (
+        "Generate {n} short paraphrase/entity/temporal variants of the question below. "
+        "Output ONLY the variants, one per line, no numbering or commentary. "
+        "Vary phrasing, surface named entities explicitly, and concretise relative "
+        "time references when context permits."
+        "\n\nQuestion: {q}"
+    ).format(n=n, q=question_text)
+    try:
+        resp = openai_client.chat.completions.create(
+            model=os.environ.get("LOCOMO_EXPANSION_MODEL", "gpt-4o-mini"),
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.4,
+            max_tokens=200,
+        )
+        text = (resp.choices[0].message.content or "").strip()
+    except Exception as exc:
+        print(f"  ! expansion generation failed: {exc}", file=sys.stderr)
+        return []
+    lines: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip().lstrip("-*0123456789.) ").strip()
+        if line and line != question_text:
+            lines.append(line)
+    return lines[:n]
+
+
 def hybrid_recall(
     sage_client: httpx.Client,
     agent: SageAgent,
@@ -285,15 +317,22 @@ def hybrid_recall(
     domain: str,
     question_text: str,
     top_k: int,
+    n_expansions: int = 0,
 ) -> list[dict[str, Any]]:
     q_embedding = embed(openai_client, question_text)
-    body = {
+    body: dict[str, Any] = {
         "query": question_text,
         "embedding": q_embedding,
         "domain_tag": domain,
         "top_k": top_k,
         "status_filter": "committed",
     }
+    if n_expansions > 0:
+        variants = generate_expansions(openai_client, question_text, n_expansions)
+        if variants:
+            body["expansions"] = [
+                {"query": v, "embedding": embed(openai_client, v)} for v in variants
+            ]
     body_bytes = json.dumps(body).encode()
     path = "/v1/memory/hybrid"
     r = sage_client.post(
@@ -335,23 +374,24 @@ def score(returned_ids: list[str], answer_ids: set[str]) -> dict[str, float]:
     return {"r5": r5, "r10": r10, "rr": rr}
 
 
-def run_question(
+def seed_conversation(
     sage_client: httpx.Client,
     agent: SageAgent,
     openai_client: OpenAI,
-    question: dict[str, Any],
-    top_k: int,
+    conv_id: str,
+    haystack: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    qid = question["question_id"]
-    conv_id = question["conversation_id"]
-    category = question.get("category", "unknown")
-    domain = f"bench-locomo-{qid}"
-    answer_ids = set(question.get("evidence_turn_ids", []) or [])
-    haystack = question.get("haystack_turns", []) or []
+    """Seed one conversation's full turn list into a per-conversation domain.
 
+    LoCoMo has 10 conversations and ~200 questions per conversation - seeding
+    once per conv (rather than per question) is the only way to keep the bench
+    inside an overnight budget. Each conv's domain is `bench-locomo-<conv_id>`
+    and is shared by every question that probes that conversation.
+    """
+    domain = f"bench-locomo-{conv_id}"
     n_seeded = 0
     seen_ids: set[str] = set()
-    t_seed_start = time.time()
+    t_start = time.time()
     for turn in haystack:
         tid = turn.get("turn_id")
         if not tid or tid in seen_ids:
@@ -362,11 +402,38 @@ def run_question(
             continue
         if submit_turn(sage_client, agent, openai_client, domain, tid, text):
             n_seeded += 1
-    seed_seconds = time.time() - t_seed_start
+    return {
+        "domain": domain,
+        "n_seeded": n_seeded,
+        "n_haystack": len(haystack),
+        "seed_seconds": round(time.time() - t_start, 2),
+    }
+
+
+def query_question(
+    sage_client: httpx.Client,
+    agent: SageAgent,
+    openai_client: OpenAI,
+    question: dict[str, Any],
+    domain: str,
+    top_k: int,
+    n_expansions: int = 0,
+) -> dict[str, Any]:
+    """Run hybrid recall for one question against an already-seeded domain."""
+    qid = question["question_id"]
+    conv_id = question["conversation_id"]
+    category = question.get("category", "unknown")
+    answer_ids = set(question.get("evidence_turn_ids", []) or [])
 
     t_query_start = time.time()
     results = hybrid_recall(
-        sage_client, agent, openai_client, domain, question["question"], top_k
+        sage_client,
+        agent,
+        openai_client,
+        domain,
+        question["question"],
+        top_k,
+        n_expansions=n_expansions,
     )
     query_seconds = time.time() - t_query_start
 
@@ -382,10 +449,7 @@ def run_question(
         "question_id": qid,
         "conversation_id": conv_id,
         "category": category,
-        "n_seeded": n_seeded,
-        "n_haystack": len(haystack),
         "n_answer": len(answer_ids),
-        "seed_seconds": round(seed_seconds, 2),
         "query_seconds": round(query_seconds, 2),
         "returned_turn_ids": returned_ids,
         **{k: round(v, 4) for k, v in metrics.items()},
@@ -451,13 +515,13 @@ def aggregate(per_q: list[dict[str, Any]]) -> dict[str, Any]:
         by_conv[r.get("conversation_id", "?")].append(r)
         by_cat[r.get("category", "unknown")].append(r)
 
+    query_times = [r["query_seconds"] for r in scored if "query_seconds" in r]
     overall = {
         "n": len(scored),
         "r5": mean("r5", scored),
         "r10": mean("r10", scored),
         "mrr": mean("rr", scored),
-        "median_seed_seconds": round(statistics.median(r["seed_seconds"] for r in scored), 2),
-        "median_query_seconds": round(statistics.median(r["query_seconds"] for r in scored), 2),
+        "median_query_seconds": round(statistics.median(query_times), 2) if query_times else 0.0,
     }
 
     per_conversation: dict[str, dict[str, Any]] = {}
@@ -546,6 +610,16 @@ def main() -> int:
         default=None,
         help="restrict to one category for focused runs (LoCoMo categories are 1..5).",
     )
+    parser.add_argument(
+        "--expand",
+        type=int,
+        default=0,
+        help=(
+            "if > 0, ask an LLM (gpt-4o-mini by default) for N paraphrase/entity/"
+            "temporal variants of each question and send them as `expansions` to "
+            "/v1/memory/hybrid. Mirrors longmemeval's --expand flag."
+        ),
+    )
     args = parser.parse_args()
 
     if not os.environ.get("OPENAI_API_KEY"):
@@ -586,33 +660,92 @@ def main() -> int:
     sage_client = httpx.Client(base_url=BASE_URL, timeout=60.0)
     agent = SageAgent()
 
-    print(f"benchmarking {len(questions)} questions against {BASE_URL}")
+    # Group questions by conversation_id, preserving first-appearance order.
+    # Seeding happens once per conversation (10 convs vs 1986 questions), so
+    # this is the structural change that brings the bench inside an overnight
+    # budget. Each conv's haystack lives in `bench-locomo-<conv_id>` and every
+    # question for that conv probes the same domain.
+    by_conv: dict[str, list[dict[str, Any]]] = collections.OrderedDict()
+    conv_haystacks: dict[str, list[dict[str, Any]]] = {}
+    for q in questions:
+        c = q["conversation_id"]
+        if c not in by_conv:
+            by_conv[c] = []
+            conv_haystacks[c] = q.get("haystack_turns") or []
+        by_conv[c].append(q)
+
+    print(
+        f"benchmarking {len(questions)} questions across {len(by_conv)} conversations "
+        f"against {BASE_URL} (seed-once-per-conv, expand={args.expand})"
+    )
+
     per_q: list[dict[str, Any]] = []
+    seed_info: dict[str, dict[str, Any]] = {}
     t_total = time.time()
-    for i, q in enumerate(questions, start=1):
+    i = 0
+    interrupted = False
+    for c, qs_in_conv in by_conv.items():
+        if interrupted:
+            break
+        haystack = conv_haystacks.get(c, [])
+        t_seed_start = time.time()
         try:
-            row = run_question(sage_client, agent, openai_client, q, args.top_k)
+            seed = seed_conversation(sage_client, agent, openai_client, c, haystack)
         except KeyboardInterrupt:
             print("\ninterrupted - partial results will be written")
+            interrupted = True
             break
         except Exception as exc:
-            row = {
-                "question_id": q.get("question_id", "?"),
-                "conversation_id": q.get("conversation_id", "?"),
-                "category": q.get("category", "?"),
-                "error": str(exc),
-            }
-        per_q.append(row)
-        if "r5" in row:
-            print(
-                f"  [{i:4d}/{len(questions)}] conv={row['conversation_id'][:12]:12s} "
-                f"cat={str(row['category'])[:6]:6s} "
-                f"r5={row['r5']:.2f} r10={row['r10']:.2f} rr={row['rr']:.2f} "
-                f"seed={row['seed_seconds']}s",
-                flush=True,
-            )
-        else:
-            print(f"  [{i:4d}/{len(questions)}] ERROR: {row.get('error','?')}", flush=True)
+            print(f"  ! seed failed for {c}: {exc}", file=sys.stderr)
+            for q in qs_in_conv:
+                i += 1
+                per_q.append({
+                    "question_id": q.get("question_id", "?"),
+                    "conversation_id": c,
+                    "category": q.get("category", "?"),
+                    "error": f"seed_failed: {exc}",
+                })
+            continue
+        seed_info[c] = seed
+        print(
+            f"  [seed] conv={c} turns={seed['n_seeded']}/{seed['n_haystack']} "
+            f"in {seed['seed_seconds']}s -> domain={seed['domain']}",
+            flush=True,
+        )
+        for q in qs_in_conv:
+            i += 1
+            try:
+                row = query_question(
+                    sage_client,
+                    agent,
+                    openai_client,
+                    q,
+                    seed["domain"],
+                    args.top_k,
+                    n_expansions=args.expand,
+                )
+            except KeyboardInterrupt:
+                print("\ninterrupted - partial results will be written")
+                interrupted = True
+                break
+            except Exception as exc:
+                row = {
+                    "question_id": q.get("question_id", "?"),
+                    "conversation_id": c,
+                    "category": q.get("category", "?"),
+                    "error": str(exc),
+                }
+            per_q.append(row)
+            if "r5" in row:
+                print(
+                    f"  [{i:4d}/{len(questions)}] conv={row['conversation_id'][:12]:12s} "
+                    f"cat={str(row['category'])[:6]:6s} "
+                    f"r5={row['r5']:.2f} r10={row['r10']:.2f} rr={row['rr']:.2f} "
+                    f"q={row['query_seconds']}s",
+                    flush=True,
+                )
+            else:
+                print(f"  [{i:4d}/{len(questions)}] ERROR: {row.get('error','?')}", flush=True)
 
     total_seconds = time.time() - t_total
     summary = aggregate(per_q)
@@ -630,10 +763,12 @@ def main() -> int:
         "rerank_enabled_env": rerank_enabled,
         "rerank_url_env": rerank_url,
         "rerank_backend_info": rerank_backend,
+        "expand_n": args.expand,
         "top_k": args.top_k,
         "limit": args.limit,
         "n_total": len(per_q),
         "duration_seconds": round(total_seconds, 1),
+        "seed_info": seed_info,
         "summary": summary,
         "per_question": per_q,
     }

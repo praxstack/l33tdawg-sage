@@ -39,44 +39,38 @@ pip install -r bench/locomo/requirements.txt
 
 ## Dataset acquisition
 
-Two paths. **Local file is preferred** because it pins the snapshot of the dataset you scored against and makes the run reproducible.
-
-### Local JSON
-
-Either download the official release from the LoCoMo repo (Snap Research) or export it once from Hugging Face:
-
-```python
-from datasets import load_dataset
-ds = load_dataset("snap-stanford/LoCoMo", split="train")
-ds.to_json("/path/to/locomo.json")
-```
-
-Then:
+The canonical drop is `data/locomo10.json` in the upstream `snap-research/locomo` GitHub repo (10 conversations, 272 sessions, 5882 turns, 1986 QA, ~2.8 MB). The Makefile fetches it for you:
 
 ```bash
-export LOCOMO_DATA_PATH=/path/to/locomo.json
+make bench-locomo-fetch   # idempotent; downloads once into bench/locomo/data/
 ```
 
-The loader accepts either a top-level list of samples or an object with a `data` / `samples` / `conversations` array. The harness's `normalise_questions()` is defensive about field aliases (`dia_id` vs `turn_id` vs `id`, `text` vs `content` vs `utterance`, `qa` vs `qas` vs `questions`) so most public mirrors load cleanly.
+`make bench-locomo-smoke` and `make bench-locomo` both depend on this target, so the dataset is in place before the run begins. The file is gitignored (`data/` is excluded repo-wide; we don't redistribute LoCoMo).
+
+If you want to point at a different mirror, set `LOCOMO_DATA_PATH` to your own copy. The loader accepts either a top-level list of samples or an object with a `data` / `samples` / `conversations` array. The harness's `normalise_questions()` is defensive about field aliases (`dia_id` vs `turn_id` vs `id`, `text` vs `content` vs `utterance`, `qa` vs `qas` vs `questions`).
 
 ### Hugging Face fallback
 
-If `LOCOMO_DATA_PATH` is not set, the harness calls `datasets.load_dataset("snap-stanford/LoCoMo", split="train")`. Override the dataset id or split with `LOCOMO_HF_DATASET` / `LOCOMO_HF_SPLIT`.
+If `LOCOMO_DATA_PATH` is not set, the harness tries `datasets.load_dataset(LOCOMO_HF_DATASET, split=LOCOMO_HF_SPLIT)`. As of May 2026 the public `snap-stanford/LoCoMo` mirror returns HTTP 401, so the GitHub path above is the working route.
 
 ## Run
 
 ```bash
 # Smoke test on the first 5 questions (good for sanity-checking the wiring)
-python bench/locomo/run.py --limit 5
-
-# Balanced cross-section: 20 questions from each conversation
-python bench/locomo/run.py --per-conversation 20
-
-# Focused run on one category (LoCoMo categories are stringified ints "1".."5")
-python bench/locomo/run.py --category 2 --limit 50
+make bench-locomo-smoke
 
 # Full benchmark (every write goes through consensus; budget accordingly)
-python bench/locomo/run.py
+make bench-locomo
+```
+
+Or invoke the runner directly for finer control:
+
+```bash
+# Balanced cross-section: 20 questions from each conversation
+LOCOMO_DATA_PATH=bench/locomo/data/locomo10.json python bench/locomo/run.py --per-conversation 20
+
+# Focused run on one category (LoCoMo categories are stringified ints "1".."5")
+LOCOMO_DATA_PATH=bench/locomo/data/locomo10.json python bench/locomo/run.py --category 2 --limit 50
 ```
 
 ## Env vars
