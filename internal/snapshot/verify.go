@@ -103,8 +103,8 @@ func VerifyWithOptions(dir string, opts VerifyOptions) error {
 		return fmt.Errorf("verify: read manifest: %w", err)
 	}
 	var m Manifest
-	if err := json.Unmarshal(manifestBytes, &m); err != nil {
-		return fmt.Errorf("verify: parse manifest: %w", err)
+	if jerr := json.Unmarshal(manifestBytes, &m); jerr != nil {
+		return fmt.Errorf("verify: parse manifest: %w", jerr)
 	}
 
 	if m.SchemaVersion > SchemaVersion {
@@ -154,16 +154,16 @@ func VerifyWithOptions(dir string, opts VerifyOptions) error {
 	}
 	if sqliteSrc != "" {
 		defer sqliteCleanup()
-		if err := sqliteIntegrityCheck(sqliteSrc); err != nil {
-			return fmt.Errorf("verify: sqlite: %w", err)
+		if icErr := sqliteIntegrityCheck(sqliteSrc); icErr != nil {
+			return fmt.Errorf("verify: sqlite: %w", icErr)
 		}
 	}
 
 	// 3. Restore badger.backup into a tmp DB and compare AppHash.
 	if !opts.SkipAppHash && len(m.AppHash) > 0 {
-		badgerSrc, badgerCleanup, err := materialize(dir, &m, chunkBadger, opts.VaultPassphrase)
-		if err != nil {
-			return fmt.Errorf("verify: materialize badger: %w", err)
+		badgerSrc, badgerCleanup, materErr := materialize(dir, &m, chunkBadger, opts.VaultPassphrase)
+		if materErr != nil {
+			return fmt.Errorf("verify: materialize badger: %w", materErr)
 		}
 		defer badgerCleanup()
 		if badgerSrc == "" {
@@ -173,9 +173,9 @@ func VerifyWithOptions(dir string, opts VerifyOptions) error {
 		if hasher == nil {
 			hasher = DefaultAppHashComputer
 		}
-		got, err := replayBadgerAndHash(badgerSrc, hasher)
-		if err != nil {
-			return fmt.Errorf("verify: badger replay: %w", err)
+		got, replayErr := replayBadgerAndHash(badgerSrc, hasher)
+		if replayErr != nil {
+			return fmt.Errorf("verify: badger replay: %w", replayErr)
 		}
 		if !bytes.Equal(got, m.AppHash) {
 			return fmt.Errorf("verify: AppHash mismatch (got %x want %x)", got, m.AppHash)
@@ -269,8 +269,8 @@ func sqliteIntegrityCheck(path string) error {
 	defer cancel()
 
 	var res string
-	if err := db.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&res); err != nil {
-		return fmt.Errorf("integrity_check: %w", err)
+	if qErr := db.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&res); qErr != nil {
+		return fmt.Errorf("integrity_check: %w", qErr)
 	}
 	if res != "ok" {
 		return fmt.Errorf("integrity_check returned %q", res)
@@ -309,12 +309,12 @@ func replayBadgerAndHash(backupPath string, hasher AppHashComputer) ([]byte, err
 		return nil, err
 	}
 	defer func() { _ = in.Close() }()
-	if err := db.Load(in, 16); err != nil {
+	if loadErr := db.Load(in, 16); loadErr != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("load backup: %w", err)
+		return nil, fmt.Errorf("load backup: %w", loadErr)
 	}
-	if err := db.Close(); err != nil {
-		return nil, fmt.Errorf("close tmp badger: %w", err)
+	if closeErr := db.Close(); closeErr != nil {
+		return nil, fmt.Errorf("close tmp badger: %w", closeErr)
 	}
 	return hasher(tmp)
 }
@@ -341,12 +341,12 @@ func computeAppHashStandalone(badgerPath string) ([]byte, error) {
 		for it.Rewind(); it.Valid(); it.Next() {
 			item := it.Item()
 			k := append([]byte(nil), item.Key()...)
-			if err := item.Value(func(v []byte) error {
+			if vErr := item.Value(func(v []byte) error {
 				val := append([]byte(nil), v...)
 				entries = append(entries, kv{key: k, val: val})
 				return nil
-			}); err != nil {
-				return err
+			}); vErr != nil {
+				return vErr
 			}
 		}
 		return nil
@@ -389,7 +389,11 @@ func tarHeaderWalk(path string) error {
 		if err != nil {
 			return fmt.Errorf("tar header at entry %d: %w", count, err)
 		}
-		if _, err := io.Copy(io.Discard, tr); err != nil {
+		// G110 mitigation: cap inflation per tar entry. 10 GiB is far
+		// above any realistic SAGE chunk and below "infinite". If a
+		// crafted entry tries to expand past this we abort.
+		const maxTarEntryBytes = int64(10) << 30
+		if _, err := io.CopyN(io.Discard, tr, maxTarEntryBytes); err != nil && err != io.EOF {
 			return fmt.Errorf("tar body %q: %w", hdr.Name, err)
 		}
 		count++

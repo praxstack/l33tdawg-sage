@@ -22,6 +22,22 @@ type BadgerStore struct {
 	db *badger.DB
 }
 
+// DB returns the underlying *badger.DB handle. Intended for the v7.5
+// snapshot integration (internal/snapshot.Options.LiveBadger) — passing
+// the live handle to snapshot.Take lets the snapshotter call
+// (*badger.DB).Backup directly without reopening the directory, which
+// would conflict with the lockfile held by the running node.
+//
+// Do NOT use this accessor for general read/write operations — those
+// should go through the typed methods on BadgerStore so call sites are
+// audited against the on-chain key schema. Only the snapshot path has
+// a legitimate need for the raw handle (the Backup primitive is part
+// of badger's public API and the snapshot package documents the
+// constraint).
+func (s *BadgerStore) DB() *badger.DB {
+	return s.db
+}
+
 // NewBadgerStore opens or creates a BadgerDB at the given path.
 func NewBadgerStore(path string) (*BadgerStore, error) {
 	opts := badger.DefaultOptions(path)

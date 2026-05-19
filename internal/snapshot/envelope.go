@@ -45,10 +45,6 @@ const (
 //
 // EOF after a frame ends the stream cleanly. Truncation is detected by
 // the absence of a closing zero-length frame written by envelopeWriter.Close.
-type envelopeHeader struct {
-	magic [8]byte
-	salt  [envSaltLen]byte
-}
 
 // envelopeWriter wraps an underlying io.WriteCloser and chunk-seals
 // plaintext as it's written. It is safe to call Write with any size;

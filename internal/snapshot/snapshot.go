@@ -104,6 +104,14 @@ type Options struct {
 	// rollback can re-exec the previous binary without operator
 	// intervention. Defaults to true; disable in tests.
 	IncludeBinary bool
+
+	// LiveBadger, if non-nil, is the *badger.DB handle the running
+	// node already holds open against dataDir/badger. Take will call
+	// LiveBadger.Backup directly instead of reopening the directory,
+	// avoiding the BadgerDB lockfile conflict that would otherwise
+	// prevent live-node snapshotting. Standalone callers (tests, CLI
+	// recovery tools) leave this nil and Take opens its own handle.
+	LiveBadger *badger.DB
 }
 
 // Take captures all three storage layers and writes a snapshot to
@@ -272,26 +280,25 @@ func Take(ctx context.Context, dataDir string, height int64, appHash []byte, rea
 	return manifest, nil
 }
 
-// writeBadgerBackup opens dataDir/badger read-only and streams a full
-// backup (since=0) into the staging dir. Returns the Chunk record.
+// writeBadgerBackup streams a full backup of the BadgerDB at badgerPath
+// into the staging dir. If opts.LiveBadger is non-nil it reuses that
+// already-open handle (the live-node wiring); otherwise it opens its
+// own handle (standalone use). Returns the Chunk record.
 func writeBadgerBackup(_ context.Context, stagingDir, badgerPath string, opts Options) (Chunk, error) {
-	// We open a fresh handle to the badger directory. Badger's lockfile
-	// guards against concurrent *writers*, so in real wiring the live
-	// process must run Take with its own open handle (passed in via a
-	// future Options.LiveBadger field). For the standalone package the
-	// caller is expected to close any prior handle before calling Take;
-	// the happy-path test follows that contract.
-	//
-	// TODO(integration-wiring): accept *badger.DB through Options.LiveBadger
-	// and reuse it instead of reopening. Tracked in the v7.5 integration
-	// commit per the package spec.
-	bopts := badger.DefaultOptions(badgerPath)
-	bopts.Logger = nil
-	db, err := badger.Open(bopts)
-	if err != nil {
-		return Chunk{}, fmt.Errorf("open badger ro: %w", err)
+	var db *badger.DB
+	if opts.LiveBadger != nil {
+		// Reuse the live handle. Do NOT close it on return.
+		db = opts.LiveBadger
+	} else {
+		bopts := badger.DefaultOptions(badgerPath)
+		bopts.Logger = nil
+		var err error
+		db, err = badger.Open(bopts)
+		if err != nil {
+			return Chunk{}, fmt.Errorf("open badger ro: %w", err)
+		}
+		defer func() { _ = db.Close() }()
 	}
-	defer func() { _ = db.Close() }()
 
 	outPath := filepath.Join(stagingDir, chunkBadger)
 	if opts.VaultEncrypted {
@@ -330,8 +337,8 @@ func writeBadgerBackup(_ context.Context, stagingDir, badgerPath string, opts Op
 	}
 	_ = n // version stamp; unused here.
 
-	if err := closeOut(); err != nil {
-		return Chunk{}, fmt.Errorf("close badger backup: %w", err)
+	if cErr := closeOut(); cErr != nil {
+		return Chunk{}, fmt.Errorf("close badger backup: %w", cErr)
 	}
 	closeOut = func() error { return nil }
 
@@ -476,8 +483,8 @@ func copySelfBinary(stagingDir, version string) (string, error) {
 		return "", err
 	}
 	binDir := filepath.Join(stagingDir, binaryDirName)
-	if err := os.MkdirAll(binDir, 0o700); err != nil {
-		return "", err
+	if mkErr := os.MkdirAll(binDir, 0o700); mkErr != nil {
+		return "", mkErr
 	}
 	dstName := fmt.Sprintf("sage-gui-%s", version)
 	if runtime.GOOS == "windows" {
@@ -655,8 +662,8 @@ func writeTarEntry(tw *tar.Writer, fsPath, tarPath string, info os.FileInfo) err
 		return err
 	}
 	hdr.Name = filepath.ToSlash(tarPath)
-	if err := tw.WriteHeader(hdr); err != nil {
-		return err
+	if whErr := tw.WriteHeader(hdr); whErr != nil {
+		return whErr
 	}
 	if info.IsDir() {
 		return nil

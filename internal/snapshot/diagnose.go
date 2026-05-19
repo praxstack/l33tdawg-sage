@@ -23,6 +23,7 @@ package snapshot
 // CometBFT writes alongside its dbs — those are stable across versions.
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"os"
@@ -160,9 +161,11 @@ func quickSqliteCheck(path string) error {
 	defer func() { _ = db.Close() }()
 
 	done := make(chan error, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	go func() {
 		var res string
-		row := db.QueryRow("PRAGMA integrity_check")
+		row := db.QueryRowContext(ctx, "PRAGMA integrity_check")
 		if scanErr := row.Scan(&res); scanErr != nil {
 			done <- scanErr
 			return
@@ -174,8 +177,8 @@ func quickSqliteCheck(path string) error {
 		done <- nil
 	}()
 	select {
-	case err := <-done:
-		return err
+	case derr := <-done:
+		return derr
 	case <-time.After(10 * time.Second):
 		return errors.New("integrity_check timed out")
 	}

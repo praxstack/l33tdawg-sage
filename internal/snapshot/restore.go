@@ -77,43 +77,43 @@ func RestoreWithOptions(dir, dataDir string, opts RestoreOptions) (int64, error)
 		return 0, fmt.Errorf("restore: read manifest: %w", err)
 	}
 	var m Manifest
-	if err := json.Unmarshal(manifestBytes, &m); err != nil {
-		return 0, fmt.Errorf("restore: parse manifest: %w", err)
+	if jerr := json.Unmarshal(manifestBytes, &m); jerr != nil {
+		return 0, fmt.Errorf("restore: parse manifest: %w", jerr)
 	}
 
 	if !opts.SkipVerify {
-		if err := VerifyWithOptions(dir, VerifyOptions{VaultPassphrase: opts.VaultPassphrase}); err != nil {
-			return 0, fmt.Errorf("restore: pre-verify: %w", err)
+		if verr := VerifyWithOptions(dir, VerifyOptions{VaultPassphrase: opts.VaultPassphrase}); verr != nil {
+			return 0, fmt.Errorf("restore: pre-verify: %w", verr)
 		}
 	}
 
-	if err := os.MkdirAll(dataDir, 0o700); err != nil {
-		return 0, fmt.Errorf("restore: ensure dataDir: %w", err)
+	if mkErr := os.MkdirAll(dataDir, 0o700); mkErr != nil {
+		return 0, fmt.Errorf("restore: ensure dataDir: %w", mkErr)
 	}
 
 	// 1. BadgerDB — load into a fresh dir, then atomic-swap.
 	badgerDst := filepath.Join(dataDir, "badger")
 	badgerStaging := filepath.Join(dataDir, "badger.restore-staging")
 	_ = os.RemoveAll(badgerStaging)
-	if err := os.MkdirAll(badgerStaging, 0o700); err != nil {
-		return 0, fmt.Errorf("restore: badger staging: %w", err)
+	if mkErr := os.MkdirAll(badgerStaging, 0o700); mkErr != nil {
+		return 0, fmt.Errorf("restore: badger staging: %w", mkErr)
 	}
 
-	badgerSrc, badgerCleanup, err := materialize(dir, &m, chunkBadger, opts.VaultPassphrase)
-	if err != nil {
-		return 0, fmt.Errorf("restore: materialize badger: %w", err)
+	badgerSrc, badgerCleanup, materErr := materialize(dir, &m, chunkBadger, opts.VaultPassphrase)
+	if materErr != nil {
+		return 0, fmt.Errorf("restore: materialize badger: %w", materErr)
 	}
 	defer badgerCleanup()
 	if badgerSrc == "" {
 		return 0, errors.New("restore: badger backup missing from snapshot")
 	}
-	if err := loadBadgerBackup(badgerStaging, badgerSrc); err != nil {
+	if loadErr := loadBadgerBackup(badgerStaging, badgerSrc); loadErr != nil {
 		_ = os.RemoveAll(badgerStaging)
-		return 0, fmt.Errorf("restore: load badger: %w", err)
+		return 0, fmt.Errorf("restore: load badger: %w", loadErr)
 	}
-	if err := atomicSwapDir(badgerStaging, badgerDst); err != nil {
+	if swapErr := atomicSwapDir(badgerStaging, badgerDst); swapErr != nil {
 		_ = os.RemoveAll(badgerStaging)
-		return 0, fmt.Errorf("restore: swap badger: %w", err)
+		return 0, fmt.Errorf("restore: swap badger: %w", swapErr)
 	}
 
 	// 2. SQLite — copy decrypted file over the live path.
@@ -128,13 +128,13 @@ func RestoreWithOptions(dir, dataDir string, opts RestoreOptions) (int64, error)
 		for _, suffix := range []string{"-wal", "-shm"} {
 			_ = os.Remove(sqliteDst + suffix)
 		}
-		if err := copyFile(sqliteSrc, sqliteDst); err != nil {
-			return 0, fmt.Errorf("restore: copy sqlite: %w", err)
+		if cpErr := copyFile(sqliteSrc, sqliteDst); cpErr != nil {
+			return 0, fmt.Errorf("restore: copy sqlite: %w", cpErr)
 		}
 		// Sanity-check that the copy opens. Catches partial reads on
 		// network filesystems before downstream Open panics.
-		if err := sanityOpenSQLite(sqliteDst); err != nil {
-			return 0, fmt.Errorf("restore: sqlite sanity: %w", err)
+		if sErr := sanityOpenSQLite(sqliteDst); sErr != nil {
+			return 0, fmt.Errorf("restore: sqlite sanity: %w", sErr)
 		}
 	}
 
@@ -151,11 +151,11 @@ func RestoreWithOptions(dir, dataDir string, opts RestoreOptions) (int64, error)
 		for _, name := range []string{"blockstore.db", "state.db", "tx_index.db", "evidence.db", "cs.wal"} {
 			_ = os.RemoveAll(filepath.Join(cometDst, name))
 		}
-		if err := os.MkdirAll(cometDst, 0o700); err != nil {
-			return 0, fmt.Errorf("restore: cometbft data dir: %w", err)
+		if mkErr := os.MkdirAll(cometDst, 0o700); mkErr != nil {
+			return 0, fmt.Errorf("restore: cometbft data dir: %w", mkErr)
 		}
-		if err := untarZstd(cometSrc, cometDst); err != nil {
-			return 0, fmt.Errorf("restore: untar cometbft: %w", err)
+		if untarErr := untarZstd(cometSrc, cometDst); untarErr != nil {
+			return 0, fmt.Errorf("restore: untar cometbft: %w", untarErr)
 		}
 		// If the tar didn't include priv_validator_state.json, write a
 		// fresh height-0 file so the validator boots cleanly.
@@ -345,8 +345,8 @@ func untarZstdConfig(src, dataDir, vaultDest string) error {
 			return fmt.Errorf("tar entry escapes root: %q", hdr.Name)
 		}
 		var target string
-		switch {
-		case clean == "vault.key":
+		switch clean {
+		case "vault.key":
 			target = vaultDest
 		default:
 			target = filepath.Join(dataDir, clean)

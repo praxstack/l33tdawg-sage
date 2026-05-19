@@ -45,18 +45,18 @@ func seedDataDir(t *testing.T, root string) (vaultPath string, appHash []byte) {
 		"agent:a1":     `{"agent_id":"a1","name":"alice"}`,
 		"state:height": "42",
 	}
-	if err := db.Update(func(txn *badger.Txn) error {
+	if uerr := db.Update(func(txn *badger.Txn) error {
 		for k, v := range seedKVs {
-			if err := txn.Set([]byte(k), []byte(v)); err != nil {
-				return err
+			if serr := txn.Set([]byte(k), []byte(v)); serr != nil {
+				return serr
 			}
 		}
 		return nil
-	}); err != nil {
-		t.Fatalf("seed badger: %v", err)
+	}); uerr != nil {
+		t.Fatalf("seed badger: %v", uerr)
 	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("close badger: %v", err)
+	if cerr := db.Close(); cerr != nil {
+		t.Fatalf("close badger: %v", cerr)
 	}
 
 	// Compute AppHash from the seeded BadgerDB BEFORE we run Take, so
@@ -131,6 +131,56 @@ func snapshotsRoot(dataDir string) string {
 	return filepath.Join(dataDir, snapshotsDirName)
 }
 
+// TestTake_LiveBadger_NoLockfileConflict exercises the v7.5 live-node
+// integration path: the badger.DB is opened OUTSIDE Take and passed in
+// via Options.LiveBadger. With the lockfile held by the caller, Take
+// must succeed (whereas the standalone path would fail with "Cannot
+// acquire directory lock").
+func TestTake_LiveBadger_NoLockfileConflict(t *testing.T) {
+	parent := t.TempDir()
+	srcData := filepath.Join(parent, "src", "data")
+	if err := os.MkdirAll(srcData, 0o700); err != nil {
+		t.Fatalf("mkdir srcData: %v", err)
+	}
+	vaultPath, appHash := seedDataDir(t, srcData)
+
+	// Open a live handle and KEEP IT OPEN for the duration of Take —
+	// the standalone branch would deadlock on the lockfile here.
+	badgerDir := filepath.Join(srcData, "badger")
+	bopts := badger.DefaultOptions(badgerDir)
+	bopts.Logger = nil
+	live, err := badger.Open(bopts)
+	if err != nil {
+		t.Fatalf("open live badger: %v", err)
+	}
+	defer func() { _ = live.Close() }()
+
+	const height = int64(123)
+	manifest, err := Take(context.Background(), srcData, height, appHash, "live-test", Options{
+		BinaryVersion: "v7.5.0-test",
+		VaultKeyPath:  vaultPath,
+		IncludeBinary: false,
+		LiveBadger:    live,
+	})
+	if err != nil {
+		t.Fatalf("Take with LiveBadger: %v", err)
+	}
+	if manifest.Height != height {
+		t.Fatalf("manifest height: got %d want %d", manifest.Height, height)
+	}
+
+	// Sanity: the OK sentinel landed and Verify accepts the snapshot.
+	// (We close `live` for Verify since Verify replays badger into a
+	// tmpdir; that path is independent of the source handle.)
+	snapDir := filepath.Join(snapshotsRoot(srcData), fmt.Sprintf("%d", height))
+	if _, err := os.Stat(filepath.Join(snapDir, OKSentinel)); err != nil {
+		t.Fatalf("OK sentinel missing: %v", err)
+	}
+	if err := Verify(snapDir); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+}
+
 // TestTakeVerifyRestore_HappyPath is the canonical end-to-end test:
 // seed → Take → Verify → Restore into a fresh dir → assert contents.
 func TestTakeVerifyRestore_HappyPath(t *testing.T) {
@@ -162,22 +212,22 @@ func TestTakeVerifyRestore_HappyPath(t *testing.T) {
 	}
 
 	snapDir := filepath.Join(snapshotsRoot(srcData), fmt.Sprintf("%d", height))
-	if _, err := os.Stat(filepath.Join(snapDir, OKSentinel)); err != nil {
-		t.Fatalf("OK sentinel missing: %v", err)
+	if _, sErr := os.Stat(filepath.Join(snapDir, OKSentinel)); sErr != nil {
+		t.Fatalf("OK sentinel missing: %v", sErr)
 	}
 
 	// Verify reads the same manifest+chunks and replays the badger
 	// backup into a tmpdir, checking AppHash matches.
-	if err := Verify(snapDir); err != nil {
-		t.Fatalf("Verify: %v", err)
+	if vErr := Verify(snapDir); vErr != nil {
+		t.Fatalf("Verify: %v", vErr)
 	}
 
 	// Restore into a fresh data dir. We point vaultDest at a different
 	// path so we can confirm vault.key extraction routed there.
 	dstParent := filepath.Join(parent, "dst")
 	dstData := filepath.Join(dstParent, "data")
-	if err := os.MkdirAll(dstData, 0o700); err != nil {
-		t.Fatalf("mkdir dstData: %v", err)
+	if mkErr := os.MkdirAll(dstData, 0o700); mkErr != nil {
+		t.Fatalf("mkdir dstData: %v", mkErr)
 	}
 	dstVault := filepath.Join(dstParent, "vault.key")
 	gotHeight, err := RestoreWithOptions(snapDir, dstData, RestoreOptions{
@@ -470,17 +520,17 @@ func TestSnapshotEncrypted(t *testing.T) {
 	}
 
 	snapDir := filepath.Join(snapshotsRoot(srcData), fmt.Sprintf("%d", height))
-	if err := VerifyWithOptions(snapDir, VerifyOptions{VaultPassphrase: pass}); err != nil {
-		t.Fatalf("Verify with correct passphrase: %v", err)
+	if vErr := VerifyWithOptions(snapDir, VerifyOptions{VaultPassphrase: pass}); vErr != nil {
+		t.Fatalf("Verify with correct passphrase: %v", vErr)
 	}
-	if err := VerifyWithOptions(snapDir, VerifyOptions{VaultPassphrase: "wrong"}); err == nil {
+	if wErr := VerifyWithOptions(snapDir, VerifyOptions{VaultPassphrase: "wrong"}); wErr == nil {
 		t.Fatal("Verify with wrong passphrase should have failed")
 	}
 
 	dstParent := filepath.Join(parent, "dst")
 	dstData := filepath.Join(dstParent, "data")
-	if err := os.MkdirAll(dstData, 0o700); err != nil {
-		t.Fatalf("mkdir dst: %v", err)
+	if mkErr := os.MkdirAll(dstData, 0o700); mkErr != nil {
+		t.Fatalf("mkdir dst: %v", mkErr)
 	}
 	gotHeight, err := RestoreWithOptions(snapDir, dstData, RestoreOptions{
 		VaultPassphrase: pass,
@@ -512,11 +562,11 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("writer: %v", err)
 	}
-	if _, err := w.Write(plaintext); err != nil {
-		t.Fatalf("write: %v", err)
+	if _, wErr := w.Write(plaintext); wErr != nil {
+		t.Fatalf("write: %v", wErr)
 	}
-	if err := w.Close(); err != nil {
-		t.Fatalf("close: %v", err)
+	if cErr := w.Close(); cErr != nil {
+		t.Fatalf("close: %v", cErr)
 	}
 
 	r, err := newEnvelopeReader(&buf, "passphrase")
