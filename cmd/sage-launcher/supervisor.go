@@ -322,12 +322,17 @@ func runSuperviseMode(args []string) int {
 	}
 
 	home := sageDir()
+	dataDir := filepath.Join(home, "data")
 	cfg := &SupervisorConfig{
-		BinaryPath:   binaryPath,
-		BinaryArgs:   []string{"serve"},
-		SageHome:     home,
-		DataDir:      filepath.Join(home, "data"),
-		SnapshotsDir: filepath.Join(home, "snapshots"),
+		BinaryPath: binaryPath,
+		BinaryArgs: []string{"serve"},
+		SageHome:   home,
+		DataDir:    dataDir,
+		// SnapshotsDir lives INSIDE dataDir because internal/snapshot.Take
+		// writes to dataDir/snapshots/ (see snapshotsDirName const). If
+		// these paths drift apart the launcher will scan an empty
+		// directory and fail rollback with "no anchor snapshot."
+		SnapshotsDir: filepath.Join(dataDir, "snapshots"),
 		LauncherLog:  filepath.Join(home, "launcher.log"),
 		MaxCrashes:   *maxCrashes,
 		CrashWindow:  *crashWindow,

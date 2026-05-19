@@ -113,7 +113,7 @@ func makeSnapshot(t *testing.T, snapshotsDir, name, binaryVersion string, height
 	manifest := snapshotManifest{
 		BinaryVersion: binaryVersion,
 		Height:        height,
-		TakenAt:       time.Now().Unix(),
+		TakenAt:       time.Now(),
 	}
 	raw, _ := json.Marshal(&manifest)
 	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), raw, 0o644); err != nil {

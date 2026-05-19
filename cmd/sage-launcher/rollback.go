@@ -64,10 +64,18 @@ type Execer interface {
 // cares about. The full schema is owned by internal/snapshot; we
 // duplicate the two fields we need rather than importing that
 // package (see top-of-file comment).
+//
+// TakenAt is decoded as time.Time so it matches the wire format
+// internal/snapshot writes (RFC3339 string via json.Marshal of a
+// time.Time, NOT a unix-epoch int64). If these drift apart the
+// launcher will fail to parse every manifest with an opaque
+// "cannot unmarshal string into Go struct field" error during
+// rollback — a path that's only hit on the recovery code path
+// where loud failures are hard to debug.
 type snapshotManifest struct {
-	BinaryVersion string `json:"binary_version"`
-	Height        int64  `json:"height"`
-	TakenAt       int64  `json:"taken_at"`
+	BinaryVersion string    `json:"binary_version"`
+	Height        int64     `json:"height"`
+	TakenAt       time.Time `json:"taken_at"`
 }
 
 // RollbackContext is everything the rollback flow needs. It's a
