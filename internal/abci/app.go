@@ -12,6 +12,7 @@ import (
 	"time"
 
 	abcitypes "github.com/cometbft/cometbft/abci/types"
+	cmtproto "github.com/cometbft/cometbft/proto/tendermint/types"
 	"github.com/rs/zerolog"
 
 	"github.com/l33tdawg/sage/internal/auth"
@@ -543,6 +544,33 @@ func (app *SageApp) FinalizeBlock(_ context.Context, req *abcitypes.RequestFinal
 		app.processEpoch(req.Height, req.Time)
 	}
 
+	// v7.5 upgrade plan activation. If a plan is pending and its
+	// ActivationHeight matches this block, bump the chain's app
+	// version via ConsensusParamUpdates and mark the plan applied.
+	// CometBFT applies the new app version at H+1 across every node
+	// atomically. Read-then-mark inside FinalizeBlock keeps the
+	// transition deterministic across replicas.
+	var consensusParamUpdates *cmtproto.ConsensusParams
+	if plan, planErr := app.badgerStore.GetUpgradePlan(); planErr == nil && plan != nil && plan.ActivationHeight == req.Height {
+		consensusParamUpdates = &cmtproto.ConsensusParams{
+			Version: &cmtproto.VersionParams{App: plan.TargetAppVersion},
+		}
+		if markErr := app.badgerStore.MarkUpgradeApplied(plan.Name, plan.TargetAppVersion, req.Height); markErr != nil {
+			app.logger.Error().Err(markErr).
+				Str("name", plan.Name).
+				Uint64("target_app_version", plan.TargetAppVersion).
+				Int64("height", req.Height).
+				Msg("failed to mark upgrade applied — chain state will be inconsistent with audit trail")
+		}
+		app.logger.Info().
+			Str("name", plan.Name).
+			Uint64("target_app_version", plan.TargetAppVersion).
+			Int64("height", req.Height).
+			Msg("upgrade activated — app version takes effect at H+1")
+	} else if planErr != nil && !errors.Is(planErr, store.ErrNoUpgradePlan) {
+		app.logger.Error().Err(planErr).Msg("failed to read upgrade plan")
+	}
+
 	// Update state
 	app.state.Height = req.Height
 
@@ -557,9 +585,10 @@ func (app *SageApp) FinalizeBlock(_ context.Context, req *abcitypes.RequestFinal
 	metrics.FinalizeBlockDuration.Observe(time.Since(start).Seconds())
 
 	return &abcitypes.ResponseFinalizeBlock{
-		TxResults:        txResults,
-		AppHash:          appHash,
-		ValidatorUpdates: valUpdates,
+		TxResults:             txResults,
+		AppHash:               appHash,
+		ValidatorUpdates:      valUpdates,
+		ConsensusParamUpdates: consensusParamUpdates,
 	}, nil
 }
 
@@ -2871,8 +2900,18 @@ func (app *SageApp) processGovCancel(parsedTx *tx.ParsedTx, height int64, _ time
 // code for both missing-payload and identity-verification failures, in
 // line with the processOrgRegister / processOrgAddMember pattern).
 
-// processUpgradePropose handles a TxTypeUpgradePropose transaction (stub).
-func (app *SageApp) processUpgradePropose(parsedTx *tx.ParsedTx, height int64, _ time.Time) *abcitypes.ExecTxResult {
+// defaultUpgradeDelayBlocks is the chain-side floor on how far in the
+// future an UpgradePlan's ActivationHeight is computed from the
+// proposal-execution block. Used when the proposal payload's
+// UpgradeDelayBlocks is zero or below the floor. ~10 min at 3s blocks.
+const defaultUpgradeDelayBlocks = int64(200)
+
+// processUpgradePropose handles a TxTypeUpgradePropose transaction.
+// On success, persists an UpgradePlanRecord in BadgerDB with
+// ActivationHeight = height + max(payload.UpgradeDelayBlocks, defaultUpgradeDelayBlocks).
+// At most one pending plan at a time — a proposal arriving while
+// another is pending is rejected (code 47).
+func (app *SageApp) processUpgradePropose(parsedTx *tx.ParsedTx, height int64, blockTime time.Time) *abcitypes.ExecTxResult {
 	prop := parsedTx.UpgradePropose
 	if prop == nil {
 		return &abcitypes.ExecTxResult{Code: 47, Log: "missing upgrade propose payload"}
@@ -2892,20 +2931,55 @@ func (app *SageApp) processUpgradePropose(parsedTx *tx.ParsedTx, height int64, _
 		return &abcitypes.ExecTxResult{Code: 47, Log: "upgrade propose: target_app_version must be > 0"}
 	}
 
+	// Refuse if another plan is already pending. At-most-one semantics
+	// keep the FinalizeBlock activation check deterministic and avoid
+	// the question of "which plan wins" when two arrive in the same block.
+	if existing, getErr := app.badgerStore.GetUpgradePlan(); getErr == nil && existing != nil {
+		return &abcitypes.ExecTxResult{Code: 47, Log: fmt.Sprintf(
+			"upgrade propose: plan %q is already pending (activation_height=%d)",
+			existing.Name, existing.ActivationHeight)}
+	}
+
+	// Activation height is chain-computed, not validator-chosen. Each
+	// node sees the same height + delay, so every replica resolves the
+	// same number deterministically — no multi-validator drift.
+	delay := prop.UpgradeDelayBlocks
+	if delay < defaultUpgradeDelayBlocks {
+		delay = defaultUpgradeDelayBlocks
+	}
+	rec := &store.UpgradePlanRecord{
+		Name:             prop.Name,
+		TargetAppVersion: prop.TargetAppVersion,
+		ActivationHeight: height + delay,
+		BinarySHA256:     prop.BinarySHA256,
+		ProposedAt:       height,
+		ProposerID:       proposerID,
+	}
+	if setErr := app.badgerStore.SetUpgradePlan(rec); setErr != nil {
+		return &abcitypes.ExecTxResult{Code: 47, Log: fmt.Sprintf("upgrade propose: persist failed: %v", setErr)}
+	}
+
 	app.logger.Info().
 		Str("name", prop.Name).
 		Uint64("target_app_version", prop.TargetAppVersion).
+		Int64("activation_height", rec.ActivationHeight).
 		Str("binary_sha256", prop.BinarySHA256).
 		Str("proposer_id", proposerID).
-		Str("payload_proposer_id", prop.ProposerID).
-		Int64("upgrade_delay_blocks", prop.UpgradeDelayBlocks).
 		Int64("height", height).
-		Msg("upgrade propose received (pre-fork stub — no state mutation)")
+		Time("block_time", blockTime).
+		Msg("upgrade plan persisted")
 
-	return &abcitypes.ExecTxResult{Code: 0, Log: "upgrade tx accepted (pre-fork stub — no state mutation)"}
+	return &abcitypes.ExecTxResult{Code: 0, Log: fmt.Sprintf(
+		"upgrade plan accepted: name=%s target_app_version=%d activation_height=%d",
+		prop.Name, prop.TargetAppVersion, rec.ActivationHeight)}
 }
 
-// processUpgradeCancel handles a TxTypeUpgradeCancel transaction (stub).
+// processUpgradeCancel handles a TxTypeUpgradeCancel transaction. On
+// success, deletes the pending UpgradePlan. Refuses if:
+//   - no plan is pending (code 48)
+//   - the pending plan's name doesn't match (code 48)
+//   - the plan's ActivationHeight has already passed (code 48) — cancel
+//     after activation has no meaning; use TxTypeUpgradeRevert instead
 func (app *SageApp) processUpgradeCancel(parsedTx *tx.ParsedTx, height int64, _ time.Time) *abcitypes.ExecTxResult {
 	cancel := parsedTx.UpgradeCancel
 	if cancel == nil {
@@ -2923,15 +2997,31 @@ func (app *SageApp) processUpgradeCancel(parsedTx *tx.ParsedTx, height int64, _ 
 		return &abcitypes.ExecTxResult{Code: 48, Log: "upgrade cancel: name is required"}
 	}
 
+	plan, getErr := app.badgerStore.GetUpgradePlan()
+	if getErr != nil || plan == nil {
+		return &abcitypes.ExecTxResult{Code: 48, Log: "upgrade cancel: no plan pending"}
+	}
+	if plan.Name != cancel.Name {
+		return &abcitypes.ExecTxResult{Code: 48, Log: fmt.Sprintf(
+			"upgrade cancel: name mismatch (pending=%q, cancel=%q)", plan.Name, cancel.Name)}
+	}
+	if height >= plan.ActivationHeight {
+		return &abcitypes.ExecTxResult{Code: 48, Log: fmt.Sprintf(
+			"upgrade cancel: too late (height=%d >= activation_height=%d)", height, plan.ActivationHeight)}
+	}
+	if delErr := app.badgerStore.DeleteUpgradePlan(); delErr != nil {
+		return &abcitypes.ExecTxResult{Code: 48, Log: fmt.Sprintf("upgrade cancel: delete failed: %v", delErr)}
+	}
+
 	app.logger.Info().
 		Str("name", cancel.Name).
 		Str("canceller_id", cancellerID).
-		Str("payload_canceller_id", cancel.CancellerID).
 		Str("reason", cancel.Reason).
 		Int64("height", height).
-		Msg("upgrade cancel received (pre-fork stub — no state mutation)")
+		Int64("would_have_activated_at", plan.ActivationHeight).
+		Msg("upgrade plan cancelled")
 
-	return &abcitypes.ExecTxResult{Code: 0, Log: "upgrade tx accepted (pre-fork stub — no state mutation)"}
+	return &abcitypes.ExecTxResult{Code: 0, Log: fmt.Sprintf("upgrade plan %q cancelled", cancel.Name)}
 }
 
 // processUpgradeRevert handles a TxTypeUpgradeRevert transaction (stub).

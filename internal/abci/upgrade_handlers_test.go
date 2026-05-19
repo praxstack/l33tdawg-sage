@@ -1,26 +1,25 @@
 package abci
 
 import (
+	"context"
 	"testing"
 	"time"
 
+	abcitypes "github.com/cometbft/cometbft/abci/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tx"
 )
 
 // ---------------------------------------------------------------------------
 // v7.5 upgrade-machinery handler tests
 //
-// These exercise the ABCI handler stubs added in v7.5 task #0. The stubs do
-// NOT mutate state — they only round-trip identity verification, payload
-// validation, and structured logging. Tests assert:
-//   - happy path → code 0
-//   - missing payload → handler-specific error code (47 / 48 / 49)
-//   - bad signature → same error code (matches the existing handler pattern
-//     where missing-payload and identity-verify-fail share a code)
-//   - state is NOT mutated (no pendingWrites enqueued)
+// processUpgradePropose now persists an UpgradePlanRecord in BadgerDB,
+// processUpgradeCancel reads + deletes it, and FinalizeBlock activates it.
+// Tests cover identity verification, payload shape, state mutation, and
+// the "at most one pending plan" invariant.
 // ---------------------------------------------------------------------------
 
 // makeUpgradeProposeTx builds a signed ParsedTx for TxTypeUpgradePropose.
@@ -85,54 +84,93 @@ func makeUpgradeRevertTx(t *testing.T, ak agentKey, name string, targetVersion u
 // UpgradePropose
 // ---------------------------------------------------------------------------
 
-func TestProcessUpgradePropose_HappyPath(t *testing.T) {
+func TestProcessUpgradePropose_HappyPath_PersistsPlan(t *testing.T) {
 	app := setupTestApp(t)
 	ak := newAgentKey(t)
 
-	ptx := makeUpgradeProposeTx(t, ak, "v7.5.0", 7, "deadbeefcafe", 200)
-	pendingBefore := len(app.pendingWrites)
+	const height = int64(100)
+	ptx := makeUpgradeProposeTx(t, ak, "v7.5.0", 7, "deadbeefcafe", 500)
 
-	result := app.processUpgradePropose(ptx, 100, time.Now())
+	result := app.processUpgradePropose(ptx, height, time.Now())
 
 	assert.Equal(t, uint32(0), result.Code, "happy path should return code 0, got log: %s", result.Log)
-	assert.Contains(t, result.Log, "pre-fork stub", "stub should advertise itself in the log")
-	// STUB constraint: handler must not mutate state.
-	assert.Equal(t, pendingBefore, len(app.pendingWrites), "stub must NOT enqueue any pending writes")
+	assert.Contains(t, result.Log, "upgrade plan accepted")
+
+	// Plan must be persisted in BadgerDB with ActivationHeight = height + delay.
+	plan, err := app.badgerStore.GetUpgradePlan()
+	require.NoError(t, err)
+	require.NotNil(t, plan)
+	assert.Equal(t, "v7.5.0", plan.Name)
+	assert.Equal(t, uint64(7), plan.TargetAppVersion)
+	assert.Equal(t, height+500, plan.ActivationHeight)
+	assert.Equal(t, "deadbeefcafe", plan.BinarySHA256)
+	assert.Equal(t, height, plan.ProposedAt)
+}
+
+func TestProcessUpgradePropose_AppliesFloorDelay(t *testing.T) {
+	app := setupTestApp(t)
+	ak := newAgentKey(t)
+
+	// Delay below the floor (defaultUpgradeDelayBlocks=200) should be
+	// raised to the floor so a fast-attacking proposer can't pick a
+	// near-zero activation height.
+	const height = int64(100)
+	ptx := makeUpgradeProposeTx(t, ak, "v7.5.0", 7, "", 10)
+	result := app.processUpgradePropose(ptx, height, time.Now())
+	require.Equal(t, uint32(0), result.Code)
+
+	plan, err := app.badgerStore.GetUpgradePlan()
+	require.NoError(t, err)
+	require.NotNil(t, plan)
+	assert.Equal(t, height+defaultUpgradeDelayBlocks, plan.ActivationHeight,
+		"delay should be raised to the floor")
+}
+
+func TestProcessUpgradePropose_RejectsWhilePending(t *testing.T) {
+	app := setupTestApp(t)
+	ak := newAgentKey(t)
+
+	// First proposal is accepted.
+	first := makeUpgradeProposeTx(t, ak, "v7.5.0", 7, "", 200)
+	require.Equal(t, uint32(0), app.processUpgradePropose(first, 100, time.Now()).Code)
+
+	// Second proposal — even a different name — must be rejected.
+	second := makeUpgradeProposeTx(t, ak, "v7.5.1", 8, "", 200)
+	result := app.processUpgradePropose(second, 101, time.Now())
+	assert.Equal(t, uint32(47), result.Code)
+	assert.Contains(t, result.Log, "already pending")
+
+	// Original plan is still in place.
+	plan, err := app.badgerStore.GetUpgradePlan()
+	require.NoError(t, err)
+	require.NotNil(t, plan)
+	assert.Equal(t, "v7.5.0", plan.Name)
 }
 
 func TestProcessUpgradePropose_MissingPayload(t *testing.T) {
 	app := setupTestApp(t)
-	// Build a tx with no UpgradePropose payload.
 	ptx := &tx.ParsedTx{Type: tx.TxTypeUpgradePropose}
-
 	result := app.processUpgradePropose(ptx, 100, time.Now())
-
-	assert.Equal(t, uint32(47), result.Code, "missing payload must return code 47")
+	assert.Equal(t, uint32(47), result.Code)
 	assert.Contains(t, result.Log, "missing upgrade propose payload")
 }
 
 func TestProcessUpgradePropose_BadSignature(t *testing.T) {
 	app := setupTestApp(t)
 	ak := newAgentKey(t)
-
 	ptx := makeUpgradeProposeTx(t, ak, "v7.5.0", 7, "", 200)
-	// Tamper with the signature so verifyAgentIdentity rejects it.
 	require.NotEmpty(t, ptx.AgentSig)
-	ptx.AgentSig = make([]byte, len(ptx.AgentSig)) // all-zero sig
-
+	ptx.AgentSig = make([]byte, len(ptx.AgentSig))
 	result := app.processUpgradePropose(ptx, 100, time.Now())
-
-	assert.Equal(t, uint32(47), result.Code, "bad signature must return code 47 (same as missing payload)")
+	assert.Equal(t, uint32(47), result.Code)
 	assert.Contains(t, result.Log, "agent identity verification failed")
 }
 
 func TestProcessUpgradePropose_MissingName(t *testing.T) {
 	app := setupTestApp(t)
 	ak := newAgentKey(t)
-
 	ptx := makeUpgradeProposeTx(t, ak, "", 7, "", 200)
 	result := app.processUpgradePropose(ptx, 100, time.Now())
-
 	assert.Equal(t, uint32(47), result.Code)
 	assert.Contains(t, result.Log, "name is required")
 }
@@ -140,10 +178,8 @@ func TestProcessUpgradePropose_MissingName(t *testing.T) {
 func TestProcessUpgradePropose_ZeroTargetVersion(t *testing.T) {
 	app := setupTestApp(t)
 	ak := newAgentKey(t)
-
 	ptx := makeUpgradeProposeTx(t, ak, "v7.5.0", 0, "", 200)
 	result := app.processUpgradePropose(ptx, 100, time.Now())
-
 	assert.Equal(t, uint32(47), result.Code)
 	assert.Contains(t, result.Log, "target_app_version must be > 0")
 }
@@ -152,91 +188,105 @@ func TestProcessUpgradePropose_ZeroTargetVersion(t *testing.T) {
 // UpgradeCancel
 // ---------------------------------------------------------------------------
 
-func TestProcessUpgradeCancel_HappyPath(t *testing.T) {
+func TestProcessUpgradeCancel_HappyPath_DeletesPlan(t *testing.T) {
 	app := setupTestApp(t)
 	ak := newAgentKey(t)
 
-	ptx := makeUpgradeCancelTx(t, ak, "v7.5.0", "binary digest mismatch")
-	pendingBefore := len(app.pendingWrites)
+	// Seed a pending plan via propose.
+	prop := makeUpgradeProposeTx(t, ak, "v7.5.0", 7, "", 500)
+	require.Equal(t, uint32(0), app.processUpgradePropose(prop, 100, time.Now()).Code)
 
+	// Cancel BEFORE activation height (100 + 500 = 600; cancel at 200).
+	cancel := makeUpgradeCancelTx(t, ak, "v7.5.0", "binary digest mismatch")
+	result := app.processUpgradeCancel(cancel, 200, time.Now())
+	assert.Equal(t, uint32(0), result.Code, "log: %s", result.Log)
+
+	plan, err := app.badgerStore.GetUpgradePlan()
+	assert.ErrorIs(t, err, store.ErrNoUpgradePlan, "plan should be absent after cancel")
+	assert.Nil(t, plan)
+}
+
+func TestProcessUpgradeCancel_NoPendingPlan(t *testing.T) {
+	app := setupTestApp(t)
+	ak := newAgentKey(t)
+	ptx := makeUpgradeCancelTx(t, ak, "v7.5.0", "")
 	result := app.processUpgradeCancel(ptx, 100, time.Now())
+	assert.Equal(t, uint32(48), result.Code)
+	assert.Contains(t, result.Log, "no plan pending")
+}
 
-	assert.Equal(t, uint32(0), result.Code, "happy path should return code 0, got log: %s", result.Log)
-	assert.Contains(t, result.Log, "pre-fork stub")
-	assert.Equal(t, pendingBefore, len(app.pendingWrites), "stub must NOT enqueue any pending writes")
+func TestProcessUpgradeCancel_NameMismatch(t *testing.T) {
+	app := setupTestApp(t)
+	ak := newAgentKey(t)
+
+	prop := makeUpgradeProposeTx(t, ak, "v7.5.0", 7, "", 500)
+	require.Equal(t, uint32(0), app.processUpgradePropose(prop, 100, time.Now()).Code)
+
+	cancel := makeUpgradeCancelTx(t, ak, "v7.5.1", "wrong-name") // pending is v7.5.0
+	result := app.processUpgradeCancel(cancel, 200, time.Now())
+	assert.Equal(t, uint32(48), result.Code)
+	assert.Contains(t, result.Log, "name mismatch")
+}
+
+func TestProcessUpgradeCancel_TooLate(t *testing.T) {
+	app := setupTestApp(t)
+	ak := newAgentKey(t)
+
+	prop := makeUpgradeProposeTx(t, ak, "v7.5.0", 7, "", 200)
+	require.Equal(t, uint32(0), app.processUpgradePropose(prop, 100, time.Now()).Code)
+
+	// Activation height is 100 + 200 = 300. Cancel at >=300 must fail.
+	cancel := makeUpgradeCancelTx(t, ak, "v7.5.0", "too-slow")
+	result := app.processUpgradeCancel(cancel, 300, time.Now())
+	assert.Equal(t, uint32(48), result.Code)
+	assert.Contains(t, result.Log, "too late")
 }
 
 func TestProcessUpgradeCancel_MissingPayload(t *testing.T) {
 	app := setupTestApp(t)
 	ptx := &tx.ParsedTx{Type: tx.TxTypeUpgradeCancel}
-
 	result := app.processUpgradeCancel(ptx, 100, time.Now())
-
-	assert.Equal(t, uint32(48), result.Code, "missing payload must return code 48")
+	assert.Equal(t, uint32(48), result.Code)
 	assert.Contains(t, result.Log, "missing upgrade cancel payload")
 }
 
 func TestProcessUpgradeCancel_BadSignature(t *testing.T) {
 	app := setupTestApp(t)
 	ak := newAgentKey(t)
-
 	ptx := makeUpgradeCancelTx(t, ak, "v7.5.0", "test")
 	ptx.AgentSig = make([]byte, len(ptx.AgentSig))
-
 	result := app.processUpgradeCancel(ptx, 100, time.Now())
-
 	assert.Equal(t, uint32(48), result.Code)
 	assert.Contains(t, result.Log, "agent identity verification failed")
 }
 
-func TestProcessUpgradeCancel_MissingName(t *testing.T) {
-	app := setupTestApp(t)
-	ak := newAgentKey(t)
-
-	ptx := makeUpgradeCancelTx(t, ak, "", "no name")
-	result := app.processUpgradeCancel(ptx, 100, time.Now())
-
-	assert.Equal(t, uint32(48), result.Code)
-	assert.Contains(t, result.Log, "name is required")
-}
-
 // ---------------------------------------------------------------------------
-// UpgradeRevert
+// UpgradeRevert (still a stub — full revert logic lands later with snapshot
+// rollback wiring on the chain side)
 // ---------------------------------------------------------------------------
 
 func TestProcessUpgradeRevert_HappyPath(t *testing.T) {
 	app := setupTestApp(t)
 	ak := newAgentKey(t)
-
 	ptx := makeUpgradeRevertTx(t, ak, "v7.4.0-recovery", 6, 12345)
-	pendingBefore := len(app.pendingWrites)
-
 	result := app.processUpgradeRevert(ptx, 100, time.Now())
-
-	assert.Equal(t, uint32(0), result.Code, "happy path should return code 0, got log: %s", result.Log)
-	assert.Contains(t, result.Log, "pre-fork stub")
-	assert.Equal(t, pendingBefore, len(app.pendingWrites), "stub must NOT enqueue any pending writes")
+	assert.Equal(t, uint32(0), result.Code, "log: %s", result.Log)
 }
 
 func TestProcessUpgradeRevert_MissingPayload(t *testing.T) {
 	app := setupTestApp(t)
 	ptx := &tx.ParsedTx{Type: tx.TxTypeUpgradeRevert}
-
 	result := app.processUpgradeRevert(ptx, 100, time.Now())
-
-	assert.Equal(t, uint32(49), result.Code, "missing payload must return code 49")
+	assert.Equal(t, uint32(49), result.Code)
 	assert.Contains(t, result.Log, "missing upgrade revert payload")
 }
 
 func TestProcessUpgradeRevert_BadSignature(t *testing.T) {
 	app := setupTestApp(t)
 	ak := newAgentKey(t)
-
 	ptx := makeUpgradeRevertTx(t, ak, "v7.4.0", 6, 12345)
 	ptx.AgentSig = make([]byte, len(ptx.AgentSig))
-
 	result := app.processUpgradeRevert(ptx, 100, time.Now())
-
 	assert.Equal(t, uint32(49), result.Code)
 	assert.Contains(t, result.Log, "agent identity verification failed")
 }
@@ -244,36 +294,96 @@ func TestProcessUpgradeRevert_BadSignature(t *testing.T) {
 func TestProcessUpgradeRevert_MissingName(t *testing.T) {
 	app := setupTestApp(t)
 	ak := newAgentKey(t)
-
 	ptx := makeUpgradeRevertTx(t, ak, "", 6, 12345)
 	result := app.processUpgradeRevert(ptx, 100, time.Now())
-
 	assert.Equal(t, uint32(49), result.Code)
 	assert.Contains(t, result.Log, "name is required")
 }
 
 // ---------------------------------------------------------------------------
 // Dispatch: ensure processTx routes the new tx types to the new handlers.
-// This guards against a future refactor accidentally dropping a case.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// FinalizeBlock activation
+// ---------------------------------------------------------------------------
+
+func TestFinalizeBlock_ActivatesUpgradeAtHeight(t *testing.T) {
+	app := setupTestApp(t)
+	ak := newAgentKey(t)
+
+	// Seed a plan that activates at exactly height 150.
+	prop := makeUpgradeProposeTx(t, ak, "v7.5.0", 8, "", 50)
+	require.Equal(t, uint32(0), app.processUpgradePropose(prop, 100, time.Now()).Code)
+	plan, err := app.badgerStore.GetUpgradePlan()
+	require.NoError(t, err)
+	require.NotNil(t, plan)
+	// Floor delay is 200, so activation should land at 100 + 200 = 300.
+	require.Equal(t, int64(300), plan.ActivationHeight)
+
+	// Before activation: FinalizeBlock returns no ConsensusParamUpdates.
+	respBefore, err := app.FinalizeBlock(context.Background(), &abcitypes.RequestFinalizeBlock{
+		Height: 299,
+		Time:   time.Now(),
+	})
+	require.NoError(t, err)
+	assert.Nil(t, respBefore.ConsensusParamUpdates,
+		"pre-activation block should not emit ConsensusParamUpdates")
+
+	// At activation height: ConsensusParamUpdates.Version.App must be set.
+	respAt, err := app.FinalizeBlock(context.Background(), &abcitypes.RequestFinalizeBlock{
+		Height: 300,
+		Time:   time.Now(),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, respAt.ConsensusParamUpdates, "activation block must emit ConsensusParamUpdates")
+	require.NotNil(t, respAt.ConsensusParamUpdates.Version)
+	assert.Equal(t, uint64(8), respAt.ConsensusParamUpdates.Version.App)
+
+	// Plan must be cleared and the applied record persisted.
+	planAfter, err := app.badgerStore.GetUpgradePlan()
+	assert.ErrorIs(t, err, store.ErrNoUpgradePlan, "plan should be cleared post-activation")
+	assert.Nil(t, planAfter)
+
+	applied, err := app.badgerStore.GetAppliedUpgrade("v7.5.0")
+	require.NoError(t, err)
+	require.NotNil(t, applied)
+	assert.Equal(t, uint64(8), applied.TargetAppVersion)
+	assert.Equal(t, int64(300), applied.AppliedHeight)
+
+	// Subsequent blocks: no further ConsensusParamUpdates emitted.
+	respAfter, err := app.FinalizeBlock(context.Background(), &abcitypes.RequestFinalizeBlock{
+		Height: 301,
+		Time:   time.Now(),
+	})
+	require.NoError(t, err)
+	assert.Nil(t, respAfter.ConsensusParamUpdates,
+		"post-activation block should not emit ConsensusParamUpdates")
+}
 
 func TestProcessTx_RoutesUpgradeTypes(t *testing.T) {
 	app := setupTestApp(t)
 	ak := newAgentKey(t)
 
-	cases := []struct {
-		name string
-		ptx  *tx.ParsedTx
-	}{
-		{"propose", makeUpgradeProposeTx(t, ak, "v7.5.0", 7, "", 200)},
-		{"cancel", makeUpgradeCancelTx(t, ak, "v7.5.0", "")},
-		{"revert", makeUpgradeRevertTx(t, ak, "v7.4.0", 6, 1)},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			result := app.processTx(tc.ptx, 100, time.Now())
-			assert.Equal(t, uint32(0), result.Code, "dispatch should reach the stub and return code 0, got log: %s", result.Log)
-			assert.Contains(t, result.Log, "pre-fork stub")
-		})
-	}
+	// Propose first; subsequent cases use new app fixtures so they
+	// don't trip the "already pending" rejection on propose.
+	t.Run("propose", func(t *testing.T) {
+		a := setupTestApp(t)
+		ptx := makeUpgradeProposeTx(t, ak, "v7.5.0", 7, "", 200)
+		result := a.processTx(ptx, 100, time.Now())
+		assert.Equal(t, uint32(0), result.Code, "log: %s", result.Log)
+	})
+	t.Run("cancel", func(t *testing.T) {
+		// Cancel without a pending plan returns code 48, which still
+		// proves dispatch reached the cancel handler.
+		ptx := makeUpgradeCancelTx(t, ak, "v7.5.0", "")
+		result := app.processTx(ptx, 100, time.Now())
+		assert.Equal(t, uint32(48), result.Code, "dispatched but no plan to cancel: %s", result.Log)
+	})
+	t.Run("revert", func(t *testing.T) {
+		ptx := makeUpgradeRevertTx(t, ak, "v7.4.0", 6, 1)
+		result := app.processTx(ptx, 100, time.Now())
+		assert.Equal(t, uint32(0), result.Code, "log: %s", result.Log)
+	})
 }
+
