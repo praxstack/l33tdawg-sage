@@ -754,9 +754,36 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 				}
 			} else {
 				app.logger.Info().Str("domain", submit.DomainTag).Str("owner", agentID[:16]).Msg("auto-registered domain on first memory submit")
+				// Mirror the auto-register to the off-chain accessStore so
+				// GET /v1/domain/{name} on a mirror-backed deployment, plus
+				// any analytics/ops tooling reading Postgres directly, see
+				// the domain. Without this, the auto-register path leaves
+				// Badger and the mirror diverged from the moment of
+				// creation — the inverse of the v7.5.3 read-side fix.
+				app.pendingWrites = append(app.pendingWrites, pendingWrite{
+					writeType: "domain_register",
+					data: &store.DomainEntry{
+						DomainName:    submit.DomainTag,
+						OwnerAgentID:  agentID,
+						CreatedHeight: height,
+						CreatedAt:     blockTime,
+					},
+				})
 				// Also grant the owner full access
 				if grantErr := app.badgerStore.SetAccessGrant(submit.DomainTag, agentID, 2, 0, agentID); grantErr != nil {
 					app.logger.Error().Err(grantErr).Str("domain", submit.DomainTag).Msg("failed to auto-grant owner access")
+				} else {
+					app.pendingWrites = append(app.pendingWrites, pendingWrite{
+						writeType: "access_grant",
+						data: &store.AccessGrantEntry{
+							Domain:        submit.DomainTag,
+							GranteeID:     agentID,
+							GranterID:     agentID,
+							Level:         2,
+							CreatedHeight: height,
+							CreatedAt:     blockTime,
+						},
+					})
 				}
 			}
 		}

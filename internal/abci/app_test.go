@@ -900,6 +900,91 @@ func TestRegisterDomainRefusesOverwrite(t *testing.T) {
 	assert.Equal(t, bob, owner, "TransferDomain must replace ownership unconditionally")
 }
 
+// TestAutoRegisterMirrorsToOffchainStore verifies that processMemorySubmit's
+// auto-register branch buffers pendingWrites for both domain_register and
+// the owner's auto-grant — so the off-chain accessStore mirror stays in
+// sync with Badger from the moment the domain is created. Without these
+// pendingWrites the mirror is permanently incomplete for auto-registered
+// domains: GET /v1/domain/{name} on pre-v7.5.3 builds 404s, and any tool
+// reading Postgres directly (dashboards, analytics, ops scripts) misses
+// the row. The v7.5.3 read-side fix only patched the GET endpoint; this
+// test is the v7.5.4 write-side counterpart.
+func TestAutoRegisterMirrorsToOffchainStore(t *testing.T) {
+	app := setupTestApp(t)
+	alice := newAgentKey(t)
+	const domain = "pipeline.failures.boot2root"
+	const height = int64(42)
+	blockTime := time.Unix(1700000000, 0)
+
+	result := app.processMemorySubmit(makeMemorySubmitTx(t, alice, domain, "first-write"), height, blockTime)
+	require.Equal(t, uint32(0), result.Code, "auto-register submit must succeed: %s", result.Log)
+
+	owner, err := app.badgerStore.GetDomainOwner(domain)
+	require.NoError(t, err)
+	require.Equal(t, alice.id, owner, "Badger must record alice as owner")
+
+	level, _, granter, err := app.badgerStore.GetAccessGrant(domain, alice.id)
+	require.NoError(t, err)
+	require.Equal(t, uint8(2), level, "owner auto-grant must be level 2 (read+write)")
+	require.Equal(t, alice.id, granter)
+
+	var sawDomain, sawGrant bool
+	for _, pw := range app.pendingWrites {
+		switch pw.writeType {
+		case "domain_register":
+			entry, ok := pw.data.(*store.DomainEntry)
+			require.True(t, ok, "domain_register pending write must carry a *store.DomainEntry")
+			assert.Equal(t, domain, entry.DomainName)
+			assert.Equal(t, alice.id, entry.OwnerAgentID)
+			assert.Equal(t, height, entry.CreatedHeight)
+			assert.Equal(t, blockTime, entry.CreatedAt)
+			sawDomain = true
+		case "access_grant":
+			entry, ok := pw.data.(*store.AccessGrantEntry)
+			require.True(t, ok, "access_grant pending write must carry a *store.AccessGrantEntry")
+			assert.Equal(t, domain, entry.Domain)
+			assert.Equal(t, alice.id, entry.GranteeID)
+			assert.Equal(t, alice.id, entry.GranterID)
+			assert.Equal(t, uint8(2), entry.Level)
+			assert.Equal(t, height, entry.CreatedHeight)
+			assert.Equal(t, blockTime, entry.CreatedAt)
+			sawGrant = true
+		}
+	}
+	assert.True(t, sawDomain, "auto-register must buffer a domain_register pendingWrite for the mirror")
+	assert.True(t, sawGrant, "auto-register must buffer an access_grant pendingWrite for the owner's mirror grant")
+}
+
+// TestAutoRegisterRaceLoss_NoSpuriousMirrorWrites verifies that when a
+// second writer loses the auto-register race (Badger returns
+// ErrDomainAlreadyRegistered), no domain_register or access_grant
+// pendingWrites are emitted for that loser tx — only the winner's
+// auto-register populates the mirror.
+func TestAutoRegisterRaceLoss_NoSpuriousMirrorWrites(t *testing.T) {
+	app := setupTestApp(t)
+	alice := newAgentKey(t)
+	bob := newAgentKey(t)
+	const domain = "raced.domain"
+
+	r1 := app.processMemorySubmit(makeMemorySubmitTx(t, alice, domain, "alice-wins"), 1, time.Now())
+	require.Equal(t, uint32(0), r1.Code)
+
+	require.NoError(t, app.badgerStore.SetAccessGrant(domain, bob.id, 2, 0, alice.id))
+	beforeBob := len(app.pendingWrites)
+
+	r2 := app.processMemorySubmit(makeMemorySubmitTx(t, bob, domain, "bob-second"), 2, time.Now())
+	require.Equal(t, uint32(0), r2.Code, "bob with explicit grant must succeed: %s", r2.Log)
+
+	for _, pw := range app.pendingWrites[beforeBob:] {
+		assert.NotEqual(t, "domain_register", pw.writeType, "bob's tx must not re-mirror the domain registration")
+		if pw.writeType == "access_grant" {
+			entry, ok := pw.data.(*store.AccessGrantEntry)
+			require.True(t, ok)
+			assert.NotEqual(t, bob.id, entry.GranteeID, "bob's tx must not emit a self-grant pendingWrite — only the winning auto-register branch does")
+		}
+	}
+}
+
 // TestOwnedDomainStillGatesWrites verifies that NON-shared domains continue to enforce
 // ownership + access grants (i.e. the v6.5.5 fix didn't accidentally disable RBAC on owned domains).
 func TestOwnedDomainStillGatesWrites(t *testing.T) {
