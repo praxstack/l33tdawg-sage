@@ -328,6 +328,17 @@ func runServe() (rerr error) {
 	signingKeyForMigrate := loadNodeSigningKey(cometCfg.PrivValidatorKeyFile(), logger)
 	sageabci.MigrateAgentsOnChain(ctx, sqliteStore, badgerStore, cometRPC, signingKeyForMigrate, logger)
 
+	// v7.5 upgrade watchdog: auto-propose an UpgradePlan when the
+	// running binary's embedded TargetAppVersion exceeds the chain's
+	// current app version. No-op when target == current (the steady
+	// state for releases that don't change consensus rules).
+	startUpgradeWatchdog(ctx, upgradeWatchdogConfig{
+		BinaryVersion: version,
+		AgentKey:      loadOperatorAgentKey(logger),
+		CometRPC:      cometRPC,
+		Logger:        logger,
+	})
+
 	// Create REST server
 	restServer := rest.NewServer(cometRPC, sqliteStore, sqliteStore, badgerStore, health, logger, embedProvider)
 	restServer.SetSuppCache(app.SuppCache)
