@@ -331,6 +331,11 @@ func runSuperviseMode(args []string) int {
 		LauncherLog:  filepath.Join(home, "launcher.log"),
 		MaxCrashes:   *maxCrashes,
 		CrashWindow:  *crashWindow,
+		Restorer: &snapshotRestorer{
+			logf: func(format string, args ...interface{}) {
+				fmt.Fprintf(os.Stderr, "[supervise] "+format+"\n", args...)
+			},
+		},
 	}
 
 	ctx, cancel := signalContext(context.Background())
