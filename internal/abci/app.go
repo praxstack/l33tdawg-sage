@@ -254,6 +254,11 @@ type SageApp struct {
 	// SuppCache bridges REST→ABCI for off-chain data (embeddings, triples, provider).
 	// Nil in standalone ABCI mode without co-located REST API.
 	SuppCache *SupplementaryCache
+
+	// snapshotScheduler is the v7.5 Commit-tail snapshot trigger. nil
+	// disables scheduled snapshots; SetSnapshotScheduler wires one
+	// in after construction so existing NewSageApp callers don't break.
+	snapshotScheduler *SnapshotScheduler
 }
 
 // defaultFlushMaxRetries caps Commit's SQLITE_BUSY retry loop. At 30 tries
@@ -2387,6 +2392,14 @@ func (app *SageApp) Commit(_ context.Context, req *abcitypes.RequestCommit) (*ab
 	// Save state to BadgerDB only after the offchain flush has succeeded.
 	if err := SaveState(app.badgerStore, app.state); err != nil {
 		app.logger.Error().Err(err).Msg("failed to save state")
+	}
+
+	// v7.5 snapshot scheduler: post-SaveState is the only point where
+	// BadgerDB + SQLite + CometBFT-state-as-of-this-height are mutually
+	// consistent. Tick is fast (mutex + decision); any actual disk work
+	// runs on its own goroutine so Commit returns promptly.
+	if app.snapshotScheduler != nil {
+		app.snapshotScheduler.Tick(app.state.Height, app.state.AppHash)
 	}
 
 	return &abcitypes.ResponseCommit{}, nil

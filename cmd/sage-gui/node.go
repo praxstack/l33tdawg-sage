@@ -129,6 +129,11 @@ func runServe() (rerr error) {
 	}
 
 	vaultUnlocked := false
+	// vaultPassphrase is kept in scope past the unlock block so the
+	// v7.5 snapshot scheduler can use it as the at-rest encryption
+	// passphrase. Empty when encryption is off OR the vault wasn't
+	// unlocked at boot (e.g. launched from app icon with no terminal).
+	var vaultPassphrase string
 	if cfg.Encryption.Enabled {
 		if !vault.Exists(vaultKeyPath) {
 			return fmt.Errorf("encryption enabled but vault.key not found at %s — run 'sage-gui setup' first", vaultKeyPath)
@@ -158,6 +163,7 @@ func runServe() (rerr error) {
 			}
 			sqliteStore.SetVault(v)
 			vaultUnlocked = true
+			vaultPassphrase = passphrase
 			logger.Info().Msg("Synaptic Ledger unlocked — memories are encrypted at rest (AES-256-GCM)")
 		}
 	}
@@ -176,6 +182,31 @@ func runServe() (rerr error) {
 	}
 	app.Version = version
 	defer func() { _ = app.Close() }()
+
+	// v7.5 snapshot scheduler: anchor every 10k blocks and every 6h
+	// of wall time. Snapshots include the live binary so a rollback
+	// can re-exec without operator intervention. Encryption posture
+	// inherits the vault state. nil when intervals are zero (e.g.
+	// in tests/single-shot CLIs) — SageApp.Tick is nil-safe.
+	// Snapshot encryption inherits the vault posture: encrypt at rest
+	// when the vault is unlocked AND we know the passphrase. Without
+	// the passphrase (no-terminal boot path) we ship plaintext snapshots
+	// — better than skipping snapshots entirely, since rollback is
+	// only possible if anchors exist on disk.
+	snapEncrypted := vaultUnlocked && vaultPassphrase != ""
+	if sched := sageabci.NewSnapshotScheduler(sageabci.SnapshotSchedulerConfig{
+		DataDir:         cfg.DataDir,
+		BinaryVersion:   version,
+		VaultKeyPath:    vaultKeyPath,
+		VaultEncrypted:  snapEncrypted,
+		VaultPassphrase: vaultPassphrase,
+		HeightInterval:  10_000,
+		TimeInterval:    6 * time.Hour,
+		LiveBadger:      badgerStore.DB(),
+	}, logger); sched != nil {
+		app.SetSnapshotScheduler(sched)
+		logger.Info().Msg("v7.5 snapshot scheduler armed")
+	}
 
 	// Backfill FTS5 index for existing memories (only when vault is not active).
 	if ftsErr := sqliteStore.BackfillFTS(ctx); ftsErr != nil {
