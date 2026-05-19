@@ -80,10 +80,11 @@ func (s *Server) handleDeptRegister(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
 		return
 	}
-	txHash, err := s.broadcastTx(encoded)
+	txHash, err := s.broadcastTxCommit(encoded)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to broadcast dept register tx")
-		writeProblem(w, http.StatusInternalServerError, "Broadcast error", err.Error())
+		status, publicMsg := broadcastErrorPublic(err)
+		writeProblem(w, status, "Broadcast error", publicMsg)
 		return
 	}
 
@@ -196,10 +197,11 @@ func (s *Server) handleDeptAddMember(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
 		return
 	}
-	txHash, err := s.broadcastTx(encoded)
+	txHash, err := s.broadcastTxCommit(encoded)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to broadcast dept add member tx")
-		writeProblem(w, http.StatusInternalServerError, "Broadcast error", err.Error())
+		status, publicMsg := broadcastErrorPublic(err)
+		writeProblem(w, status, "Broadcast error", publicMsg)
 		return
 	}
 
@@ -244,10 +246,11 @@ func (s *Server) handleDeptRemoveMember(w http.ResponseWriter, r *http.Request) 
 		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
 		return
 	}
-	txHash, err := s.broadcastTx(encoded)
+	txHash, err := s.broadcastTxCommit(encoded)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to broadcast dept remove member tx")
-		writeProblem(w, http.StatusInternalServerError, "Broadcast error", err.Error())
+		status, publicMsg := broadcastErrorPublic(err)
+		writeProblem(w, status, "Broadcast error", publicMsg)
 		return
 	}
 

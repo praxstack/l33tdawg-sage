@@ -144,7 +144,7 @@ func (s *Server) handleVoteMemory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	txHash, err := s.broadcastTx(encoded)
+	txHash, err := s.broadcastTxCommit(encoded)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to broadcast vote tx")
 		status, publicMsg := broadcastErrorPublic(err); writeProblem(w, status, "Broadcast error", publicMsg)
@@ -219,7 +219,7 @@ func (s *Server) handleChallengeMemory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	txHash, err := s.broadcastTx(encoded)
+	txHash, err := s.broadcastTxCommit(encoded)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to broadcast challenge tx")
 		status, publicMsg := broadcastErrorPublic(err); writeProblem(w, status, "Broadcast error", publicMsg)
@@ -295,7 +295,7 @@ func (s *Server) handleForgetMemory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	txHash, err := s.broadcastTx(encoded)
+	txHash, err := s.broadcastTxCommit(encoded)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to broadcast forget tx")
 		status, publicMsg := broadcastErrorPublic(err); writeProblem(w, status, "Broadcast error", publicMsg)
@@ -365,7 +365,7 @@ func (s *Server) handleCorroborateMemory(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	txHash, err := s.broadcastTx(encoded)
+	txHash, err := s.broadcastTxCommit(encoded)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to broadcast corroborate tx")
 		status, publicMsg := broadcastErrorPublic(err); writeProblem(w, status, "Broadcast error", publicMsg)

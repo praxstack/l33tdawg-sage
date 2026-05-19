@@ -92,10 +92,11 @@ func (s *Server) handleAccessRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	txHash, err := s.broadcastTx(encoded)
+	txHash, err := s.broadcastTxCommit(encoded)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to broadcast access request tx")
-		writeProblem(w, http.StatusInternalServerError, "Broadcast error", err.Error())
+		status, publicMsg := broadcastErrorPublic(err)
+		writeProblem(w, status, "Broadcast error", publicMsg)
 		return
 	}
 
@@ -158,10 +159,11 @@ func (s *Server) handleAccessGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	txHash, err := s.broadcastTx(encoded)
+	txHash, err := s.broadcastTxCommit(encoded)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to broadcast access grant tx")
-		writeProblem(w, http.StatusInternalServerError, "Broadcast error", err.Error())
+		status, publicMsg := broadcastErrorPublic(err)
+		writeProblem(w, status, "Broadcast error", publicMsg)
 		return
 	}
 
@@ -219,10 +221,11 @@ func (s *Server) handleAccessRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	txHash, err := s.broadcastTx(encoded)
+	txHash, err := s.broadcastTxCommit(encoded)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to broadcast access revoke tx")
-		writeProblem(w, http.StatusInternalServerError, "Broadcast error", err.Error())
+		status, publicMsg := broadcastErrorPublic(err)
+		writeProblem(w, status, "Broadcast error", publicMsg)
 		return
 	}
 
@@ -299,10 +302,11 @@ func (s *Server) handleDomainRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	txHash, err := s.broadcastTx(encoded)
+	txHash, err := s.broadcastTxCommit(encoded)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to broadcast domain register tx")
-		writeProblem(w, http.StatusInternalServerError, "Broadcast error", err.Error())
+		status, publicMsg := broadcastErrorPublic(err)
+		writeProblem(w, status, "Broadcast error", publicMsg)
 		return
 	}
 

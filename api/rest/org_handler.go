@@ -96,10 +96,11 @@ func (s *Server) handleOrgRegister(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
 		return
 	}
-	txHash, err := s.broadcastTx(encoded)
+	txHash, err := s.broadcastTxCommit(encoded)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to broadcast org register tx")
-		writeProblem(w, http.StatusInternalServerError, "Broadcast error", err.Error())
+		status, publicMsg := broadcastErrorPublic(err)
+		writeProblem(w, status, "Broadcast error", publicMsg)
 		return
 	}
 
@@ -250,10 +251,11 @@ func (s *Server) handleOrgAddMember(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
 		return
 	}
-	txHash, err := s.broadcastTx(encoded)
+	txHash, err := s.broadcastTxCommit(encoded)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to broadcast org add member tx")
-		writeProblem(w, http.StatusInternalServerError, "Broadcast error", err.Error())
+		status, publicMsg := broadcastErrorPublic(err)
+		writeProblem(w, status, "Broadcast error", publicMsg)
 		return
 	}
 
@@ -296,10 +298,11 @@ func (s *Server) handleOrgRemoveMember(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
 		return
 	}
-	txHash, err := s.broadcastTx(encoded)
+	txHash, err := s.broadcastTxCommit(encoded)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to broadcast org remove member tx")
-		writeProblem(w, http.StatusInternalServerError, "Broadcast error", err.Error())
+		status, publicMsg := broadcastErrorPublic(err)
+		writeProblem(w, status, "Broadcast error", publicMsg)
 		return
 	}
 
@@ -353,10 +356,11 @@ func (s *Server) handleOrgSetClearance(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
 		return
 	}
-	txHash, err := s.broadcastTx(encoded)
+	txHash, err := s.broadcastTxCommit(encoded)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to broadcast org set clearance tx")
-		writeProblem(w, http.StatusInternalServerError, "Broadcast error", err.Error())
+		status, publicMsg := broadcastErrorPublic(err)
+		writeProblem(w, status, "Broadcast error", publicMsg)
 		return
 	}
 
@@ -428,10 +432,11 @@ func (s *Server) handleFederationPropose(w http.ResponseWriter, r *http.Request)
 		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
 		return
 	}
-	txHash, err := s.broadcastTx(encoded)
+	txHash, err := s.broadcastTxCommit(encoded)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to broadcast federation propose tx")
-		writeProblem(w, http.StatusInternalServerError, "Broadcast error", err.Error())
+		status, publicMsg := broadcastErrorPublic(err)
+		writeProblem(w, status, "Broadcast error", publicMsg)
 		return
 	}
 
@@ -488,10 +493,11 @@ func (s *Server) handleFederationApprove(w http.ResponseWriter, r *http.Request)
 		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
 		return
 	}
-	txHash, err := s.broadcastTx(encoded)
+	txHash, err := s.broadcastTxCommit(encoded)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to broadcast federation approve tx")
-		writeProblem(w, http.StatusInternalServerError, "Broadcast error", err.Error())
+		status, publicMsg := broadcastErrorPublic(err)
+		writeProblem(w, status, "Broadcast error", publicMsg)
 		return
 	}
 
@@ -553,10 +559,11 @@ func (s *Server) handleFederationRevoke(w http.ResponseWriter, r *http.Request) 
 		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
 		return
 	}
-	txHash, err := s.broadcastTx(encoded)
+	txHash, err := s.broadcastTxCommit(encoded)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to broadcast federation revoke tx")
-		writeProblem(w, http.StatusInternalServerError, "Broadcast error", err.Error())
+		status, publicMsg := broadcastErrorPublic(err)
+		writeProblem(w, status, "Broadcast error", publicMsg)
 		return
 	}
 

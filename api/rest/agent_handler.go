@@ -162,10 +162,11 @@ func (s *Server) handleAgentUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	txHash, err := s.broadcastTx(encoded)
+	txHash, err := s.broadcastTxCommit(encoded)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to broadcast agent update tx")
-		writeProblem(w, http.StatusInternalServerError, "Broadcast error", err.Error())
+		status, publicMsg := broadcastErrorPublic(err)
+		writeProblem(w, status, "Broadcast error", publicMsg)
 		return
 	}
 
@@ -200,7 +201,7 @@ func (s *Server) reconcileAgentName(agentID, name, bio string) {
 		s.logger.Warn().Err(err).Str("agent_id", agentID).Msg("reconcile: failed to encode agent name update")
 		return
 	}
-	if _, err := s.broadcastTx(encoded); err != nil {
+	if _, err := s.broadcastTxCommit(encoded); err != nil {
 		s.logger.Warn().Err(err).Str("agent_id", agentID).Msg("reconcile: failed to broadcast agent name update")
 		return
 	}

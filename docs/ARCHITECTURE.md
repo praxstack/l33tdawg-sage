@@ -518,6 +518,38 @@ Beyond the operational access levels (0-4) used for read/write/validate/admin ga
 
 Memories inherit the clearance level of the domain they are submitted to. An agent must have a clearance level >= the domain's clearance level to interact with memories in that domain.
 
+### Domain Ownership (First-Write-Wins)
+
+Domains have an on-chain owner. When an agent submits a memory to a domain that does not yet exist, the chain **auto-registers the domain with that agent as the owner** and grants the owner a level-2 access entry. Subsequent writes from *other* agents to the same domain go through `HasAccessMultiOrg`, which requires one of:
+
+- A direct `access_grant` issued by the owner — `POST /v1/access/grant`
+- Same-org clearance — both agents belong to the same org and the writer's clearance covers the memory's classification
+- An active federation between the writer's org and the owner's org
+
+Without one of those paths, the tx is rejected at `FinalizeBlock` with `code 11: access denied: agent <id> has no write access to domain <name>`. This is intentional — it prevents a hostile or buggy agent from poisoning another agent's namespace by impersonating the domain.
+
+**Shared domains** (no single owner, writable by any authenticated agent, never auto-registered):
+
+- Exact match: `general`, `self`, `meta`
+- Prefix match: `sage-*` (added in v6.8.2 to cover cross-cutting SAGE-meta domains like `sage-debugging`, `sage-development`, `sage-rbac-debug`)
+
+If you want a domain that multiple agents write to freely, either give it a name in the shared set, or use the cross-agent write recipe below.
+
+#### Cross-agent write recipe
+
+When agent A needs to write to a domain that agent B owns (or that hasn't been written to yet), the safe bootstrap sequence is:
+
+1. **Determine the real on-chain owner first.** The "intended" owner in your application code may not be the actual owner — whichever agent wrote first captured the domain. Probe ownership with `GET /v1/domain/{name}` before issuing any grant. If no owner exists yet, step 2 will claim it; if a different agent than expected owns it, grants must come from *that* agent's signing key.
+2. **For unclaimed domains**, the agent that will act as owner issues `POST /v1/domain/register` to claim the namespace explicitly. This avoids the race where a stray first-write captures ownership unpredictably.
+3. **Once ownership is settled**, the owner issues `POST /v1/access/grant` granting the writer level 2 (read+write). One grant per concrete domain name.
+4. **The writer can now submit memories** to that domain. Repeat steps 2–3 for each subdomain you care about.
+
+#### Known limitations (v7.1)
+
+- **Grants do not cascade to descendant domains.** A grant on `pipeline.failures` does not authorize writes to `pipeline.failures.pwn_buffer_overflow`. Each concrete subdomain that other agents will write to needs its own explicit `register_domain` + `access_grant` pair. Ancestor-walk access checks (symmetric with the registration path) are queued for a future release behind the upgrade-machinery work.
+- **`POST /v1/access/grant` and other access-control endpoints currently return HTTP 201 even if the underlying tx is later rejected at `FinalizeBlock`** (e.g. when the supposed granter is not the on-chain owner). Always verify a grant landed by calling `GET /v1/access/grants/{agent_id}` and checking that the domain appears. A bootstrap script should probe-write a sentinel from each candidate agent to detect the real owner before issuing grants from a different identity. Migrating these handlers to commit-mode broadcasts so `FinalizeBlock` rejections surface as HTTP 403 is on the v7.1.x patch track.
+- **Recovery from a lost-owner domain is not yet automated.** If the owner agent's key is lost or the agent is retired, the domain becomes write-locked with no admin override. A `domain_reassign` governance primitive is planned for the same release as the ancestor-walk fix.
+
 ### Domain Access + Clearance Interaction
 
 Access to a memory requires passing three checks, evaluated in order:
