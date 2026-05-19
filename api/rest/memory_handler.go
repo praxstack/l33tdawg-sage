@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -1240,6 +1241,29 @@ func (s *Server) broadcastTxCommit(txBytes []byte) (string, error) {
 	return hash, err
 }
 
+// defaultBroadcastTxCommitTimeout bounds how long broadcastTxCommit
+// waits for /broadcast_tx_commit to return. CometBFT's own server-
+// side BroadcastTxCommitMaxWaitMs defaults to 10s; setting the client
+// equal to that has no headroom — under any consensus slowness or
+// mempool backlog the client times out before the server gets a
+// chance to reply with the genuine FinalizeBlock result.
+//
+// 60s matches the typical Cosmos-ecosystem client-side default and
+// gives ~10× the quorum-mode TimeoutCommit (3s) of room. Operators
+// who run unusually slow consensus (single-validator with heavy
+// validators, network-partitioned multi-node) can override via the
+// SAGE_TX_COMMIT_TIMEOUT_MS environment variable.
+const defaultBroadcastTxCommitTimeout = 60 * time.Second
+
+func broadcastTxCommitTimeout() time.Duration {
+	if v := os.Getenv("SAGE_TX_COMMIT_TIMEOUT_MS"); v != "" {
+		if ms, err := strconv.Atoi(v); err == nil && ms > 0 {
+			return time.Duration(ms) * time.Millisecond
+		}
+	}
+	return defaultBroadcastTxCommitTimeout
+}
+
 // broadcastTxCommitWithHeight is broadcastTxCommit plus the committed block
 // height. Callers that need the on-chain height in their response (e.g.
 // agent registration telemetry) use this variant; everything else stays
@@ -1248,7 +1272,7 @@ func (s *Server) broadcastTxCommitWithHeight(txBytes []byte) (string, int64, err
 	txHex := hex.EncodeToString(txBytes)
 	url := fmt.Sprintf("%s/broadcast_tx_commit?tx=0x%s", s.cometbftRPC, txHex)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), broadcastTxCommitTimeout())
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil) // #nosec G107 -- internal CometBFT RPC
