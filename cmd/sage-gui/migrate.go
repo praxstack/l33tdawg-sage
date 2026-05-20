@@ -171,7 +171,23 @@ func resetChainState(dataDir, badgerPath, cometHome, sqlitePath, lastVersion str
 				return fmt.Errorf("write backup: %w", writeErr)
 			}
 		}
-		fmt.Fprintf(os.Stderr, "  Backed up memories to %s\n", backupPath)
+		// Verify the backup actually landed before proceeding to wipe
+		// derived chain state. If the backup is missing or suspiciously
+		// small relative to the source, abort — the live sage.db is
+		// still intact at this point, so refusing here means the user
+		// keeps every memory.
+		srcInfo, srcStatErr := os.Stat(sqlitePath)
+		if srcStatErr != nil {
+			return fmt.Errorf("stat live sqlite for backup verify: %w", srcStatErr)
+		}
+		backupInfo, backupStatErr := os.Stat(backupPath)
+		if backupStatErr != nil {
+			return fmt.Errorf("stat backup for verify: %w", backupStatErr)
+		}
+		if verifyErr := verifyBackupSize(srcInfo.Size(), backupInfo.Size(), backupPath); verifyErr != nil {
+			return verifyErr
+		}
+		fmt.Fprintf(os.Stderr, "  Backed up memories to %s (%d bytes)\n", backupPath, backupInfo.Size())
 	}
 
 	// Step 2: Wipe BadgerDB (on-chain state — will be rebuilt)
@@ -351,4 +367,26 @@ func vacuumBackup(srcPath, dstPath string) error {
 
 func stampVersion(path string) error {
 	return os.WriteFile(path, []byte(version+"\n"), 0600)
+}
+
+// verifyBackupSize gates the destructive reset on the SQLite backup
+// surviving as a sane file. Refuses to proceed if the backup is empty or
+// drops below 95% of the source size (VACUUM INTO can legitimately shrink
+// a fragmented DB by a few percent; anything beyond that is a partial-
+// write / disk-full / silent-truncation symptom). Sources of zero bytes
+// pass trivially — there are no memories to lose. Extracted from the
+// reset path so the policy is unit-testable in isolation from the file
+// system operations that produce the sizes.
+func verifyBackupSize(srcSize, backupSize int64, backupPath string) error {
+	if srcSize == 0 {
+		return nil
+	}
+	if backupSize == 0 {
+		return fmt.Errorf("backup file is empty at %s — refusing to wipe chain state with no usable backup", backupPath)
+	}
+	minAcceptable := (srcSize * 19) / 20
+	if backupSize < minAcceptable {
+		return fmt.Errorf("backup at %s is %d bytes; source sqlite is %d bytes (need ≥ %d) — refusing to wipe chain state with a suspect backup", backupPath, backupSize, srcSize, minAcceptable)
+	}
+	return nil
 }

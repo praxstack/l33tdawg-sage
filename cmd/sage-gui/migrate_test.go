@@ -381,6 +381,55 @@ func TestMigrateOnUpgrade_DevVersion(t *testing.T) {
 	}
 }
 
+// TestVerifyBackupSize_EmptySourcePasses: zero-byte source has no memories
+// to lose, so backup verification is trivially satisfied.
+func TestVerifyBackupSize_EmptySourcePasses(t *testing.T) {
+	if err := verifyBackupSize(0, 0, "/tmp/x"); err != nil {
+		t.Errorf("empty source must pass, got: %v", err)
+	}
+	if err := verifyBackupSize(0, 100, "/tmp/x"); err != nil {
+		t.Errorf("empty source with non-empty backup must pass, got: %v", err)
+	}
+}
+
+// TestVerifyBackupSize_EmptyBackupOfNonEmptySourceRejects: a backup that
+// landed at 0 bytes for a populated source is a clear partial-write or
+// silent-truncation signal — must refuse the wipe.
+func TestVerifyBackupSize_EmptyBackupOfNonEmptySourceRejects(t *testing.T) {
+	err := verifyBackupSize(1<<20, 0, "/tmp/backup.db")
+	if err == nil {
+		t.Fatal("expected reject when backup is empty but source is non-empty")
+	}
+	if !strings.Contains(err.Error(), "empty") {
+		t.Errorf("error must mention 'empty', got: %v", err)
+	}
+}
+
+// TestVerifyBackupSize_SuspectShrinkageRejects: a backup that's only ~50%
+// of source size cannot be explained by VACUUM compaction — refuse.
+func TestVerifyBackupSize_SuspectShrinkageRejects(t *testing.T) {
+	srcSize := int64(1 << 20)
+	tooSmall := srcSize / 2
+	err := verifyBackupSize(srcSize, tooSmall, "/tmp/backup.db")
+	if err == nil {
+		t.Fatalf("expected reject when backup is %d bytes vs source %d", tooSmall, srcSize)
+	}
+	if !strings.Contains(err.Error(), "suspect") {
+		t.Errorf("error must mention 'suspect', got: %v", err)
+	}
+}
+
+// TestVerifyBackupSize_VacuumCompactionAccepted: VACUUM INTO can shrink a
+// fragmented DB by a few percent. Anything within 5% of source is fine.
+func TestVerifyBackupSize_VacuumCompactionAccepted(t *testing.T) {
+	srcSize := int64(1 << 20)
+	for _, backupSize := range []int64{srcSize, srcSize - srcSize/100, (srcSize * 19) / 20} {
+		if err := verifyBackupSize(srcSize, backupSize, "/tmp/backup.db"); err != nil {
+			t.Errorf("legitimate post-VACUUM backup of %d bytes (source %d) must pass, got: %v", backupSize, srcSize, err)
+		}
+	}
+}
+
 func TestReadForkVersion_AbsentFileReturnsZero(t *testing.T) {
 	tmpDir := t.TempDir()
 	if got := readForkVersion(filepath.Join(tmpDir, "nope.txt")); got != 0 {
