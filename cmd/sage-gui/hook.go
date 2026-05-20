@@ -82,7 +82,7 @@ func runHookSessionStart() error {
 	type item struct {
 		domain, mtype, content string
 	}
-	var items []item
+	items := make([]item, 0, len(payload.Memories)+len(payload.Results))
 	for _, m := range payload.Memories {
 		items = append(items, item{firstNonEmpty(m.DomainTag, m.Domain, "general"),
 			firstNonEmpty(m.MemoryType, m.Type, "observation"),
