@@ -257,23 +257,7 @@ func runMCPInstall() error {
 
 	mcpPath := filepath.Join(projectDir, ".mcp.json")
 
-	// Check if .mcp.json already exists with sage configured
-	alreadyConfigured := false
-	if _, statErr := os.Stat(mcpPath); statErr == nil {
-		existing, readErr := os.ReadFile(mcpPath)
-		if readErr == nil {
-			var config map[string]any
-			if json.Unmarshal(existing, &config) == nil {
-				if servers, ok := config["mcpServers"].(map[string]any); ok {
-					if _, hasSage := servers["sage"]; hasSage {
-						alreadyConfigured = true
-					}
-				}
-			}
-		}
-	}
-
-	if alreadyConfigured {
+	if mcpHasSage(projectDir) {
 		fmt.Println("✓ SAGE MCP is already configured in this project.")
 		fmt.Printf("  .mcp.json: %s (ok)\n", mcpPath)
 		fmt.Println()
@@ -480,6 +464,7 @@ func healHooks(projectDir, hookDir string) error {
 	expected := hookScriptSet()
 	needsRewrite := false
 	hasBinRef := false
+	anyScriptExisted := false
 	for name := range expected {
 		path := filepath.Join(hookDir, name)
 		data, readErr := os.ReadFile(path) //nolint:gosec // path is inside project's .claude/hooks
@@ -487,6 +472,7 @@ func healHooks(projectDir, hookDir string) error {
 			needsRewrite = true
 			continue
 		}
+		anyScriptExisted = true
 		if strings.Contains(string(data), binPath) {
 			hasBinRef = true
 		}
@@ -528,12 +514,35 @@ func healHooks(projectDir, hookDir string) error {
 		return fmt.Errorf("write settings: %w", writeErr)
 	}
 
-	if legacyDetected {
+	switch {
+	case legacyDetected:
 		fmt.Fprintf(os.Stderr, "SAGE: migrated legacy 2-script hooks to direct-write 5-script set\n")
-	} else {
+	case !anyScriptExisted:
+		fmt.Fprintf(os.Stderr, "SAGE: installed Claude Code hooks (first-time on this project)\n")
+	default:
 		fmt.Fprintf(os.Stderr, "SAGE: refreshed Claude Code hook scripts\n")
 	}
 	return nil
+}
+
+// mcpHasSage reports whether .mcp.json in projectDir registers a "sage" server.
+// Used as the gate for installing project-side artifacts (hooks, CLAUDE.md) on
+// self-heal: if SAGE isn't configured here, don't touch the project.
+func mcpHasSage(projectDir string) bool {
+	data, err := os.ReadFile(filepath.Join(projectDir, ".mcp.json"))
+	if err != nil {
+		return false
+	}
+	var config map[string]any
+	if json.Unmarshal(data, &config) != nil {
+		return false
+	}
+	servers, ok := config["mcpServers"].(map[string]any)
+	if !ok {
+		return false
+	}
+	_, hasSage := servers["sage"]
+	return hasSage
 }
 
 // sageClaudeMDBlock is the SAGE section injected into CLAUDE.md.
@@ -810,9 +819,20 @@ func selfHealProject(projectDir, sageHome string) {
 		hookDirExists = false
 	}
 
-	if hookDirExists {
+	switch {
+	case hookDirExists:
 		if err := healHooks(projectDir, hookDir); err != nil {
 			fmt.Fprintf(os.Stderr, "SAGE: hook self-heal: %v\n", err)
+		}
+	case mcpHasSage(projectDir):
+		// Project is SAGE-enabled but predates v7.6.0 hooks. Create the
+		// hooks dir (and parent .claude/) so healHooks can template the
+		// fresh set in. This is what makes existing projects pick up the
+		// new hook contract just by restarting the agent session.
+		if err := os.MkdirAll(hookDir, 0755); err != nil {
+			fmt.Fprintf(os.Stderr, "SAGE: create hooks dir: %v\n", err)
+		} else if err := healHooks(projectDir, hookDir); err != nil {
+			fmt.Fprintf(os.Stderr, "SAGE: install hooks: %v\n", err)
 		}
 	}
 	selfHealCodex(projectDir, sageHome)

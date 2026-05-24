@@ -269,12 +269,63 @@ func TestSelfHeal_DoesNotCreateHooksDir(t *testing.T) {
 	projectDir := t.TempDir()
 	sageHome := t.TempDir()
 
-	// No .claude/hooks/ dir = never installed hooks
+	// No .mcp.json + no .claude/hooks = project isn't SAGE-enabled at all.
 	selfHealProject(projectDir, sageHome)
 
 	// Should NOT create hooks dir uninvited
 	_, err := os.Stat(filepath.Join(projectDir, ".claude", "hooks"))
 	assert.True(t, os.IsNotExist(err), "should not create hooks dir if it doesn't exist")
+}
+
+// v7.6.2: when .mcp.json registers sage but .claude/hooks doesn't exist (typical
+// for projects that adopted SAGE before v7.6.0 shipped hooks), self-heal must
+// install the fresh 5-script set so the next agent session boots with hooks.
+func TestSelfHeal_InstallsHooksWhenSageConfiguredButHooksMissing(t *testing.T) {
+	projectDir := t.TempDir()
+	sageHome := t.TempDir()
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(projectDir, ".mcp.json"),
+		[]byte(`{"mcpServers":{"sage":{"command":"sage-gui","args":["mcp"]}}}`),
+		0644,
+	))
+
+	selfHealProject(projectDir, sageHome)
+
+	hookDir := filepath.Join(projectDir, ".claude", "hooks")
+	for _, name := range []string{
+		"sage-session-start.sh",
+		"sage-session-end.sh",
+		"sage-pre-compact.sh",
+		"sage-user-prompt.sh",
+		"sage-stop.sh",
+	} {
+		_, err := os.Stat(filepath.Join(hookDir, name))
+		assert.NoError(t, err, "%s should be installed on first-time self-heal", name)
+	}
+
+	settingsData, err := os.ReadFile(filepath.Join(projectDir, ".claude", "settings.json"))
+	require.NoError(t, err)
+	assert.Contains(t, string(settingsData), "sage-session-start.sh")
+	assert.Contains(t, string(settingsData), "SessionStart")
+}
+
+// Negative case for the v7.6.2 gate: .mcp.json without sage is not enough to
+// trigger hook install. Protects users who use .mcp.json for other MCP servers.
+func TestSelfHeal_DoesNotInstallHooksWhenMCPLacksSage(t *testing.T) {
+	projectDir := t.TempDir()
+	sageHome := t.TempDir()
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(projectDir, ".mcp.json"),
+		[]byte(`{"mcpServers":{"other":{"command":"other-mcp"}}}`),
+		0644,
+	))
+
+	selfHealProject(projectDir, sageHome)
+
+	_, err := os.Stat(filepath.Join(projectDir, ".claude", "hooks"))
+	assert.True(t, os.IsNotExist(err), "should not install hooks when .mcp.json doesn't register sage")
 }
 
 func TestSelfHeal_CreatesMemoryModeFlag(t *testing.T) {
