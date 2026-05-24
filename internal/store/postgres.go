@@ -1324,6 +1324,10 @@ func (s *PostgresStore) ListAgentTags(_ context.Context, _ string) ([]TagCount, 
 	return nil, fmt.Errorf("ListAgentTags not implemented for PostgresStore")
 }
 
+func (s *PostgresStore) ListAgentDomains(_ context.Context, _ string) ([]string, error) {
+	return nil, fmt.Errorf("ListAgentDomains not implemented for PostgresStore")
+}
+
 func (s *PostgresStore) ReassignMemoriesByTag(_ context.Context, _, _, _ string) (int64, error) {
 	return 0, fmt.Errorf("ReassignMemoriesByTag not implemented for PostgresStore")
 }

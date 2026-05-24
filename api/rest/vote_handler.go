@@ -11,6 +11,7 @@ import (
 
 	"github.com/l33tdawg/sage/api/rest/middleware"
 	"github.com/l33tdawg/sage/internal/metrics"
+	"github.com/l33tdawg/sage/internal/poe"
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tx"
 )
@@ -67,9 +68,13 @@ type CorroborateResponse struct {
 
 // AgentProfileResponse is the JSON body for GET /v1/agent/me.
 type AgentProfileResponse struct {
-	AgentID   string  `json:"agent_id"`
-	PoEWeight float64 `json:"poe_weight"`
-	VoteCount int64   `json:"vote_count"`
+	AgentID       string   `json:"agent_id"`
+	DisplayName   string   `json:"display_name"`
+	Domains       []string `json:"domains"`
+	PoEWeight     float64  `json:"poe_weight"`
+	VoteCount     int64    `json:"vote_count"`
+	Accuracy      float64  `json:"accuracy"`
+	OnChainHeight int64    `json:"on_chain_height"`
 }
 
 // PendingMemoriesResponse is the JSON body for GET /v1/validator/pending.
@@ -398,22 +403,36 @@ func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	score, err := s.scoreStore.GetScore(r.Context(), agentID)
-	if err != nil {
-		// Agent exists (authenticated) but may not have a score yet.
-		writeJSON(w, http.StatusOK, AgentProfileResponse{
-			AgentID:   agentID,
-			PoEWeight: 0,
-			VoteCount: 0,
-		})
-		return
+	resp := AgentProfileResponse{
+		AgentID: agentID,
+		Domains: []string{},
 	}
 
-	writeJSON(w, http.StatusOK, AgentProfileResponse{
-		AgentID:   agentID,
-		PoEWeight: score.CurrentWeight,
-		VoteCount: score.VoteCount,
-	})
+	if s.agentStore != nil {
+		if agent, err := s.agentStore.GetAgent(r.Context(), agentID); err == nil && agent != nil {
+			resp.DisplayName = agent.Name
+			resp.OnChainHeight = agent.OnChainHeight
+		}
+		if domains, err := s.agentStore.ListAgentDomains(r.Context(), agentID); err == nil && len(domains) > 0 {
+			resp.Domains = domains
+		}
+	}
+
+	// EWMA accuracy: cold-start prior (0.5) when no score record exists, else
+	// reconstruct the tracker from the persisted WeightedSum/WeightDenom/Count.
+	resp.Accuracy = (&poe.EWMATracker{}).Accuracy()
+	if score, err := s.scoreStore.GetScore(r.Context(), agentID); err == nil && score != nil {
+		resp.PoEWeight = score.CurrentWeight
+		resp.VoteCount = score.VoteCount
+		tracker := &poe.EWMATracker{
+			WeightedSum: score.WeightedSum,
+			WeightDenom: score.WeightDenom,
+			Count:       score.VoteCount,
+		}
+		resp.Accuracy = tracker.Accuracy()
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleGetPending handles GET /v1/validator/pending.

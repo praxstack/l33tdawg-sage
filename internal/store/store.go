@@ -365,6 +365,9 @@ type AgentStore interface {
 	ReassignMemories(ctx context.Context, sourceAgentID, targetAgentID string) (int64, error)
 	// ListAgentTags returns all tags used by memories belonging to a specific agent
 	ListAgentTags(ctx context.Context, agentID string) ([]TagCount, error)
+	// ListAgentDomains returns the distinct domain_tag values across the
+	// agent's memories, ordered by participation frequency (most-active first).
+	ListAgentDomains(ctx context.Context, agentID string) ([]string, error)
 	// ReassignMemoriesByTag moves memories with a specific tag from source to target agent
 	ReassignMemoriesByTag(ctx context.Context, sourceAgentID, targetAgentID, tag string) (int64, error)
 	// ReassignMemoriesByDomain moves memories in a specific domain from source to target agent

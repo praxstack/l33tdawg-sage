@@ -387,18 +387,19 @@ components:
         - poe_weight
         - vote_count
         - accuracy
-        - registered_at
+        - on_chain_height
       properties:
         agent_id:
           type: string
           description: Hex-encoded Ed25519 public key.
         display_name:
           type: string
+          description: Mutable display name (GUI-editable).
         domains:
           type: array
           items:
             type: string
-          description: Domain tags the agent has participated in.
+          description: Distinct domain tags the agent has submitted memories under, ordered by participation frequency.
         poe_weight:
           type: number
           format: double
@@ -411,10 +412,11 @@ components:
           format: double
           minimum: 0
           maximum: 1
-          description: EWMA accuracy score.
-        registered_at:
-          type: string
-          format: date-time
+          description: Cold-start-blended EWMA accuracy score (0.5 prior, transitions toward the real score after K_min=10 observations).
+        on_chain_height:
+          type: integer
+          format: int64
+          description: Block height at which the agent was registered on-chain (0 for legacy / unregistered).
 
     AgentRegisterRequest:
       type: object

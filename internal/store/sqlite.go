@@ -2610,6 +2610,30 @@ func (s *SQLiteStore) ListAgentTags(ctx context.Context, agentID string) ([]TagC
 	return tags, rows.Err()
 }
 
+func (s *SQLiteStore) ListAgentDomains(ctx context.Context, agentID string) ([]string, error) {
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT domain_tag, COUNT(*) as cnt
+		FROM memories
+		WHERE submitting_agent = ? AND domain_tag != ''
+		GROUP BY domain_tag
+		ORDER BY cnt DESC, domain_tag ASC`, agentID)
+	if err != nil {
+		return nil, fmt.Errorf("list agent domains: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var domains []string
+	for rows.Next() {
+		var domain string
+		var cnt int64
+		if err := rows.Scan(&domain, &cnt); err != nil {
+			return nil, fmt.Errorf("scan agent domain: %w", err)
+		}
+		domains = append(domains, domain)
+	}
+	return domains, rows.Err()
+}
+
 func (s *SQLiteStore) ReassignMemoriesByTag(ctx context.Context, sourceAgentID, targetAgentID, tag string) (int64, error) {
 	var count int64
 

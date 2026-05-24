@@ -791,6 +791,62 @@ func TestGetAgent_NoScore(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, agentID, resp.AgentID)
 	assert.Equal(t, float64(0), resp.PoEWeight)
+	// Cold-start prior when no score exists.
+	assert.Equal(t, 0.5, resp.Accuracy)
+	// Domains is serialised as an empty array, never null.
+	assert.NotNil(t, resp.Domains)
+	assert.Empty(t, resp.Domains)
+}
+
+// v7.7.x AgentProfile fill-in: when agent + score data are present, all the
+// fields openapi promises must come through populated, not zero-valued.
+func TestGetAgent_PopulatedProfile(t *testing.T) {
+	srv, _, scoreStore := newTestServer(t, "")
+
+	pub, priv, err := auth.GenerateKeypair()
+	require.NoError(t, err)
+	agentID := auth.PublicKeyToAgentID(pub)
+
+	// Wire an agent registry + per-agent domain list.
+	mock := newMockAgentStore()
+	mock.agents[agentID] = &store.AgentEntry{
+		AgentID:       agentID,
+		Name:          "claude-code/example",
+		OnChainHeight: 4242,
+	}
+	mock.domains[agentID] = []string{"sage-release", "sage-roadmap"}
+	srv.agentStore = mock
+
+	// EWMA: 12 observations all correct → blendFactor=1.0, real accuracy=1.0.
+	scoreStore.scores[agentID] = &store.ValidatorScore{
+		ValidatorID:   agentID,
+		CurrentWeight: 0.7,
+		VoteCount:     12,
+		WeightedSum:   10.0,
+		WeightDenom:   10.0,
+	}
+
+	ts := time.Now().Unix()
+	sig := auth.SignRequest(priv, http.MethodGet, "/v1/agent/me", nil, ts)
+	req := httptest.NewRequest(http.MethodGet, "/v1/agent/me", nil)
+	req.Header.Set("X-Agent-ID", agentID)
+	req.Header.Set("X-Signature", hex.EncodeToString(sig))
+	req.Header.Set("X-Timestamp", strconv.FormatInt(ts, 10))
+
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, "body=%s", rr.Body.String())
+
+	var resp AgentProfileResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+
+	assert.Equal(t, agentID, resp.AgentID)
+	assert.Equal(t, "claude-code/example", resp.DisplayName)
+	assert.Equal(t, []string{"sage-release", "sage-roadmap"}, resp.Domains)
+	assert.Equal(t, 0.7, resp.PoEWeight)
+	assert.Equal(t, int64(12), resp.VoteCount)
+	assert.InDelta(t, 1.0, resp.Accuracy, 1e-9)
+	assert.Equal(t, int64(4242), resp.OnChainHeight)
 }
 
 func TestRFC7807Errors(t *testing.T) {
@@ -867,11 +923,15 @@ func TestGetEpoch(t *testing.T) {
 // --- Mock AgentStore for domain access tests ---------------------------------
 
 type mockAgentStore struct {
-	agents map[string]*store.AgentEntry
+	agents  map[string]*store.AgentEntry
+	domains map[string][]string
 }
 
 func newMockAgentStore() *mockAgentStore {
-	return &mockAgentStore{agents: make(map[string]*store.AgentEntry)}
+	return &mockAgentStore{
+		agents:  make(map[string]*store.AgentEntry),
+		domains: make(map[string][]string),
+	}
 }
 
 func (m *mockAgentStore) GetAgent(_ context.Context, agentID string) (*store.AgentEntry, error) {
@@ -919,6 +979,12 @@ func (m *mockAgentStore) ReassignMemories(_ context.Context, _, _ string) (int64
 	return 0, nil
 }
 func (m *mockAgentStore) ListAgentTags(_ context.Context, _ string) ([]store.TagCount, error) {
+	return nil, nil
+}
+func (m *mockAgentStore) ListAgentDomains(_ context.Context, agentID string) ([]string, error) {
+	if domains, ok := m.domains[agentID]; ok {
+		return domains, nil
+	}
 	return nil, nil
 }
 func (m *mockAgentStore) ReassignMemoriesByTag(_ context.Context, _, _, _ string) (int64, error) {
