@@ -197,6 +197,10 @@ func startServices(app *sageabci.SageApp, restAddr, metricsAddr, cometRPC, tlsCe
 	badgerStore := app.GetBadgerStore()
 	restServer := rest.NewServer(cometRPC, pgStore, pgStore, badgerStore, health, logger, embedding.NewClient("", ""))
 	restServer.SetSuppCache(app.SuppCache)
+	// v8.0: wire the off-consensus fork-gate accessor so REST handlers
+	// flip to ancestor-walk access checks once the chain reports a post-fork
+	// height. Advisory only — the consensus path uses app.postV8Fork(height).
+	restServer.SetPostV8ForkAccessor(app.IsPostV8Fork)
 
 	if tlsCert != "" && tlsKey != "" {
 		// TLS mode: load certs and start HTTPS.

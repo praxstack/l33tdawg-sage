@@ -105,6 +105,22 @@ type DashboardHandler struct {
 	// PreValidateFunc runs the 4 app validators against proposed content without
 	// submitting it on-chain. Set during node startup to share validator logic.
 	PreValidateFunc func(content, contentHash, domain, memType string, confidence float64) []PreValidateVote
+
+	// PostV8ForkFn is the off-consensus advisory accessor for the v8.0
+	// access-control fork gate. When set and returning true, dashboard
+	// grant lookups walk the dotted-domain path (HasAccessOrAncestor)
+	// instead of doing exact-match (HasAccess). nil keeps pre-fork
+	// (v7.1.1-equivalent) semantics.
+	PostV8ForkFn func() bool
+}
+
+// isPostV8Fork is the internal accessor — returns false when no fork gate is
+// wired, keeping dashboard behaviour byte-identical to v7.1.1 by default.
+func (h *DashboardHandler) isPostV8Fork() bool {
+	if h.PostV8ForkFn == nil {
+		return false
+	}
+	return h.PostV8ForkFn()
 }
 
 // RedeployOrchestrator extends RedeployChecker with deploy/status methods
@@ -715,7 +731,12 @@ func (h *DashboardHandler) handleListMemories(w http.ResponseWriter, r *http.Req
 		// Grant-aware override: skip agent isolation when agent has a grant OR domain is unregistered
 		listAgentID := strings.TrimSpace(r.Header.Get("X-Agent-ID"))
 		if opts.DomainTag != "" && h.BadgerStore != nil && listAgentID != "" {
-			hasGrant, _ := h.BadgerStore.HasAccess(opts.DomainTag, listAgentID, 1, time.Now())
+			var hasGrant bool
+			if h.isPostV8Fork() {
+				hasGrant, _ = h.BadgerStore.HasAccessOrAncestor(opts.DomainTag, listAgentID, 1, time.Now())
+			} else {
+				hasGrant, _ = h.BadgerStore.HasAccess(opts.DomainTag, listAgentID, 1, time.Now())
+			}
 			if !hasGrant {
 				// Unregistered domains have no access policy — don't enforce agent isolation
 				_, ownerErr := h.BadgerStore.GetDomainOwner(opts.DomainTag)

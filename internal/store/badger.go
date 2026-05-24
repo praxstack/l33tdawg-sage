@@ -575,6 +575,165 @@ func (s *BadgerStore) HasAccess(domain, agentID string, requiredLevel uint8, blo
 	return has, nil
 }
 
+// HasAccessOrAncestor walks the dotted domain path from the most specific
+// segment toward the root, returning true when the first valid grant on the
+// agent at the required level is found. Mirrors HasAccess semantics on each
+// candidate (deterministic blockTime-based expiry, level satisfies the bar)
+// and short-circuits on the first hit. Caps the walk at 16 segments so a
+// pathological deep path cannot turn into an unbounded read amplifier.
+//
+// Shared-domain barrier: candidates whose name is reserved as a shared domain
+// (see IsSharedDomainName) are skipped — a grant on "general" must never
+// silently cascade to "pipeline.general". Shared domains are catch-alls, not
+// inheritable ancestors.
+//
+// Empty domain or agentID returns (false, nil). Per-segment lookup failures
+// other than "key not found" are surfaced via the error return.
+func (s *BadgerStore) HasAccessOrAncestor(domain, agentID string, requiredLevel uint8, blockTime time.Time) (bool, error) {
+	if domain == "" || agentID == "" {
+		return false, nil
+	}
+	// Filter empty segments so leading/trailing/double-dots ("..a.b", "a..b",
+	// "a.b.") don't bury the walk in candidates like "..a" or ".a" that can
+	// never match a grant. The cap is applied to the FILTERED count so the
+	// pathological-path guard is also robust to dot padding.
+	segments := splitDomainSegments(domain)
+	if len(segments) == 0 {
+		return false, nil
+	}
+	if len(segments) > 16 {
+		// Walk-depth cap: refuse to follow pathological paths. Returning
+		// false (rather than an error) keeps the caller's error semantics
+		// indistinguishable from "no grant found", which is the safe
+		// outcome for an access check.
+		return false, nil
+	}
+
+	now := blockTime.Unix()
+	var walkErr error
+	err := s.db.View(func(txn *badger.Txn) error {
+		for i := len(segments); i >= 1; i-- {
+			candidate := strings.Join(segments[:i], ".")
+			if candidate == "" {
+				// Defensive: should not happen post-filter, but guards
+				// against future regressions in splitDomainSegments.
+				continue
+			}
+			if IsSharedDomainName(candidate) {
+				// Cascade barrier — shared domains do not act as ancestors.
+				continue
+			}
+			item, getErr := txn.Get(grantKey(candidate, agentID))
+			if errors.Is(getErr, badger.ErrKeyNotFound) {
+				continue
+			}
+			if getErr != nil {
+				walkErr = getErr
+				return getErr
+			}
+			var matched bool
+			vErr := item.Value(func(val []byte) error {
+				if len(val) < 9 {
+					return fmt.Errorf("invalid grant entry")
+				}
+				level := val[0]
+				expiresAt := int64(binary.BigEndian.Uint64(val[1:9])) // #nosec G115 -- expiry timestamp fits in int64
+				if level < requiredLevel {
+					return nil
+				}
+				if expiresAt > 0 && now >= expiresAt {
+					return nil
+				}
+				matched = true
+				return nil
+			})
+			if vErr != nil {
+				walkErr = vErr
+				return vErr
+			}
+			if matched {
+				// First valid match wins — most specific grant takes effect.
+				walkErr = errStopWalk
+				return errStopWalk
+			}
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, errStopWalk) {
+		return false, err
+	}
+	if errors.Is(walkErr, errStopWalk) {
+		return true, nil
+	}
+	return false, nil
+}
+
+// errStopWalk is a sentinel used by HasAccessOrAncestor to short-circuit the
+// Badger txn body once a valid grant is found. Not exported.
+var errStopWalk = errors.New("stop walk")
+
+// splitDomainSegments splits a dotted-domain path and drops empty segments
+// produced by leading, trailing, or doubled dots. Centralised so
+// HasAccessOrAncestor and ResolveOwningAncestor stay in lock-step on how
+// they normalise input.
+func splitDomainSegments(domain string) []string {
+	raw := strings.Split(domain, ".")
+	out := raw[:0]
+	for _, s := range raw {
+		if s == "" {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// ResolveOwningAncestor walks the dotted domain path from the most specific
+// segment toward the root and returns the nearest ancestor (or the leaf
+// itself) that has a registered owner. Used by multi-org access checks to
+// find the "effective owner" of a domain that may not be directly registered
+// but inherits ownership from a registered parent.
+//
+// Returns ("", "", nil) when no ancestor is owned — this is the "domain
+// doesn't exist" case and callers should treat it the same as a missing
+// direct registration.
+//
+// Shared-domain barrier mirrors HasAccessOrAncestor: candidates that are
+// reserved shared domains are skipped during the walk. Walk depth is capped
+// at 16 segments to defang pathological paths.
+func (s *BadgerStore) ResolveOwningAncestor(domain string) (owner, ownedDomain string, err error) {
+	if domain == "" {
+		return "", "", nil
+	}
+	segments := splitDomainSegments(domain)
+	if len(segments) == 0 {
+		return "", "", nil
+	}
+	if len(segments) > 16 {
+		return "", "", nil
+	}
+	for i := len(segments); i >= 1; i-- {
+		candidate := strings.Join(segments[:i], ".")
+		if candidate == "" {
+			continue
+		}
+		if IsSharedDomainName(candidate) {
+			continue
+		}
+		o, gerr := s.GetDomainOwner(candidate)
+		if gerr != nil {
+			// GetDomainOwner returns a wrapped "domain not found" — treat
+			// any read failure as "no record at this level" and keep walking.
+			continue
+		}
+		if o == "" {
+			continue
+		}
+		return o, candidate, nil
+	}
+	return "", "", nil
+}
+
 // RegisterDomain registers a domain in BadgerDB.
 // Encoding: ownerID (length-prefixed) + parentDomain (length-prefixed) + height (8 bytes).
 // RegisterDomain atomically registers a domain with the given owner.
@@ -1842,9 +2001,26 @@ func (s *BadgerStore) GetFederationAllowedDepts(fedID string) ([]string, error) 
 // same-org access if any of those orgs owns the domain at sufficient clearance,
 // and falling back to a federation check between any agent org and the domain
 // owner's orgs.
-func (s *BadgerStore) HasAccessMultiOrg(domain, agentID string, memoryClassification uint8, blockTime time.Time) (bool, error) {
-	// Step 1: Check direct grant (existing HasAccess — covers same-org grants)
-	directAccess, err := s.HasAccess(domain, agentID, 1, blockTime)
+//
+// postFork toggles v8.0 ancestor-walk semantics: when true, the direct-grant
+// check and the domain-owner resolution both walk the dotted-domain path
+// from the leaf upward (skipping shared-domain barriers), so a grant on a
+// parent domain and ownership on an ancestor both cover descendant lookups.
+// When false the behaviour is byte-identical to v7.1.1 — exact-match grant,
+// exact-match owner lookup. Fork-gated callers pass app.postV8Fork(height)
+// on the consensus path and app.IsPostV8Fork() (advisory chain-height read)
+// on REST handlers.
+func (s *BadgerStore) HasAccessMultiOrg(domain, agentID string, memoryClassification uint8, blockTime time.Time, postFork bool) (bool, error) {
+	// Step 1: Check direct grant. Post-fork walks the dotted path so a grant
+	// on a parent domain covers descendant writes; pre-fork preserves exact
+	// match (v7.1.1-equivalent replay).
+	var directAccess bool
+	var err error
+	if postFork {
+		directAccess, err = s.HasAccessOrAncestor(domain, agentID, 1, blockTime)
+	} else {
+		directAccess, err = s.HasAccess(domain, agentID, 1, blockTime)
+	}
 	if err == nil && directAccess {
 		return true, nil
 	}
@@ -1857,10 +2033,25 @@ func (s *BadgerStore) HasAccessMultiOrg(domain, agentID string, memoryClassifica
 	}
 
 	// Step 3: Resolve the domain owner's orgs (the owner can also be multi-org).
-	domainOwner, err := s.GetDomainOwner(domain)
-	if err != nil {
-		return false, nil // Domain doesn't exist
+	// Post-fork walks the dotted path to find the nearest registered ancestor;
+	// pre-fork keeps exact-match GetDomainOwner. Once the owner is resolved
+	// via ancestor walk, downstream federation/clearance checks inherit
+	// ancestor semantics automatically — no further changes needed below.
+	var domainOwner string
+	if postFork {
+		owner, _, resolveErr := s.ResolveOwningAncestor(domain)
+		if resolveErr != nil || owner == "" {
+			return false, nil // No owned ancestor → domain treated as unregistered
+		}
+		domainOwner = owner
+	} else {
+		o, gerr := s.GetDomainOwner(domain)
+		if gerr != nil {
+			return false, nil // Domain doesn't exist
+		}
+		domainOwner = o
 	}
+
 	domainOrgs, err := s.ListAgentOrgs(domainOwner)
 	if err != nil || len(domainOrgs) == 0 {
 		return false, nil

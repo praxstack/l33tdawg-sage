@@ -790,7 +790,7 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 		domainOwner, domainErr := app.badgerStore.GetDomainOwner(submit.DomainTag)
 		if domainErr == nil && domainOwner != "" {
 			// Domain is owned — check write access (level 2).
-			hasAccess, accessErr := app.badgerStore.HasAccessMultiOrg(submit.DomainTag, agentID, 0, blockTime)
+			hasAccess, accessErr := app.badgerStore.HasAccessMultiOrg(submit.DomainTag, agentID, 0, blockTime, app.postV8Fork(height))
 			if accessErr != nil || !hasAccess {
 				return &abcitypes.ExecTxResult{Code: 11, Log: fmt.Sprintf("access denied: agent %s has no write access to domain %s", agentID[:16], submit.DomainTag)}
 			}
@@ -1391,7 +1391,7 @@ func (app *SageApp) processAccessQuery(parsedTx *tx.ParsedTx, height int64, bloc
 	}
 
 	// Multi-org access gate: checks direct grants, org membership, clearance, federation
-	hasAccess, err := app.badgerStore.HasAccessMultiOrg(query.Domain, agentID, 0, blockTime)
+	hasAccess, err := app.badgerStore.HasAccessMultiOrg(query.Domain, agentID, 0, blockTime, app.postV8Fork(height))
 	if err != nil {
 		return &abcitypes.ExecTxResult{Code: 41, Log: fmt.Sprintf("access check error: %v", err)}
 	}

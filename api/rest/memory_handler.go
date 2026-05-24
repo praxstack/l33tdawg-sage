@@ -548,7 +548,7 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 		domainOwner, domainErr := s.badgerStore.GetDomainOwner(req.DomainTag)
 		if domainErr == nil && domainOwner != "" {
 			agentID := middleware.ContextAgentID(r.Context())
-			hasAccess, accessErr := s.badgerStore.HasAccessMultiOrg(req.DomainTag, agentID, 0, time.Now())
+			hasAccess, accessErr := s.badgerStore.HasAccessMultiOrg(req.DomainTag, agentID, 0, time.Now(), s.isPostV8Fork())
 			if accessErr != nil || !hasAccess {
 				writeProblem(w, http.StatusForbidden, "Access denied",
 					fmt.Sprintf("No read access to domain %s", req.DomainTag))
@@ -576,7 +576,7 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 		if hasGrant {
 			seeAll = true
 		} else {
-			hasOrgAccess, _ := s.badgerStore.HasAccessMultiOrg(req.DomainTag, queryAgentID, 0, time.Now())
+			hasOrgAccess, _ := s.badgerStore.HasAccessMultiOrg(req.DomainTag, queryAgentID, 0, time.Now(), s.isPostV8Fork())
 			if hasOrgAccess {
 				seeAll = true
 			} else {
@@ -628,7 +628,7 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 			if memClass > 0 {
 				domainOwner, domErr := s.badgerStore.GetDomainOwner(rec.DomainTag)
 				if domErr == nil && domainOwner != "" {
-					hasAccess, _ := s.badgerStore.HasAccessMultiOrg(rec.DomainTag, queryAgentID, memClass, now)
+					hasAccess, _ := s.badgerStore.HasAccessMultiOrg(rec.DomainTag, queryAgentID, memClass, now, s.isPostV8Fork())
 					if !hasAccess && rec.SubmittingAgent != queryAgentID {
 						// v6.8.6 observability: log every hide so operators can
 						// detect missing org-bootstrap (the failure mode is silent
@@ -773,7 +773,7 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 		domainOwner, domainErr := s.badgerStore.GetDomainOwner(req.DomainTag)
 		if domainErr == nil && domainOwner != "" {
 			agentID := middleware.ContextAgentID(r.Context())
-			hasAccess, accessErr := s.badgerStore.HasAccessMultiOrg(req.DomainTag, agentID, 0, time.Now())
+			hasAccess, accessErr := s.badgerStore.HasAccessMultiOrg(req.DomainTag, agentID, 0, time.Now(), s.isPostV8Fork())
 			if accessErr != nil || !hasAccess {
 				writeProblem(w, http.StatusForbidden, "Access denied",
 					fmt.Sprintf("No read access to domain %s", req.DomainTag))
@@ -795,7 +795,7 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 		if hasGrant {
 			seeAll = true
 		} else {
-			hasOrgAccess, _ := s.badgerStore.HasAccessMultiOrg(req.DomainTag, queryAgentID, 0, time.Now())
+			hasOrgAccess, _ := s.badgerStore.HasAccessMultiOrg(req.DomainTag, queryAgentID, 0, time.Now(), s.isPostV8Fork())
 			if hasOrgAccess {
 				seeAll = true
 			} else {
@@ -842,7 +842,7 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 			if memClass > 0 {
 				domainOwner, domErr := s.badgerStore.GetDomainOwner(rec.DomainTag)
 				if domErr == nil && domainOwner != "" {
-					hasAccess, _ := s.badgerStore.HasAccessMultiOrg(rec.DomainTag, queryAgentID, memClass, now)
+					hasAccess, _ := s.badgerStore.HasAccessMultiOrg(rec.DomainTag, queryAgentID, memClass, now, s.isPostV8Fork())
 					if !hasAccess && rec.SubmittingAgent != queryAgentID {
 						s.logger.Info().
 							Str("memory_id", rec.MemoryID).
@@ -977,7 +977,7 @@ func (s *Server) handleHybridSearchMemory(w http.ResponseWriter, r *http.Request
 		domainOwner, domainErr := s.badgerStore.GetDomainOwner(req.DomainTag)
 		if domainErr == nil && domainOwner != "" {
 			agentID := middleware.ContextAgentID(r.Context())
-			hasAccess, accessErr := s.badgerStore.HasAccessMultiOrg(req.DomainTag, agentID, 0, time.Now())
+			hasAccess, accessErr := s.badgerStore.HasAccessMultiOrg(req.DomainTag, agentID, 0, time.Now(), s.isPostV8Fork())
 			if accessErr != nil || !hasAccess {
 				writeProblem(w, http.StatusForbidden, "Access denied",
 					fmt.Sprintf("No read access to domain %s", req.DomainTag))
@@ -998,7 +998,7 @@ func (s *Server) handleHybridSearchMemory(w http.ResponseWriter, r *http.Request
 		if hasGrant {
 			seeAll = true
 		} else {
-			hasOrgAccess, _ := s.badgerStore.HasAccessMultiOrg(req.DomainTag, queryAgentID, 0, time.Now())
+			hasOrgAccess, _ := s.badgerStore.HasAccessMultiOrg(req.DomainTag, queryAgentID, 0, time.Now(), s.isPostV8Fork())
 			if hasOrgAccess {
 				seeAll = true
 			} else {
@@ -1044,7 +1044,7 @@ func (s *Server) handleHybridSearchMemory(w http.ResponseWriter, r *http.Request
 			if memClass > 0 {
 				domainOwner, domErr := s.badgerStore.GetDomainOwner(rec.DomainTag)
 				if domErr == nil && domainOwner != "" {
-					hasAccess, _ := s.badgerStore.HasAccessMultiOrg(rec.DomainTag, queryAgentID, memClass, now)
+					hasAccess, _ := s.badgerStore.HasAccessMultiOrg(rec.DomainTag, queryAgentID, memClass, now, s.isPostV8Fork())
 					if !hasAccess && rec.SubmittingAgent != queryAgentID {
 						s.logger.Info().
 							Str("memory_id", rec.MemoryID).
@@ -1159,7 +1159,7 @@ func (s *Server) handleGetMemory(w http.ResponseWriter, r *http.Request) {
 			domainOwner, domainErr := s.badgerStore.GetDomainOwner(rec.DomainTag)
 			if domainErr == nil && domainOwner != "" {
 				classification, _ := s.badgerStore.GetMemoryClassification(memoryID)
-				hasAccess, accessErr := s.badgerStore.HasAccessMultiOrg(rec.DomainTag, agentID, classification, time.Now())
+				hasAccess, accessErr := s.badgerStore.HasAccessMultiOrg(rec.DomainTag, agentID, classification, time.Now(), s.isPostV8Fork())
 				if accessErr != nil || !hasAccess {
 					writeProblem(w, http.StatusForbidden, "Access denied",
 						fmt.Sprintf("No read access to domain %s", rec.DomainTag))
@@ -1495,7 +1495,7 @@ func (s *Server) handleListMemoriesAuth(w http.ResponseWriter, r *http.Request) 
 		if hasGrant {
 			seeAll = true
 		} else {
-			hasOrgAccess, _ := s.badgerStore.HasAccessMultiOrg(domainFilter, agentID, 0, time.Now())
+			hasOrgAccess, _ := s.badgerStore.HasAccessMultiOrg(domainFilter, agentID, 0, time.Now(), s.isPostV8Fork())
 			if hasOrgAccess {
 				seeAll = true
 			} else {

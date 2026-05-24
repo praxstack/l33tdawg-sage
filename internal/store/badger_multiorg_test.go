@@ -116,17 +116,17 @@ func TestMultiOrg_HasAccess_DoesNotDependOnPrimarySlot(t *testing.T) {
 
 	now := time.Unix(10000, 0)
 
-	okA, err := bs.HasAccessMultiOrg("orga.secret", pipelineAgent, 0, now)
+	okA, err := bs.HasAccessMultiOrg("orga.secret", pipelineAgent, 0, now, false)
 	require.NoError(t, err)
 	assert.True(t, okA, "multi-org member must keep visibility into org A's domain after joining org B")
 
-	okB, err := bs.HasAccessMultiOrg("orgb.secret", pipelineAgent, 0, now)
+	okB, err := bs.HasAccessMultiOrg("orgb.secret", pipelineAgent, 0, now, false)
 	require.NoError(t, err)
 	assert.True(t, okB, "multi-org member must also have visibility into org B's domain")
 
 	// Sanity check: a non-member is denied, regardless of slot state.
 	const stranger = "stranger00000000000000000000000000000000000000000000000000strg"
-	okStranger, err := bs.HasAccessMultiOrg("orga.secret", stranger, 0, now)
+	okStranger, err := bs.HasAccessMultiOrg("orga.secret", stranger, 0, now, false)
 	require.NoError(t, err)
 	assert.False(t, okStranger, "non-member must be denied")
 }

@@ -59,6 +59,15 @@ type Server struct {
 	// PreValidateFunc runs the 4 app validators without on-chain submission.
 	// Set during node startup. Returns per-validator results.
 	PreValidateFunc func(content, contentHash, domain, memType string, confidence float64) []PreValidateResult
+
+	// postV8ForkFn is the off-consensus advisory accessor for the v8.0
+	// access-control fork gate. REST handlers can't carry a deterministic
+	// block height, so they consult this dynamic predicate (which the
+	// SageApp populates from its cached chain height) every time they
+	// invoke a fork-aware access check. nil means "pre-fork everywhere",
+	// preserving v7.1.1-equivalent behaviour for callers that don't wire
+	// the fork gate (e.g. tests, older deployments).
+	postV8ForkFn func() bool
 }
 
 // SuppCacheWriter is the interface the REST server uses to store supplementary data
@@ -120,6 +129,24 @@ func NewServer(cometbftRPC string, memStore store.MemoryStore, scoreStore store.
 // Must be called before the server starts accepting requests.
 func (s *Server) SetSuppCache(cache SuppCacheWriter) {
 	s.suppCache = cache
+}
+
+// SetPostV8ForkAccessor wires a dynamic predicate that reports whether the
+// v8.0 access-control fork has activated. The function is invoked on each
+// access check that fork-gates its semantics. Pass app.IsPostV8Fork from the
+// owning SageApp at server-wire-up time. nil disables the gate (everything
+// stays pre-fork — v7.1.1-equivalent).
+func (s *Server) SetPostV8ForkAccessor(fn func() bool) {
+	s.postV8ForkFn = fn
+}
+
+// isPostV8Fork is the internal accessor REST handlers use when calling
+// HasAccessMultiOrg. Returns false (pre-fork) when no accessor is wired.
+func (s *Server) isPostV8Fork() bool {
+	if s.postV8ForkFn == nil {
+		return false
+	}
+	return s.postV8ForkFn()
 }
 
 // loadValidatorSigningKey loads the CometBFT validator private key so that

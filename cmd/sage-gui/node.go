@@ -349,6 +349,10 @@ func runServe() (rerr error) {
 	// Create REST server
 	restServer := rest.NewServer(cometRPC, sqliteStore, sqliteStore, badgerStore, health, logger, embedProvider)
 	restServer.SetSuppCache(app.SuppCache)
+	// v8.0: wire the off-consensus fork-gate accessor so REST handlers
+	// flip to ancestor-walk access checks once the chain reports a post-fork
+	// height. Advisory only — the consensus path uses app.postV8Fork(height).
+	restServer.SetPostV8ForkAccessor(app.IsPostV8Fork)
 
 	// v7.1: tell the REST layer which ed25519 public key identifies the local
 	// node operator. Requests signed with this key bypass the cross-agent
@@ -362,7 +366,8 @@ func runServe() (rerr error) {
 
 	// Create dashboard handler
 	dashboard := web.NewDashboardHandler(sqliteStore, version)
-	dashboard.BadgerStore = badgerStore // Wire on-chain RBAC for agent isolation
+	dashboard.BadgerStore = badgerStore       // Wire on-chain RBAC for agent isolation
+	dashboard.PostV8ForkFn = app.IsPostV8Fork // v8.0: ancestor-walk grants on post-fork dashboards
 
 	// Bridge REST API events to dashboard SSE for the chain activity log
 	restServer.OnEvent = func(eventType, memoryID, domain, content string, data any) {
