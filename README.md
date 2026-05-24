@@ -57,6 +57,18 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
+## What's New in v7.7
+
+Agent profile completeness. `GET /v1/agent/me` was the only endpoint where the response struct silently dropped fields the OpenAPI schema promised — `display_name`, `domains`, `accuracy`, and the registration height. The schema was right, the handler was wrong; v7.7 brings them in line so SDK consumers don't have to make a second round-trip to `/v1/agent/{id}` plus the validator-score endpoint just to render a profile card.
+
+- **Populated `AgentProfileResponse`.** `display_name` and `on_chain_height` resolve through `agentStore.GetAgent`; `domains` is a new `AgentStore.ListAgentDomains` (SQLite-backed, ordered by participation frequency) mirroring the existing `ListAgentTags` pattern; `accuracy` reconstructs a `poe.EWMATracker` from the persisted `WeightedSum/WeightDenom/Count` so the cold-start blending (0.5 prior, transitions toward the real score after K_min=10 observations) stays in one place. Pre-existing fields (`agent_id`, `poe_weight`, `vote_count`) unchanged.
+- **OpenAPI schema realigned.** The `AgentProfile` schema retired the legacy `registered_at: string date-time` field (handler never returned it; a test guard explicitly rejected the key) and now declares `on_chain_height: integer (int64)` — the canonical name already used everywhere else in the response envelope. SDK consumers should pin `sage-agent-sdk>=7.7.0` to get the type-correct Pydantic model.
+- **No behaviour change for grants, votes, or memory writes.** This release is REST-layer plumbing — no consensus rules touched, no chain migration needed.
+
+### v7.7.1 — retag for Apple notarization credential refresh
+
+The macOS DMG jobs in v7.6.2 and v7.7.0 Release workflows failed at `xcrun notarytool` with HTTP 401 "invalid credentials" — the app-specific password in the repo's `APPLE_PASSWORD` secret had been invalidated by an upstream Apple ID security event. v7.7.1 is a pure retag (no behaviour or version-detectable change) to trigger a fresh DMG build under the rotated credential.
+
 ## What's New in v7.6
 
 Direct-write hooks across Claude Code and Codex. Sessions boot SAGE without depending on the agent to remember `sage_inception` on its own — the local SAGE node is queried directly by lifecycle hooks, recent committed memories land as initial context, and a session-lifecycle observation is written on exit. One unified install path for both agents.
@@ -65,6 +77,14 @@ Direct-write hooks across Claude Code and Codex. Sessions boot SAGE without depe
 - **`sage-gui mcp install` now ships 5 direct-write scripts** (`sage-session-start.sh`, `sage-session-end.sh`, `sage-pre-compact.sh`, `sage-user-prompt.sh`, `sage-stop.sh`) instead of the legacy 2-script nudge set. The session-start/end scripts shell out to `sage-gui hook ...` via an absolute binary path substituted at install time — no `$PATH` lookup, no Python dependency, no pynacl. All scripts respect `~/.sage/memory_mode` (full / bookend / on-demand). The hook block uses `${CLAUDE_PROJECT_DIR}` so paths resolve correctly even when Claude Code starts from a subdir.
 - **`sage-gui codex install` mirrors the install for Codex.** Writes `.codex/config.toml` (MCP server registration), `.codex/hooks.json` (hook lifecycle wiring with absolute paths because Codex doesn't expand env vars in hook commands), the same 5 hook scripts under `.codex/hooks/`, and an `AGENTS.md` boot reminder. The hook scripts are identical to the Claude side — same Go binary, same signed REST protocol, same memory_mode semantics. Two agents, one substrate.
 - **Self-heal migrates older installs.** Every MCP server start runs `selfHealProject`, which now detects legacy 2-script installs (sage-boot.sh / sage-turn.sh) and rewrites them to the new 5-script set, refreshes scripts when the sage-gui binary moves to a new location (a stale `__SAGE_GUI_BIN__` path triggers re-templating), and repairs missing `hooks.json` on Codex installs. No user action required after upgrading.
+
+### v7.6.2 — auto-install hooks on MCP boot for pre-v7.6 projects
+
+Projects that adopted SAGE before v7.6 shipped silently went without the direct-write hook substrate after upgrading — `selfHealProject` only refreshed hooks when `.claude/hooks/` already existed. v7.6.2 widens the trigger: when `.mcp.json` registers a `sage` server and `.claude/hooks/` is absent, the 5-script set installs automatically on the next MCP session boot. Restart the agent in any SAGE-enabled project; no per-project `sage-gui mcp install` rerun needed. Negative test guards against unsolicited file creation in projects whose `.mcp.json` is wired up for some other MCP server.
+
+### v7.6.1 — prealloc the SessionStart items slice
+
+Pure lint fix. CI's golangci-lint v2.1.6 prealloc rule flagged `var items []item` in `runHookSessionStart`; the loop's max length is known at slice-init time. Switched to `make([]item, 0, len(payload.Memories)+len(payload.Results))`. No behaviour change.
 
 ## What's New in v7.5
 
