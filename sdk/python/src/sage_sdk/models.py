@@ -388,11 +388,15 @@ class DeptMemberInfo(BaseModel):
 # --- Governance Models ---
 
 class GovProposeRequest(BaseModel):
-    operation: str  # "add_validator", "remove_validator", "update_power"
+    operation: str  # "add_validator", "remove_validator", "update_power", "domain_reassign"
     target_id: str
     target_pubkey: str | None = None
     target_power: int | None = None
     reason: str
+    # payload is base64-encoded raw bytes attached to operations that need a
+    # structured body (e.g. ``domain_reassign`` carries the JSON-encoded
+    # DomainReassignRequest). None omits the field from the on-wire request.
+    payload: str | None = None
 
 
 class GovProposeResponse(BaseModel):
@@ -449,3 +453,29 @@ class GovProposalDetailResponse(BaseModel):
     proposal: GovProposal
     votes: list[GovVote]
     quorum_progress: dict | None = None
+
+
+# --- Domain Reassign (v8.0) Models ---
+
+
+class DomainReassignRequest(BaseModel):
+    """Body of POST /v1/domain/reassign.
+
+    Consumes an accepted ``operation='domain_reassign'`` governance proposal
+    and atomically transfers domain ownership, clears all existing grants on
+    the domain, and (when ``open_to_shared`` is true) promotes the domain to
+    shared status. Requires chain admin role.
+    """
+
+    domain: str
+    new_owner_id: str
+    proposal_id: str
+    parent_domain: str = ""
+    open_to_shared: bool = False
+
+
+class DomainReassignResponse(BaseModel):
+    """Response from POST /v1/domain/reassign."""
+
+    tx_hash: str
+    purged_grants: int

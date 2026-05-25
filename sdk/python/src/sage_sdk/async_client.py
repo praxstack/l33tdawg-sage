@@ -7,7 +7,7 @@ from typing import Any, Literal
 import httpx
 
 from sage_sdk.auth import AgentIdentity
-from sage_sdk.client import _looks_like_org_id
+from sage_sdk.client import _encode_gov_payload, _looks_like_org_id
 from sage_sdk.exceptions import SageAPIError
 from sage_sdk.models import (
     AgentInfo,
@@ -15,6 +15,8 @@ from sage_sdk.models import (
     AgentRegistration,
     ChallengeRequest,
     CorroborateRequest,
+    DomainReassignRequest,
+    DomainReassignResponse,
     ForgetRequest,
     EpochInfo,
     GovCancelRequest,
@@ -575,6 +577,37 @@ class AsyncSageClient:
         resp = await self._request("GET", f"/v1/domain/{name}")
         return resp.json()
 
+    # --- Domain Reassign (v8.0) -----------------------------------------------
+
+    async def submit_domain_reassign(
+        self,
+        domain: str,
+        new_owner_id: str,
+        proposal_id: str,
+        parent_domain: str = "",
+        open_to_shared: bool = False,
+    ) -> DomainReassignResponse:
+        """Submit the on-chain TxTypeDomainReassign that consumes an accepted
+        gov_propose of operation='domain_reassign' and atomically transfers
+        domain ownership + clears existing grants + optionally promotes the
+        domain to shared. Requires chain admin role.
+
+        Returns the tx_hash plus the number of grant rows purged.
+        """
+        req = DomainReassignRequest(
+            domain=domain,
+            new_owner_id=new_owner_id,
+            proposal_id=proposal_id,
+            parent_domain=parent_domain,
+            open_to_shared=open_to_shared,
+        )
+        resp = await self._request(
+            "POST",
+            "/v1/domain/reassign",
+            json=req.model_dump(),
+        )
+        return DomainReassignResponse.model_validate(resp.json())
+
     # --- Department RBAC --------------------------------------------------------
 
     async def register_dept(self, org_id: str, name: str, description: str = "", parent_dept: str = "") -> dict:
@@ -747,14 +780,21 @@ class AsyncSageClient:
         reason: str,
         target_pubkey: str | None = None,
         target_power: int | None = None,
+        payload: dict | bytes | None = None,
     ) -> GovProposeResponse:
-        """Submit a governance proposal to add/remove/update a validator."""
+        """Submit a governance proposal.
+
+        See :meth:`SageClient.governance_propose` for the full ``payload``
+        contract — same encoding rules apply here (dict → JSON+base64,
+        bytes → base64, ``None`` → omitted).
+        """
         req = GovProposeRequest(
             operation=operation,
             target_id=target_id,
             target_pubkey=target_pubkey,
             target_power=target_power,
             reason=reason,
+            payload=_encode_gov_payload(payload),
         )
         resp = await self._request("POST", "/v1/governance/propose", json=req.model_dump(exclude_none=True))
         return GovProposeResponse.model_validate(resp.json())

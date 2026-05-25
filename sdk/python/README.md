@@ -2,7 +2,7 @@
 
 Python client for the SAGE (Sovereign Agent Governed Experience) protocol -- a governed, verifiable institutional memory layer for multi-agent systems.
 
-**Requires Python 3.10+** | **Compatible with SAGE v5.0.1+** | **TLS support since v6.1.0**
+**Requires Python 3.10+** | **Compatible with SAGE v5.0.1+** | **TLS support since v6.1.0** | **v8.0 — domain reassign recovery**
 
 ## Installation
 
@@ -494,6 +494,67 @@ domain_prefix = domain_tag.split(".")[0]
 if agent_dept != domain_prefix:
     raise ValueError(f"Agent in {agent_dept} cannot write to {domain_tag}")
 ```
+
+## v8.0 — Domain Reassign Recovery
+
+SAGE v8.0 introduces an access-control recovery primitive: a chain admin can
+take over a domain whose owner is unavailable or compromised. The flow is
+governance-gated — a `domain_reassign` proposal carries the new owner +
+optional parent + an `open_to_shared` flag as its `payload`, validators vote,
+and once accepted a `TxTypeDomainReassign` consumes the proposal, transfers
+ownership, **purges all existing grants on the domain**, and (optionally)
+promotes the domain to shared.
+
+The SDK exposes both a one-shot helper and the two underlying primitives.
+
+```python
+from sage_sdk import SageClient, AgentIdentity
+
+admin = AgentIdentity.from_file("chain-admin.key")
+client = SageClient(base_url="http://localhost:8080", identity=admin)
+
+# One-shot: propose -> poll -> submit. Raises SageAPIError on
+# reject/expire/cancel/timeout.
+result = client.reassign_domain(
+    domain="acme.engineering",
+    new_owner_id="b" * 64,
+    reason="original owner offboarded, restoring access for the team",
+    open_to_shared=False,
+    poll_interval_s=2.0,
+    timeout_s=120.0,
+)
+print(result.tx_hash, "purged", result.purged_grants, "grants")
+```
+
+If you want to drive the flow manually (e.g. you already accepted a proposal
+out of band), use the two primitives directly. `governance_propose` now
+accepts a `payload` kwarg — pass a `dict` and the SDK JSON-encodes + base64s
+it for you.
+
+```python
+propose = client.governance_propose(
+    operation="domain_reassign",
+    target_id="acme.engineering",
+    reason="recovery",
+    payload={
+        "domain": "acme.engineering",
+        "new_owner_id": "b" * 64,
+        "parent_domain": "",
+        "open_to_shared": False,
+    },
+)
+# ... validators vote, proposal hits status="executed" ...
+result = client.submit_domain_reassign(
+    domain="acme.engineering",
+    new_owner_id="b" * 64,
+    proposal_id=propose.proposal_id,
+    open_to_shared=False,
+)
+```
+
+> **Code 50** (`shared domain not ownable`) surfaces as HTTP 403 with
+> `shared domain not ownable` in the error detail — see
+> `sage_sdk.exceptions` for the documented mapping.
 
 ## Async Client
 

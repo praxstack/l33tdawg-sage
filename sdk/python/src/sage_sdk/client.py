@@ -14,6 +14,8 @@ from sage_sdk.models import (
     AgentRegistration,
     ChallengeRequest,
     CorroborateRequest,
+    DomainReassignRequest,
+    DomainReassignResponse,
     ForgetRequest,
     EpochInfo,
     GovCancelRequest,
@@ -57,6 +59,33 @@ def _looks_like_org_id(identifier: str) -> bool:
     if len(identifier) != _ORG_ID_HEX_LEN:
         return False
     return all(c in "0123456789abcdef" for c in identifier)
+
+
+def _encode_gov_payload(payload: dict | bytes | None) -> str | None:
+    """Serialize a governance proposal payload to base64.
+
+    - ``dict``: JSON-encode (compact) then base64-encode.
+    - ``bytes``: base64-encode the raw bytes directly.
+    - ``None``: return ``None`` so the field is omitted from the request.
+
+    Raises ``TypeError`` for any other shape.
+    """
+    if payload is None:
+        return None
+    import base64
+
+    if isinstance(payload, dict):
+        import json as json_mod
+
+        raw = json_mod.dumps(payload, separators=(",", ":")).encode("utf-8")
+    elif isinstance(payload, (bytes, bytearray)):
+        raw = bytes(payload)
+    else:
+        raise TypeError(
+            "governance_propose payload must be dict, bytes, or None; "
+            f"got {type(payload).__name__}"
+        )
+    return base64.b64encode(raw).decode("ascii")
 
 
 class SageClient:
@@ -598,6 +627,100 @@ class SageClient:
         resp = self._request("GET", f"/v1/domain/{name}")
         return resp.json()
 
+    # --- Domain Reassign (v8.0) -----------------------------------------------
+
+    def submit_domain_reassign(
+        self,
+        domain: str,
+        new_owner_id: str,
+        proposal_id: str,
+        parent_domain: str = "",
+        open_to_shared: bool = False,
+    ) -> DomainReassignResponse:
+        """Submit the on-chain TxTypeDomainReassign that consumes an accepted
+        gov_propose of operation='domain_reassign' and atomically transfers
+        domain ownership + clears existing grants + optionally promotes the
+        domain to shared. Requires chain admin role.
+
+        Returns the tx_hash plus the number of grant rows purged.
+        """
+        req = DomainReassignRequest(
+            domain=domain,
+            new_owner_id=new_owner_id,
+            proposal_id=proposal_id,
+            parent_domain=parent_domain,
+            open_to_shared=open_to_shared,
+        )
+        resp = self._request(
+            "POST",
+            "/v1/domain/reassign",
+            json=req.model_dump(),
+        )
+        return DomainReassignResponse.model_validate(resp.json())
+
+    def reassign_domain(
+        self,
+        domain: str,
+        new_owner_id: str,
+        reason: str,
+        parent_domain: str = "",
+        open_to_shared: bool = False,
+        poll_interval_s: float = 2.0,
+        timeout_s: float = 120.0,
+    ) -> DomainReassignResponse:
+        """End-to-end domain reassign: propose with the right payload, poll
+        until the proposal is executed (or rejected/expired/cancelled), then
+        submit the DomainReassign tx referencing the accepted proposal_id.
+
+        Raises :class:`SageAPIError` on proposal rejection / timeout / submit
+        failure.
+        """
+        import time
+
+        payload = {
+            "domain": domain,
+            "new_owner_id": new_owner_id,
+            "parent_domain": parent_domain,
+            "open_to_shared": open_to_shared,
+        }
+        propose_resp = self.governance_propose(
+            operation="domain_reassign",
+            target_id=domain,
+            reason=reason,
+            payload=payload,
+        )
+        proposal_id = propose_resp.proposal_id
+
+        terminal_non_exec = {"rejected", "expired", "cancelled"}
+        deadline = time.monotonic() + timeout_s
+        while True:
+            detail = self.governance_proposal_detail(proposal_id)
+            status = (detail.proposal.status or "").lower()
+            if status == "executed":
+                break
+            if status in terminal_non_exec:
+                raise SageAPIError(
+                    status_code=409,
+                    detail=f"domain reassign proposal {proposal_id} ended as {status}",
+                )
+            if time.monotonic() >= deadline:
+                raise SageAPIError(
+                    status_code=408,
+                    detail=(
+                        f"timed out after {timeout_s:.0f}s waiting for "
+                        f"domain reassign proposal {proposal_id} (last status={status})"
+                    ),
+                )
+            time.sleep(poll_interval_s)
+
+        return self.submit_domain_reassign(
+            domain=domain,
+            new_owner_id=new_owner_id,
+            proposal_id=proposal_id,
+            parent_domain=parent_domain,
+            open_to_shared=open_to_shared,
+        )
+
     # --- Department RBAC --------------------------------------------------------
 
     def register_dept(self, org_id: str, name: str, description: str = "", parent_dept: str = "") -> dict:
@@ -773,14 +896,30 @@ class SageClient:
         reason: str,
         target_pubkey: str | None = None,
         target_power: int | None = None,
+        payload: dict | bytes | None = None,
     ) -> GovProposeResponse:
-        """Submit a governance proposal to add/remove/update a validator."""
+        """Submit a governance proposal.
+
+        Supports validator-set operations (``add_validator``,
+        ``remove_validator``, ``update_power``) and access-control recovery
+        (``domain_reassign``, v8.0+).
+
+        ``payload`` carries an optional structured body for operations that
+        need one — e.g. ``domain_reassign`` expects a JSON-encoded
+        :class:`DomainReassignRequest`. Accepted shapes:
+
+          - ``dict``: JSON-encoded (compact), then base64-encoded onto the
+            wire as ``payload``.
+          - ``bytes``: base64-encoded directly.
+          - ``None``: the ``payload`` field is omitted from the request.
+        """
         req = GovProposeRequest(
             operation=operation,
             target_id=target_id,
             target_pubkey=target_pubkey,
             target_power=target_power,
             reason=reason,
+            payload=_encode_gov_payload(payload),
         )
         resp = self._request("POST", "/v1/governance/propose", json=req.model_dump(exclude_none=True))
         return GovProposeResponse.model_validate(resp.json())
