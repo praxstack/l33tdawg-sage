@@ -88,6 +88,17 @@ var (
 		Name: "sage_poe_weight",
 		Help: "PoE weight per validator",
 	}, []string{"validator_id"})
+
+	// ForkBranchTotal counts how often each consensus-rule fork gate
+	// took the pre-fork vs post-fork branch. Operators watch this to
+	// confirm the cutover landed live on a chain: pre rolls up to zero,
+	// post climbs from zero, on the same block. fork="v8" is the v8.0
+	// access-control fork (HasAccessOrAncestor / processAccessGrant
+	// auto-register / TxTypeDomainReassign).
+	ForkBranchTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "sage_fork_branch_total",
+		Help: "Per-fork count of pre- vs post-fork branches taken inside fork-gated consensus handlers",
+	}, []string{"fork", "branch"})
 )
 
 // RecordTx records a transaction metric.

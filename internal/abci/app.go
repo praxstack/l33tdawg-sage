@@ -307,6 +307,19 @@ func (app *SageApp) refreshV8Fork() {
 	app.v8AppliedHeight = rec.AppliedHeight
 }
 
+// recordV8Branch increments the sage_fork_branch_total counter so
+// operators can confirm a chain has flipped post-fork on the same
+// dashboard that tracks tx volume. Called from every fork-gated
+// consensus handler (HasAccessMultiOrg's consensus callers, the
+// processAccessGrant gate, and processDomainReassign).
+func recordV8Branch(postFork bool) {
+	branch := "pre"
+	if postFork {
+		branch = "post"
+	}
+	metrics.ForkBranchTotal.WithLabelValues("v8", branch).Inc()
+}
+
 // defaultFlushMaxRetries caps Commit's SQLITE_BUSY retry loop. At 30 tries
 // with backoff capped at 5s, sustained contention is tolerated for several
 // minutes before the node panics — long enough to absorb realistic lock
@@ -830,7 +843,9 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 		domainOwner, domainErr := app.badgerStore.GetDomainOwner(submit.DomainTag)
 		if domainErr == nil && domainOwner != "" {
 			// Domain is owned — check write access (level 2).
-			hasAccess, accessErr := app.badgerStore.HasAccessMultiOrg(submit.DomainTag, agentID, 0, blockTime, app.postV8Fork(height))
+			postFork := app.postV8Fork(height)
+			recordV8Branch(postFork)
+			hasAccess, accessErr := app.badgerStore.HasAccessMultiOrg(submit.DomainTag, agentID, 0, blockTime, postFork)
 			if accessErr != nil || !hasAccess {
 				return &abcitypes.ExecTxResult{Code: 11, Log: fmt.Sprintf("access denied: agent %s has no write access to domain %s", agentID[:16], submit.DomainTag)}
 			}
@@ -1237,7 +1252,9 @@ func (app *SageApp) processAccessGrant(parsedTx *tx.ParsedTx, height int64, bloc
 	// (general/self/meta/sage-*) are explicitly non-ownable and reject
 	// with the distinct Code 50 so callers can tell the two failures
 	// apart. Pre-fork blocks replay byte-identical to v7.1.1.
-	if app.postV8Fork(height) {
+	postFork := app.postV8Fork(height)
+	recordV8Branch(postFork)
+	if postFork {
 		isOwner, _ := app.badgerStore.IsDomainOwnerOrAncestor(grant.Domain, granterID)
 		if !isOwner {
 			// Empty-domain guard: must not auto-register the empty string
@@ -3289,7 +3306,9 @@ func (app *SageApp) processUpgradeRevert(parsedTx *tx.ParsedTx, height int64, _ 
 // no nonce burn since FinalizeBlock only burns nonce on Code 0).
 
 func (app *SageApp) processDomainReassign(parsedTx *tx.ParsedTx, height int64, blockTime time.Time) *abcitypes.ExecTxResult {
-	if !app.postV8Fork(height) {
+	postFork := app.postV8Fork(height)
+	recordV8Branch(postFork)
+	if !postFork {
 		return &abcitypes.ExecTxResult{Code: 10, Log: "unknown tx type"}
 	}
 	req := parsedTx.DomainReassign
