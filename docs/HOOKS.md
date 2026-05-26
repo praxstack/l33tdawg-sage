@@ -14,20 +14,30 @@ The hooks under `.claude/` here are what the SAGE maintainers use day-to-day. Yo
 
 | Event | Script | Mode | What it does |
 |---|---|---|---|
-| `SessionStart` (startup, resume, compact) | `sage-session-start.sh` | **direct-write** | Signs a REST call to the local SAGE node, pre-fetches recent committed memories, and emits them as a context block the agent reads on boot. Falls back to the soft-nudge boot-check if the SAGE node isn't reachable or the agent key isn't readable. |
-| `SessionEnd` | `sage-session-end.sh` | **direct-write** | Submits a `session-lifecycle` observation memory through full BFT consensus so the timeline shows session bookends. Soft-fails silently if SAGE isn't reachable — never blocks the agent's exit path. |
+| `SessionStart` (startup, resume, compact) | `sage-session-start.sh` | **direct-write** | Calls `sage-gui hook session-start`, which pre-fetches recent committed memories and emits them as a context block the agent reads on boot. Falls back to the soft-nudge boot-check if the SAGE node isn't reachable or the agent key isn't readable. |
+| `SessionEnd` | `sage-session-end.sh` | **direct-write** | Calls `sage-gui hook session-end`, which submits a `session-lifecycle` observation memory through full BFT consensus so the timeline shows session bookends. Soft-fails silently if SAGE isn't reachable — never blocks the agent's exit path. |
 | `PreCompact` | `sage-pre-compact.sh` | nudge | Fires right before Claude Code compresses the context. Turn-level detail is about to be discarded — this nudge prompts the agent to call `sage_reflect` (and any `sage_remember` for durable facts) while context is still fresh. |
 | `UserPromptSubmit` | `sage-user-prompt.sh` | nudge | Light reminder to call `sage_turn` early in the response, capturing the new conversational state. |
-| `Stop` | `sage-stop.sh` | reserved | No-op placeholder. Fires per-turn, too high-frequency for direct-write without batching. |
+| `Stop` / `SubagentStop` | `sage-stop.sh` | reserved | No-op placeholder. Fires per-turn (and per-subagent), too high-frequency for direct-write without batching. |
 
 ### How the direct-write hooks work
 
-Both direct-write scripts call into `.claude/hooks/lib/sage_direct.py`, which:
+Both direct-write scripts shell out to the `sage-gui hook` subcommand. The script resolves the binary via `SAGE_GUI_BIN` (set to an absolute path at install time), and the subcommand:
 
 1. Reads the Ed25519 seed from `~/.sage/agent.key` (override with `SAGE_AGENT_KEY`).
 2. Builds the canonical signed-request headers SAGE's REST middleware expects (`X-Agent-ID`, `X-Signature`, `X-Timestamp`).
-3. POSTs / GETs against `http://localhost:8080` (override with `SAGE_URL`) with a tight 3 s timeout.
+3. POSTs / GETs against `http://localhost:8080` (override with `SAGE_URL`) with a tight timeout.
 4. Soft-fails silently if any of those steps fail — the agent never sees an error from a missing SAGE node.
+
+Earlier releases shelled out to a bundled `lib/sage_direct.py`. As of **v8.0** the logic ships inside the `sage-gui` binary itself, so the hooks no longer depend on a Python interpreter or `pynacl`.
+
+### Memory modes (v8.0)
+
+Every script reads `~/.sage/memory_mode` and adapts:
+
+- **`full`** (default) — all hooks fire; nudges encourage `sage_turn` on every turn.
+- **`bookend`** — SessionStart still prefetches, but the per-turn `sage_turn` nudges are suppressed; the agent only reflects at the end of significant tasks. SessionStart appends a `SAGE MODE: bookend` notice so the agent knows.
+- **`on-demand`** — automatic memory calls are skipped entirely; the agent drives `sage_recall` / `sage_reflect` explicitly.
 
 ### Read scope on multi-agent nodes (v7.1)
 
@@ -39,15 +49,15 @@ If `~/.sage/agent.key` is missing or unreadable, the bypass stays off and the le
 
 ## Installing in your own project
 
-Copy `.claude/hooks/*.sh` and `.claude/settings.json` from this repo into your project's `.claude/` directory. The hook commands are relative paths (`bash .claude/hooks/...`), so as long as you preserve the directory layout no edits are needed.
-
-If your project already has a `.claude/settings.json`, merge the `hooks` block instead of replacing the file. The `hooks` object is keyed by event name; each event takes an array of matcher entries.
-
-After copying, mark the scripts executable:
+The simplest path is to let the binary do it. From your project root:
 
 ```bash
-chmod +x .claude/hooks/*.sh
+sage-gui mcp install
 ```
+
+This writes `.mcp.json`, the `.claude/hooks/*.sh` scripts, and the `.claude/settings.json` hooks block — resolving the `sage-gui` binary to an absolute path inside each script and creating the `~/.sage/memory_mode` flag (defaults to `full`). Codex CLI users get the equivalent via `sage-gui codex install`.
+
+To wire it up by hand instead, copy `.claude/hooks/*.sh` and `.claude/settings.json` from this repo into your project's `.claude/` directory, point `SAGE_GUI_BIN` (or the default at the top of each script) at your `sage-gui` binary, and `chmod +x .claude/hooks/*.sh`. If your project already has a `.claude/settings.json`, merge the `hooks` block instead of replacing the file — it's keyed by event name, each event taking an array of matcher entries.
 
 Restart your Claude Code session. The hooks fire automatically.
 
@@ -57,9 +67,10 @@ Comment out or remove the matching event entry in `.claude/settings.json`. Hooks
 
 ## Mixed model
 
-SAGE v7.0 ships **two SessionStart/SessionEnd direct-write hooks** plus **three nudge hooks** for the events where direct-write would be too noisy (`UserPromptSubmit`, `PreCompact`) or too high-frequency without batching (`Stop`). The mix lets capture happen automatically at the session boundary, while the conversation-level memory remains the agent's job (via `sage_turn`, `sage_reflect`) since only the LLM has enough context to distill what's actually worth remembering.
+SAGE ships **two SessionStart/SessionEnd direct-write hooks** plus **nudge hooks** for the events where direct-write would be too noisy (`UserPromptSubmit`, `PreCompact`) or too high-frequency without batching (`Stop` / `SubagentStop`). The mix lets capture happen automatically at the session boundary, while the conversation-level memory remains the agent's job (via `sage_turn`, `sage_reflect`) since only the LLM has enough context to distill what's actually worth remembering. The `memory_mode` flag (above) tunes how aggressively the nudges fire.
 
 ## Forward direction
 
-- **v7.1** — broader read scope for the node-operator hook key so the SessionStart prefetch returns useful context on multi-agent nodes. Optional batched `PostToolUse` direct-write so tool calls auto-observe.
-- **v7.x** — Codex CLI hook parity using the same event shape, then Cursor / Cline / Windsurf as those hosts expose lifecycle events.
+- **v7.1** — broader read scope for the node-operator hook key so the SessionStart prefetch returns useful context on multi-agent nodes (shipped).
+- **v8.0** — hook logic moved into the `sage-gui` binary (no Python dependency), `~/.sage/memory_mode` (`full` / `bookend` / `on-demand`), and Codex CLI hook parity via `sage-gui codex install` (shipped).
+- **Next** — optional batched `PostToolUse` direct-write so tool calls auto-observe; Cursor / Cline / Windsurf parity as those hosts expose lifecycle events.
