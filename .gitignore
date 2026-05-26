@@ -3,6 +3,7 @@ bin/
 # Built binaries in repo root (not the cmd/ source dirs)
 /sage-gui
 /sage-lite
+/sage-launcher
 /amid
 *.exe
 *.exe~
@@ -18,6 +19,9 @@ import-done.txt
 
 # MCP config (contains local paths)
 .mcp.json
+
+# MCP registry auth tokens (secrets — never commit)
+.mcpregistry_*_token
 
 # Test binary
 *.test

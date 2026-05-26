@@ -1,14 +1,14 @@
 #!/bin/bash
-# SAGE SessionEnd direct-write hook.
-#
-# Records the lifecycle event (session ended) as a committed memory on the
-# local SAGE node. This complements the per-turn sage_turn calls the agent
-# makes during the session — those carry the actual conversational content,
-# this hook just bookends the session in the timeline.
-#
-# Soft-fails silently if the SAGE node isn't reachable.
+# SAGE SessionEnd hook — post a lifecycle observation to the local SAGE node.
+# Soft-fails silently if the node is unreachable. Never blocks agent exit.
+SAGE_HOME="${SAGE_HOME:-$HOME/.sage}"
+MODE=$(cat "$SAGE_HOME/memory_mode" 2>/dev/null || echo "full")
+SAGE_GUI_BIN="${SAGE_GUI_BIN:-/Applications/SAGE.app/Contents/MacOS/sage-gui}"
 
-HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"
-python3 "$HOOK_DIR/lib/sage_direct.py" session-end 2>/dev/null
-# Always exit 0 — a memory-write failure must never break the agent's exit path.
+if [ "$MODE" = "on-demand" ]; then
+    exit 0
+fi
+if [ -x "$SAGE_GUI_BIN" ]; then
+    "$SAGE_GUI_BIN" hook session-end 2>/dev/null
+fi
 exit 0
