@@ -1,0 +1,62 @@
+name: CodeQL
+
+# Checked-in scan config so "what CodeQL is doing on this repo" is a
+# git-tracked fact, mirroring how ci.yml + release.yml are checked in.
+# Replaces the (transient) GitHub-UI default setup.
+
+on:
+  push:
+    branches: [main]
+    tags-ignore: ['v*']
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly Sunday 06:00 UTC — catches new advisories landing on
+    # third-party deps even when nobody pushes for a while.
+    - cron: '0 6 * * 0'
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: go
+            build-mode: autobuild
+          - language: javascript-typescript
+            build-mode: none
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # Match the Go version pinned in ci.yml + release.yml so CodeQL
+      # builds the same module graph the rest of CI sees. Drift here
+      # would surface "works in CI, fails in CodeQL" oddities that
+      # waste triage time.
+      - if: matrix.language == 'go'
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@4e828ff8d448a8a6e532957b1811f387a63867e8 # v3.30.0
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          # security-extended adds queries beyond the default 'security-and-quality'
+          # baseline — worth it for consensus-critical code where false-positive
+          # noise is acceptable in exchange for catching subtler taint flows.
+          queries: security-extended
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@4e828ff8d448a8a6e532957b1811f387a63867e8 # v3.30.0
+        with:
+          category: '/language:${{ matrix.language }}'

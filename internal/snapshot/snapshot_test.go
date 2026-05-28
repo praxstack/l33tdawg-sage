@@ -1,6 +1,7 @@
 package snapshot
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -16,8 +17,41 @@ import (
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
+	"github.com/klauspost/compress/zstd"
 	_ "modernc.org/sqlite"
 )
+
+// writeTarZstWithEntry creates a tar.zst archive at path containing a
+// single regular-file entry with the given name and bytes. Used by the
+// zipslip regression test to forge malicious entry names like
+// "../etc/passwd".
+func writeTarZstWithEntry(path, name string, body []byte) error {
+	f, err := os.Create(path) //nolint:gosec // test fixture
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	zw, err := zstd.NewWriter(f)
+	if err != nil {
+		return err
+	}
+	tw := tar.NewWriter(zw)
+	if err := tw.WriteHeader(&tar.Header{
+		Name:     name,
+		Mode:     0o600,
+		Size:     int64(len(body)),
+		Typeflag: tar.TypeReg,
+	}); err != nil {
+		return err
+	}
+	if _, err := tw.Write(body); err != nil {
+		return err
+	}
+	if err := tw.Close(); err != nil {
+		return err
+	}
+	return zw.Close()
+}
 
 // seedDataDir builds a minimal SAGE data dir layout in root containing
 // BadgerDB, SQLite, CometBFT data/config dirs, and a vault.key.
@@ -586,5 +620,39 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 	got := sha256.Sum256(out.Bytes())
 	if want != got {
 		t.Fatal("hash mismatch")
+	}
+}
+
+// TestUntarZstd_RejectsPathTraversal asserts that untarZstd refuses any
+// archive entry whose name escapes the destination root. This guards the
+// go/zipslip CodeQL finding from regression.
+func TestUntarZstd_RejectsPathTraversal(t *testing.T) {
+	cases := []string{
+		"../etc/passwd",
+		"a/../../etc/passwd",
+		"/etc/passwd",
+		`..\windows\system32`,
+	}
+	for _, name := range cases {
+		name := name
+		t.Run(name, func(t *testing.T) {
+			tmp := t.TempDir()
+			src := filepath.Join(tmp, "evil.tar.zst")
+			if err := writeTarZstWithEntry(src, name, []byte("pwned")); err != nil {
+				t.Fatalf("build archive: %v", err)
+			}
+			dst := filepath.Join(tmp, "dst")
+			if err := os.MkdirAll(dst, 0o700); err != nil {
+				t.Fatalf("mkdir dst: %v", err)
+			}
+			err := untarZstd(src, dst)
+			if err == nil {
+				t.Fatalf("expected error for entry %q, got nil", name)
+			}
+			// Confirm nothing was written outside dst.
+			if _, err := os.Stat(filepath.Join(tmp, "etc", "passwd")); !os.IsNotExist(err) {
+				t.Fatalf("file written outside dst for %q: %v", name, err)
+			}
+		})
 	}
 }

@@ -69,7 +69,13 @@ func (w *statusWriter) Write(b []byte) (int, error) {
 	if !w.wroteHeader {
 		w.wroteHeader = true
 	}
-	return w.ResponseWriter.Write(b)
+	// False positive (go/reflected-xss): statusWriter is a *pure*
+	// passthrough — it does not generate response bytes, it only
+	// forwards what the wrapped handler already produced. Any XSS
+	// risk lives at the handler that wrote `b`, not here. The
+	// middleware never touches request data. Per-handler escaping
+	// is the right place to fix reflected-XSS, not the logger.
+	return w.ResponseWriter.Write(b) //nolint:gosec // passthrough writer; XSS, if any, originates upstream
 }
 
 // generateRequestID returns a random 16-byte hex string.

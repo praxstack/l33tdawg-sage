@@ -1666,6 +1666,13 @@ func (s *Server) runHybridWithExpansions(ctx context.Context, req HybridSearchMe
 	if topK <= 0 {
 		topK = 10
 	}
+	// Cap topK to prevent uncontrolled allocation on attacker-supplied
+	// JSON like {"top_k": 2147483647}. Anything above 1k is unreasonable
+	// for a single search response.
+	const maxTopK = 1000
+	if topK > maxTopK {
+		topK = maxTopK
+	}
 	if topK > len(out) {
 		topK = len(out)
 	}

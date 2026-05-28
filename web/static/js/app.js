@@ -6761,6 +6761,22 @@ function App() {
         });
     }};
 
+    // sanitiseNextPath returns a same-origin relative path or null. It
+    // exists to close go/js/client-side-unvalidated-url-redirection: the
+    // ?next= query param is attacker-controllable, so we require the
+    // value to (a) start with "/", (b) NOT be protocol-relative ("//"
+    // or "/\\") and (c) match a tight allowlist of known SAGE path
+    // prefixes. This blocks open redirect to "//evil.com",
+    // "/\\evil.com" and any "javascript:" payload.
+    function sanitiseNextPath(raw) {
+        if (!raw || typeof raw !== 'string') return null;
+        if (!raw.startsWith('/')) return null;
+        if (raw.startsWith('//') || raw.startsWith('/\\')) return null;
+        const allowedPrefixes = ['/oauth/', '/ui/', '/v1/'];
+        if (!allowedPrefixes.some(p => raw === p.slice(0, -1) || raw.startsWith(p))) return null;
+        return raw;
+    }
+
     // Check auth on mount
     useEffect(() => {
         checkAuth().then(res => {
@@ -6772,9 +6788,7 @@ function App() {
             // dashboard and the OAuth flow stalls. Same-origin paths only.
             if (!res.auth_required || res.authenticated) {
                 const nextRaw = new URLSearchParams(window.location.search).get('next');
-                const nextSafe = (nextRaw && nextRaw.startsWith('/') && !nextRaw.startsWith('//') && !nextRaw.startsWith('/\\'))
-                    ? nextRaw
-                    : null;
+                const nextSafe = sanitiseNextPath(nextRaw);
                 if (nextSafe) {
                     window.location.replace(nextSafe);
                     return;
@@ -6850,9 +6864,7 @@ function App() {
     // protocol-relative or absolute URLs to prevent open-redirect.
     if (authState === 'login') {
         const nextRaw = new URLSearchParams(window.location.search).get('next');
-        const nextSafe = (nextRaw && nextRaw.startsWith('/') && !nextRaw.startsWith('//') && !nextRaw.startsWith('/\\'))
-            ? nextRaw
-            : null;
+        const nextSafe = sanitiseNextPath(nextRaw);
         const onSuccess = () => {
             if (nextSafe) {
                 window.location.replace(nextSafe);

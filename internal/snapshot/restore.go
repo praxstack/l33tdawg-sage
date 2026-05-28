@@ -284,6 +284,15 @@ func untarZstd(src, dstRoot string) error {
 		if err != nil {
 			return fmt.Errorf("tar next: %w", err)
 		}
+		// ZipSlip defence: reject any entry whose name isn't a local
+		// relative path. filepath.IsLocal (Go 1.20+) is the canonical
+		// safe-path predicate — it rejects absolute paths, "..",
+		// reserved Windows names and empty components. We keep the
+		// Clean + HasPrefix("..") + IsAbs belt-and-braces below as a
+		// defensive double-check that also gives a clearer error.
+		if !filepath.IsLocal(hdr.Name) {
+			return fmt.Errorf("tar entry escapes root: %q", hdr.Name)
+		}
 		clean := filepath.Clean(hdr.Name)
 		if strings.HasPrefix(clean, "..") || filepath.IsAbs(clean) {
 			return fmt.Errorf("tar entry escapes root: %q", hdr.Name)
@@ -339,6 +348,10 @@ func untarZstdConfig(src, dataDir, vaultDest string) error {
 		}
 		if err != nil {
 			return fmt.Errorf("tar next: %w", err)
+		}
+		// ZipSlip defence — see untarZstd above for rationale.
+		if !filepath.IsLocal(hdr.Name) {
+			return fmt.Errorf("tar entry escapes root: %q", hdr.Name)
 		}
 		clean := filepath.Clean(hdr.Name)
 		if strings.HasPrefix(clean, "..") || filepath.IsAbs(clean) {

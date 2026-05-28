@@ -51,7 +51,13 @@ type pendingImport struct {
 func parseImportFile(w http.ResponseWriter, r *http.Request) ([]*memory.MemoryRecord, string, []string, error) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxImportSize)
 
-	if err := r.ParseMultipartForm(maxImportSize); err != nil {
+	// gosec G120 flags ParseMultipartForm with a non-literal limit as
+	// "unbounded form parsing". It isn't: the http.MaxBytesReader on
+	// the line above caps r.Body at maxImportSize bytes, so the parser
+	// can never read past that ceiling regardless of the argument
+	// passed here. The argument is the in-memory threshold; the body
+	// cap is the absolute ceiling.
+	if err := r.ParseMultipartForm(maxImportSize); err != nil { //nolint:gosec // G120 — body capped by MaxBytesReader above
 		return nil, "", nil, fmt.Errorf("failed to parse upload: %w", err)
 	}
 

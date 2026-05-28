@@ -997,7 +997,15 @@ func (s *SQLiteStore) QuerySimilar(ctx context.Context, embedding []float32, opt
 		return scored[i].similarity > scored[j].similarity
 	})
 
+	// opts.TopK was capped to [1, 100] at function entry (lines 896-901),
+	// but make an explicit local guard so CodeQL sees the bound at the
+	// allocation site — defence-in-depth against future refactors that
+	// might bypass the entry-time clamp.
 	limit := opts.TopK
+	const maxLimit = 1000
+	if limit < 0 || limit > maxLimit {
+		limit = maxLimit
+	}
 	if limit > len(scored) {
 		limit = len(scored)
 	}
@@ -1192,6 +1200,18 @@ func (s *SQLiteStore) SearchHybrid(ctx context.Context, query string, embedding 
 // reranker and returns the top-K. Failures fall back to the RRF-sorted
 // candidates so a flaky reranker upstream never blocks recall.
 func (s *SQLiteStore) applyReranker(ctx context.Context, query string, candidates []*memory.MemoryRecord, topK int) ([]*memory.MemoryRecord, error) {
+	// Bound topK so an attacker-influenced value can't drive a giant
+	// preallocation in `out := make(..., 0, topK)` below.
+	const maxRerankK = 1000
+	if topK < 0 {
+		topK = 0
+	}
+	if topK > maxRerankK {
+		topK = maxRerankK
+	}
+	if topK > len(candidates) {
+		topK = len(candidates)
+	}
 	texts := make([]string, len(candidates))
 	for i, c := range candidates {
 		texts[i] = c.Content

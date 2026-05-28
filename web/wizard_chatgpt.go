@@ -1044,6 +1044,27 @@ func wizardInstallAutostart(ctx context.Context, _ string, log func(step, msg st
 // wizardVerifyTunnel polls https://<hostname>/health until it returns 200
 // or 30s elapses.
 func wizardVerifyTunnel(ctx context.Context, healthURL string, log func(step, msg string)) error {
+	// SSRF defence: even though callers (handleWizardCreateTunnel)
+	// build healthURL as "https://"+regex-validated-hostname+"/health",
+	// we re-parse and check scheme+host here so this helper is safe
+	// for any future caller and CodeQL can see the check at the sink.
+	u, perr := url.Parse(healthURL)
+	if perr != nil || u.Host == "" {
+		return fmt.Errorf("invalid health URL")
+	}
+	// Production callers use https://. httptest in unit tests uses http
+	// against 127.0.0.1 / localhost only, which we explicitly allow.
+	switch u.Scheme {
+	case "https":
+		// ok
+	case "http":
+		host := u.Hostname()
+		if host != "127.0.0.1" && host != "localhost" && host != "::1" {
+			return fmt.Errorf("invalid health URL scheme")
+		}
+	default:
+		return fmt.Errorf("invalid health URL scheme")
+	}
 	deadline := time.Now().Add(30 * time.Second)
 	client := &http.Client{Timeout: 5 * time.Second}
 	for time.Now().Before(deadline) {

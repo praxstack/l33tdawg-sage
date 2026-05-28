@@ -828,7 +828,20 @@ func (h *OAuthHandler) processConsent(w http.ResponseWriter, r *http.Request, p 
 	}
 
 	// 3. Redirect back to the client's redirect_uri with the code + state.
-	redirectURL, err := url.Parse(p.RedirectURI)
+	//
+	// Defence-in-depth: even though HandleAuthorize already called
+	// resolveClient() for this (client_id, redirect_uri) pair AND the
+	// CSRF nonce above HMACs the RedirectURI so it can't be tampered
+	// with between GET and POST, we re-resolve at the redirect sink so
+	// the allowlist check is co-located with the http.Redirect call.
+	// This closes go/unvalidated-url-redirection and makes the
+	// invariant obvious to future readers.
+	_, registered, clientErr := h.resolveClient(r.Context(), p.ClientID, p.RedirectURI)
+	if clientErr != "" {
+		http.Error(w, clientErr, http.StatusBadRequest)
+		return
+	}
+	redirectURL, err := url.Parse(registered)
 	if err != nil {
 		http.Error(w, "invalid redirect_uri", http.StatusBadRequest)
 		return

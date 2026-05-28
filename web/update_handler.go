@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -191,14 +192,30 @@ func (h *DashboardHandler) performUpdate(downloadURL, checksum, execPath string)
 	// Step 1: Download
 	h.sendUpdateProgress("download", "active", "Downloading update from GitHub...")
 
+	// SSRF defence: re-validate the URL at the download site even though
+	// handleApplyUpdate already checks it. CodeQL can't trace the value
+	// across the goroutine boundary, and defence-in-depth is cheap.
+	// The URL must be HTTPS and the host must be on a tight allowlist of
+	// GitHub-owned release-asset hosts.
+	parsedURL, err := url.Parse(downloadURL)
+	if err != nil || parsedURL.Scheme != "https" {
+		h.sendUpdateProgress("download", "error", "Invalid download URL")
+		return
+	}
+	allowedHosts := map[string]bool{
+		"github.com":                           true,
+		"objects.githubusercontent.com":        true,
+		"release-assets.githubusercontent.com": true,
+	}
+	if !allowedHosts[parsedURL.Host] {
+		h.sendUpdateProgress("download", "error", "Download URL host not allowed")
+		return
+	}
+
 	client := &http.Client{
 		Timeout: 5 * time.Minute,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			u := req.URL.String()
-			allowed := strings.HasPrefix(u, "https://github.com/") ||
-				strings.HasPrefix(u, "https://objects.githubusercontent.com/") ||
-				strings.HasPrefix(u, "https://release-assets.githubusercontent.com/")
-			if !allowed {
+			if req.URL.Scheme != "https" || !allowedHosts[req.URL.Host] {
 				return fmt.Errorf("redirect to non-GitHub URL blocked")
 			}
 			return nil

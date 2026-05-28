@@ -86,6 +86,13 @@ func RRFMerge(
 	if topK <= 0 {
 		topK = 10
 	}
+	// Bound topK to prevent uncontrolled allocation when the value
+	// flows from an attacker-supplied JSON field. 1000 is far above
+	// any sensible single-query limit.
+	const maxTopK = 1000
+	if topK > maxTopK {
+		topK = maxTopK
+	}
 	if params.RRFK <= 0 {
 		params.RRFK = defaultRRFK
 	}

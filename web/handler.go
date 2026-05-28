@@ -605,6 +605,13 @@ func (h *DashboardHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		MaxAge:   int(sessionTTL.Seconds()),
 		HttpOnly: true,
+		// Secure is set when the request arrived over TLS. SAGE-Personal
+		// can legitimately serve over plain HTTP on localhost (e.g. when
+		// launched from the app icon and bound to 127.0.0.1:8080), where
+		// forcing Secure would silently break login. Production
+		// deployments terminate TLS in front of sage-gui and r.TLS is
+		// populated by the chi server when behind a TLS-enabled listener.
+		Secure:   r.TLS != nil,
 		SameSite: http.SameSiteStrictMode,
 	})
 
@@ -623,13 +630,16 @@ func (h *DashboardHandler) handleLock(w http.ResponseWriter, r *http.Request) {
 		h.sessions.Delete(cookie.Value)
 	}
 
-	// Clear the cookie.
+	// Clear the cookie. Mirror the Secure attribute logic from
+	// handleUnlock — only mark Secure when the request is over TLS so
+	// localhost HTTP isn't broken.
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
+		Secure:   r.TLS != nil,
 		SameSite: http.SameSiteStrictMode,
 	})
 

@@ -988,15 +988,55 @@ func sageHome() string {
 	return filepath.Join(userHome, ".sage")
 }
 
+// sanitizeAgentNameForPath strips any character that could be used to
+// escape the bundle directory (path separators, dotted-segments, NUL).
+// The result is safe to use as a single filename component inside
+// bundleDir/<bundleName>.zip.
+func sanitizeAgentNameForPath(name string) string {
+	// Replace anything that isn't [A-Za-z0-9_-] with '_'. This is more
+	// restrictive than filepath.Base but eliminates the entire class of
+	// path-injection bugs at the source.
+	out := make([]byte, 0, len(name))
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z',
+			c >= 'A' && c <= 'Z',
+			c >= '0' && c <= '9',
+			c == '_', c == '-':
+			out = append(out, c)
+		default:
+			out = append(out, '_')
+		}
+	}
+	if len(out) == 0 {
+		return "agent"
+	}
+	return string(out)
+}
+
 // generateBundle creates a ZIP bundle for an agent.
 func generateBundle(bundleDir string, agent *store.AgentEntry, seed []byte) (string, error) {
-	zipPath := filepath.Join(bundleDir, fmt.Sprintf("sage-agent-%s.zip", agent.Name))
+	// Sanitise agent name before it becomes part of any filesystem path.
+	// req.Name is user-controlled JSON and could otherwise contain
+	// "../" or "/" to escape bundleDir.
+	safeName := sanitizeAgentNameForPath(agent.Name)
+	zipPath := filepath.Join(bundleDir, fmt.Sprintf("sage-agent-%s.zip", safeName))
+	// Belt-and-braces: confirm the resulting path is still inside
+	// bundleDir after Clean. If a future change to sanitise lets a
+	// traversal sequence through, we fail closed rather than write
+	// outside the sandbox.
+	cleanZip := filepath.Clean(zipPath)
+	cleanDir := filepath.Clean(bundleDir)
+	if !strings.HasPrefix(cleanZip, cleanDir+string(os.PathSeparator)) {
+		return "", fmt.Errorf("agent name produces path outside bundle dir")
+	}
 
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
 
 	// agent.key — Ed25519 seed (32 bytes)
-	fw, err := zw.Create(fmt.Sprintf("sage-agent-%s/agent.key", agent.Name))
+	fw, err := zw.Create(fmt.Sprintf("sage-agent-%s/agent.key", safeName))
 	if err != nil {
 		return "", err
 	}
@@ -1017,7 +1057,7 @@ quorum:
   enabled: true
   peers: []  # Will be configured during setup
 `, agent.Name)
-	fw, err = zw.Create(fmt.Sprintf("sage-agent-%s/config.yaml", agent.Name))
+	fw, err = zw.Create(fmt.Sprintf("sage-agent-%s/config.yaml", safeName))
 	if err != nil {
 		return "", err
 	}
@@ -1037,7 +1077,7 @@ quorum:
     }
   }
 }`
-	fw, err = zw.Create(fmt.Sprintf("sage-agent-%s/.mcp.json", agent.Name))
+	fw, err = zw.Create(fmt.Sprintf("sage-agent-%s/.mcp.json", safeName))
 	if err != nil {
 		return "", err
 	}
@@ -1062,7 +1102,7 @@ Clearance: %d
 
 This agent will connect to the primary node's network.
 `, agent.Name, agent.AgentID, agent.Role, agent.Clearance)
-	fw, err = zw.Create(fmt.Sprintf("sage-agent-%s/SETUP.txt", agent.Name))
+	fw, err = zw.Create(fmt.Sprintf("sage-agent-%s/SETUP.txt", safeName))
 	if err != nil {
 		return "", err
 	}
@@ -1074,7 +1114,10 @@ This agent will connect to the primary node's network.
 		return "", err
 	}
 
-	if err := os.WriteFile(zipPath, buf.Bytes(), 0600); err != nil { //nolint:gosec // zipPath is server-controlled
+	// zipPath = bundleDir/sage-agent-<safeName>.zip where safeName is
+	// the [A-Za-z0-9_-] sanitised agent name (see sanitizeAgentNameForPath
+	// above) and a HasPrefix(bundleDir) check has already passed.
+	if err := os.WriteFile(zipPath, buf.Bytes(), 0600); err != nil { //nolint:gosec // zipPath is bundleDir/<sanitised>.zip
 		return "", err
 	}
 	return zipPath, nil
