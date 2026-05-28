@@ -268,12 +268,24 @@ type SageApp struct {
 	// v8 plan activates. Pre-fork blocks replay byte-identical to v7.1.1
 	// because every fork-gated handler reads this field deterministically.
 	v8AppliedHeight int64
+
+	// v8_2AppliedHeight is the block at which the v8.2 PoE-weighted
+	// quorum fork activated. Same semantics as v8AppliedHeight: zero
+	// means pre-fork (Phase-1 equal-weight quorum, byte-identical to
+	// v8.1.2); non-zero means quorum after this height consults the
+	// persisted poew:<id> weights via postV8_2Fork's strict-greater-than
+	// gate.
+	v8_2AppliedHeight int64
 }
 
 // v8UpgradeName is the canonical name for the v8.0 activation record. The
 // v7.5 watchdog names upgrade plans "app-v<TargetAppVersion>" so the lookup
 // must match. Centralised here to keep the fork-gate accessors honest.
 const v8UpgradeName = "app-v2"
+
+// v8_2UpgradeName is the canonical name for the v8.2 activation record.
+// Same naming discipline as v8UpgradeName: "app-v<TargetAppVersion>".
+const v8_2UpgradeName = "app-v3"
 
 // postV8Fork is the consensus-side fork-gate predicate. Use it inside
 // processTx and other height-aware paths. Strict greater-than mirrors
@@ -318,6 +330,110 @@ func recordV8Branch(postFork bool) {
 		branch = "post"
 	}
 	metrics.ForkBranchTotal.WithLabelValues("v8", branch).Inc()
+}
+
+// postV8_2Fork is the consensus-side fork-gate predicate for the v8.2
+// PoE-weighted quorum activation. Strict greater-than mirrors postV8Fork
+// (and CometBFT's "applied at H+1" semantic): the activation block H_act
+// itself still runs the pre-fork branch so the only AppHash delta at
+// H_act is the MarkUpgradeApplied write. Quorum decisions on H > H_act
+// consult the persisted poew:<id> weights (with bootstrap fallback for
+// validators whose entry is missing).
+func (app *SageApp) postV8_2Fork(height int64) bool {
+	return app.v8_2AppliedHeight > 0 && height > app.v8_2AppliedHeight
+}
+
+// IsPostV8_2Fork is the off-consensus accessor reserved for any future
+// REST surface that wants to query the live fork state. Reads the cached
+// AppState.Height, advisory only — never use this in the consensus path.
+func (app *SageApp) IsPostV8_2Fork() bool {
+	return app.v8_2AppliedHeight > 0 && app.state != nil && app.state.Height > app.v8_2AppliedHeight
+}
+
+// refreshV8_2Fork populates v8_2AppliedHeight from the persisted upgrade
+// audit trail. Called on boot (so a node restarting on a post-fork chain
+// picks up the gate without waiting for activation) and after the
+// activation block in FinalizeBlock.
+func (app *SageApp) refreshV8_2Fork() {
+	rec, err := app.badgerStore.GetAppliedUpgrade(v8_2UpgradeName)
+	if err != nil {
+		app.logger.Warn().Err(err).Str("name", v8_2UpgradeName).Msg("read v8.2 applied-upgrade record")
+		return
+	}
+	if rec == nil {
+		return
+	}
+	app.v8_2AppliedHeight = rec.AppliedHeight
+}
+
+// recordV8_2Branch is the v8.2 sibling of recordV8Branch. Same metric
+// name (sage_fork_branch_total) with fork="v8.2" so dashboards can plot
+// the two activations side by side.
+func recordV8_2Branch(postFork bool) {
+	branch := "pre"
+	if postFork {
+		branch = "post"
+	}
+	metrics.ForkBranchTotal.WithLabelValues("v8.2", branch).Inc()
+}
+
+// refreshPoEWeights hydrates each validator's in-memory PoEWeight from the
+// last poew:<id> set persisted by processEpoch. Called on boot after
+// LoadValidators so a node restarting between epoch boundaries does NOT
+// reset weights to zero — that would diverge consensus from any peer
+// still running with the in-memory values. On a fresh chain (no
+// poew:current marker yet) this is a no-op and the bootstrap fallback in
+// checkAndApplyQuorum takes care of pre-first-epoch quorum decisions.
+//
+// Validators present in the persisted set but absent from the in-memory
+// set are ignored (they were removed via governance after the epoch
+// boundary). Validators present in the in-memory set but absent from the
+// persisted set keep PoEWeight == 0 and hit the bootstrap fallback path.
+func (app *SageApp) refreshPoEWeights() {
+	weights, ok, err := app.badgerStore.GetEpochWeights()
+	if err != nil {
+		app.logger.Warn().Err(err).Msg("load epoch weights")
+		return
+	}
+	if !ok {
+		return // pre-first-epoch chain
+	}
+	for _, v := range app.validators.GetAll() {
+		if w, present := weights[v.ID]; present {
+			v.PoEWeight = w
+		}
+	}
+	app.logger.Info().Int("hydrated", len(weights)).Msg("PoE weights restored from BadgerDB")
+}
+
+// poeWeightOrFallback returns the validator's persisted PoE weight if it's
+// positive, otherwise an equal-share fallback of 1/N. Three call sites use
+// the fallback path:
+//
+//   - Between activation block H_act and the first post-fork epoch boundary,
+//     no poew:* keys exist yet — every validator hits the fallback so quorum
+//     behaves identically to the pre-fork equal-weight branch.
+//   - A validator added via governance at a non-boundary block carries
+//     PoEWeight == 0 until the next processEpoch runs — they get 1/N until
+//     then so they aren't silently disenfranchised for up to 100 blocks.
+//   - Defensive guard against a poew:<id> entry being missing for an
+//     otherwise-active validator (should not happen, but cheap to handle).
+//
+// Returning 1/N (rather than a fixed 1.0) keeps the fallback contribution
+// in the same numeric range as NormalizeWeights' output, so a mid-epoch
+// validator add doesn't suddenly contribute more weight than peers whose
+// weights have been capped at RepCap. Quorum decisions are ratio-only
+// (HasQuorum: acceptWeight/totalWeight >= 2/3) so the choice doesn't
+// affect the threshold either way — the win is legibility of the
+// acceptWeight/totalWeight audit log lines.
+func poeWeightOrFallback(w float64, n int) float64 {
+	if w > 0 {
+		return w
+	}
+	if n <= 0 {
+		return 1.0
+	}
+	return 1.0 / float64(n)
 }
 
 // defaultFlushMaxRetries caps Commit's SQLITE_BUSY retry loop. At 30 tries
@@ -365,6 +481,7 @@ func NewSageApp(badgerPath string, postgresURL string, logger zerolog.Logger) (*
 		flushMaxRetries: defaultFlushMaxRetries,
 	}
 	app.refreshV8Fork()
+	app.refreshV8_2Fork()
 
 	// Reload persisted validators from BadgerDB (survives restart)
 	persistedVals, err := bs.LoadValidators()
@@ -379,6 +496,7 @@ func NewSageApp(badgerPath string, postgresURL string, logger zerolog.Logger) (*
 		}
 		logger.Info().Int("validators", app.validators.Size()).Msg("validators restored from state")
 	}
+	app.refreshPoEWeights()
 
 	return app, nil
 }
@@ -409,6 +527,7 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 		flushMaxRetries: defaultFlushMaxRetries,
 	}
 	app.refreshV8Fork()
+	app.refreshV8_2Fork()
 
 	persistedVals, err := bs.LoadValidators()
 	if err != nil {
@@ -422,6 +541,7 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 		}
 		logger.Info().Int("validators", app.validators.Size()).Msg("validators restored from state")
 	}
+	app.refreshPoEWeights()
 
 	return app, nil
 }
@@ -632,6 +752,9 @@ func (app *SageApp) FinalizeBlock(_ context.Context, req *abcitypes.RequestFinal
 		}
 		if plan.Name == v8UpgradeName {
 			app.v8AppliedHeight = req.Height
+		}
+		if plan.Name == v8_2UpgradeName {
+			app.v8_2AppliedHeight = req.Height
 		}
 		app.logger.Info().
 			Str("name", plan.Name).
@@ -1046,13 +1169,31 @@ func (app *SageApp) checkAndApplyQuorum(memoryID string, height int64, blockTime
 	votes := make(map[string]bool)
 	weights := make(map[string]float64)
 
+	// v8.2: post-fork blocks consult PoEWeight; pre-fork blocks keep
+	// the Phase-1 equal-weight branch so they replay byte-identical to
+	// v8.1.2. Recorded on the same sage_fork_branch_total metric (with
+	// fork="v8.2") so operators can confirm the gate flipped without
+	// scraping logs.
+	postFork := app.postV8_2Fork(height)
+	recordV8_2Branch(postFork)
+
 	app.logger.Debug().
 		Str("memory_id", memoryID).
 		Int("num_validators", len(validators)).
+		Bool("post_v8_2_fork", postFork).
 		Msg("checking quorum")
 
 	for _, v := range validators {
-		weights[v.ID] = 1.0 // Phase 1: equal weights
+		if postFork {
+			// Bootstrap fallback (1/N) covers three cases: pre-first-epoch
+			// chain, mid-epoch governance add, and defensive guard for a
+			// missing poew:<id> entry. HasQuorum is ratio-only so the
+			// transient mix of "real" and "1/N" weights doesn't move the
+			// 2/3 threshold — see docs/v8.2-PLAN.md "Bootstrap fallback".
+			weights[v.ID] = poeWeightOrFallback(v.PoEWeight, len(validators))
+		} else {
+			weights[v.ID] = 1.0 // Phase 1, pre-fork
+		}
 		voteKey := fmt.Sprintf("vote:%s:%s", memoryID, v.ID)
 		voteData, err := app.badgerStore.GetState(voteKey)
 		if err == nil && voteData != nil {
@@ -1061,6 +1202,7 @@ func (app *SageApp) checkAndApplyQuorum(memoryID string, height int64, blockTime
 				Str("memory_id", memoryID).
 				Str("validator", v.ID[:16]).
 				Str("decision", string(voteData)).
+				Float64("weight", weights[v.ID]).
 				Msg("found vote")
 		}
 	}
@@ -2538,6 +2680,19 @@ func (app *SageApp) processEpoch(height int64, blockTime time.Time) {
 
 	// Normalize weights with rep cap
 	normalized := poe.NormalizeWeights(rawWeights)
+
+	// v8.2: persist the normalized weight set on-chain so a node restart
+	// between epoch boundaries does not reset PoEWeight to zero (which
+	// would diverge consensus). Pre-fork the call is suppressed so v8.1.x
+	// chains and v8.2 pre-activation blocks replay byte-identical — the
+	// new poew:* keys only enter the BadgerDB key space (and therefore
+	// the AppHash) after the activation block. See docs/v8.2-PLAN.md
+	// "Activation-block edge case" for why H_act itself stays pre-fork.
+	if app.postV8_2Fork(height) {
+		if err := app.badgerStore.SetEpochWeights(uint64(epochNum), normalized); err != nil { // #nosec G115 -- epochNum is non-negative
+			app.logger.Error().Err(err).Int64("epoch", epochNum).Msg("persist epoch weights")
+		}
+	}
 
 	// Update validator PoE weights and buffer PostgreSQL writes
 	for _, v := range validators {

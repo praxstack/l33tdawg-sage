@@ -1238,7 +1238,9 @@ results = client.query("your query", status_filter="committed")
 
 New memories start as `proposed` and only become `committed` after reaching quorum (>= 2/3 weighted validator votes).
 
-> **Phase 1 note:** the quorum check currently assigns every validator an **equal weight of 1.0** (`internal/abci/app.go:1055`), so quorum is effectively a 2/3 *majority*. The PoE engine computes per-validator weights (and epoch accuracy/domain/corroboration scores), but those are **not yet applied** to the quorum decision — domain score is fixed at 0.5 and corroboration at a default in Phase 1 (`app.go:2493,2510`). Treat the "weighted vote" wording above as the Phase-2 target, not current behavior.
+> **Phase 2 (v8.2+) note:** the quorum check consults each validator's PoE weight on **post-fork blocks** — gated by `app.postV8_2Fork(height)` in `checkAndApplyQuorum` (`internal/abci/app.go`). Pre-v8.2-activation blocks (and any v8.1.x chain) keep the equal-weight 2/3-majority branch so they replay byte-identical to v8.1.2. Weights are computed every epoch boundary by `processEpoch` and persisted on-chain at `poew:<validatorID>` (IEEE-754 BE float64) + `poew:current` (uvarint epoch number), so a node restart between epoch boundaries hydrates the same weight set its peers are running with. Validators added mid-epoch (PoEWeight == 0 until the next boundary) fall back to `1/N` via `poeWeightOrFallback` — they aren't silently disenfranchised, but their vote carries equal-share weight until they earn a real one.
+>
+> **Phase 1 remnants still in v8.2:** `domain_score` is hardcoded to 0.5 (`app.go:processEpoch`) and corroboration uses a default (`CorroborationScore(0, CorrMax)`). Real per-domain expertise tracking and per-validator corroboration count are explicit follow-on work (v8.3+) — the math in `poe.ComputeWeight` already weights them, but the inputs come from cold-start priors until those sources land.
 
 ### Data reset
 
