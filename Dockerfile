@@ -1,7 +1,7 @@
 # SAGE — Persistent consensus-validated memory for AI agents
 # Server mode:  docker run -p 8080:8080 -v ~/.sage:/root/.sage ghcr.io/l33tdawg/sage:latest
 # MCP stdio:    docker run -i ghcr.io/l33tdawg/sage:latest mcp
-FROM golang:1.24-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 WORKDIR /src
 COPY go.mod go.sum ./
