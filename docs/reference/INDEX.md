@@ -53,13 +53,15 @@ The same `0–4` integer is overloaded in the codebase:
 
 | Value | As **data classification** (memory records) | As **operational clearance** (agent capability) |
 |-------|---------------------------------------------|-------------------------------------------------|
-| 0 | PUBLIC — any federated org | (None) |
-| 1 | INTERNAL — own org only | Read |
-| 2 | CONFIDENTIAL — own org + explicit grants | Read + Write |
-| 3 | SECRET — own org + dept + grant | Validate |
-| 4 | TOP SECRET — named agents, dual-approval | Admin |
+| 0 | PUBLIC — any federated org (gate-exempt) | (None) |
+| 1 | INTERNAL — own-org agents (clearance ≥1) | Read |
+| 2 | CONFIDENTIAL — own-org agents (clearance ≥2); grants/federation add cross-org | Read + Write |
+| 3 | SECRET — own-org agents (clearance ≥3), dept scope; grants/federation additive | Validate |
+| 4 | TOP SECRET — named agents via grant, dual-approval | Admin |
 
 The **memory record** meaning is the data-classification column. See [`concepts/clearance-classification.md`](concepts/clearance-classification.md).
+
+**Within-org reads are clearance-gated, not grant-gated.** The per-record gate is an **OR** over three additive paths (`HasAccessMultiOrg`): *direct grant* → *same-org clearance ≥ the record's level* → *federation ceiling ≥ level*. So a same-org agent with sufficient clearance reads a CONFIDENTIAL/SECRET record **without** any grant; explicit grants and federation extend access (typically cross-org), they are not a within-org requirement. See [`concepts/rbac-orgs-federation.md`](concepts/rbac-orgs-federation.md) for the resolution algorithm.
 
 ### The classification submit rule (v6.8.6+)
 - On a **REST/SDK submit**, an **omitted** `classification` is stored as **PUBLIC (0)** — *not* INTERNAL.
