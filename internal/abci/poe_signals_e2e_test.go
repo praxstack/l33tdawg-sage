@@ -188,14 +188,21 @@ func newAppWithLogger(t *testing.T, logger zerolog.Logger) *SageApp {
 // handler FinalizeBlock dispatches to) into the shared "general" domain.
 func submitMemory(t *testing.T, app *SageApp, ak agentKey, memoryID string, height int64) {
 	t.Helper()
-	body := []byte(memoryID + "general")
+	submitMemoryDomain(t, app, ak, memoryID, "general", height)
+}
+
+// submitMemoryDomain is submitMemory with an explicit domain tag, so v8.4 tests
+// can submit into a non-shared domain (where the domain factor engages).
+func submitMemoryDomain(t *testing.T, app *SageApp, ak agentKey, memoryID, domain string, height int64) {
+	t.Helper()
+	body := []byte(memoryID + domain)
 	pubKey, sig, bodyHash, ts := signAgentProof(t, ak, body)
 	parsed := &tx.ParsedTx{
 		Type: tx.TxTypeMemorySubmit,
 		MemorySubmit: &tx.MemorySubmit{
 			MemoryID:        memoryID,
 			MemoryType:      tx.MemoryTypeObservation,
-			DomainTag:       "general",
+			DomainTag:       domain,
 			ConfidenceScore: 0.8,
 			Content:         "content-" + memoryID,
 		},

@@ -41,7 +41,10 @@ import (
 // access-control fixes. v8.2 bumps to 3 for the PoE-weighted quorum. v8.3
 // bumps to 4 for the real PoE signals (verdict-correctness EWMA accuracy +
 // per-validator corroboration count, persisted in 56-byte vstats: records).
-const upgradeTargetAppVersion uint64 = 4
+// v8.4 bumps to 5 for the real Domain factor: a validator's quorum weight on a
+// domain-D memory is conditioned on its verdict-correctness IN D (per-domain
+// EWMA persisted in vstats_domain:<v>:<D>, the memory's domain in memdomain:<id>).
+const upgradeTargetAppVersion uint64 = 5
 
 // upgradeWatchdogConfig is everything the watchdog needs. Constructed
 // in runServe after the agent key is loaded and CometBFT is up.

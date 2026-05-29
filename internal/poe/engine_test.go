@@ -32,6 +32,59 @@ func TestEpsilonFloor(t *testing.T) {
 	assert.Greater(t, w, 0.0)
 }
 
+// NormalizeWeightsDeterministic must produce byte-identical output across calls
+// regardless of Go's randomized map-iteration order (the consensus-safety fix
+// from the poe-drift audit), while preserving the rep-cap + sum-to-1 invariants.
+func TestNormalizeWeightsDeterministic_StableAcrossCalls(t *testing.T) {
+	// A wide magnitude spread across many validators — the regime where the
+	// legacy map-order sum is non-associative and can diverge by ULPs.
+	weights := map[string]float64{
+		"v01": 0.9837261, "v02": 0.0102345, "v03": 0.5500001, "v04": 0.0100000,
+		"v05": 0.7321119, "v06": 0.0339211, "v07": 0.9999999, "v08": 0.0410201,
+		"v09": 0.1234567, "v10": 0.8765432, "v11": 0.0501234, "v12": 0.6543210,
+		"v13": 0.0199999, "v14": 0.4444444, "v15": 0.0876543,
+	}
+
+	ref := NormalizeWeightsDeterministic(weights)
+	// Re-run many times; sorted-order summation makes every run identical bit-for-bit.
+	for i := 0; i < 200; i++ {
+		got := NormalizeWeightsDeterministic(weights)
+		for id, w := range ref {
+			if math.Float64bits(got[id]) != math.Float64bits(w) {
+				t.Fatalf("run %d: non-deterministic weight for %s: %x != %x", i, id, math.Float64bits(got[id]), math.Float64bits(w))
+			}
+		}
+	}
+
+	// Invariant preserved: normalized weights sum to ~1.0 (the rep-cap loop is
+	// bounded at 10 iterations and need not drive every weight strictly under
+	// 10% for an arbitrary spread — see TestRepCap — so we only assert the sum).
+	var sum float64
+	for _, w := range ref {
+		sum += w
+	}
+	assert.InDelta(t, 1.0, sum, 1e-9, "normalized weights sum to 1")
+}
+
+// Replay parity for the common case: with equal weights (the regime real
+// devnets and single-node chains run in — the float sum is order-insensitive),
+// the deterministic variant returns bits identical to the legacy one, so the
+// v8.4 fork-gate does not disturb existing chains.
+func TestNormalizeWeightsDeterministic_EqualWeightsMatchLegacy(t *testing.T) {
+	for _, n := range []int{1, 3, 4, 7, 20} {
+		weights := make(map[string]float64, n)
+		for i := 0; i < n; i++ {
+			weights[fmt.Sprintf("v%02d", i)] = 1.0
+		}
+		legacy := NormalizeWeights(weights)
+		det := NormalizeWeightsDeterministic(weights)
+		for id, w := range legacy {
+			assert.Equal(t, math.Float64bits(w), math.Float64bits(det[id]),
+				"n=%d %s: deterministic must match legacy bit-for-bit on equal weights", n, id)
+		}
+	}
+}
+
 func TestRepCap(t *testing.T) {
 	// Use enough validators (20) so the 10% cap is achievable
 	weights := make(map[string]float64, 20)

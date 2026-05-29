@@ -285,6 +285,16 @@ type SageApp struct {
 	// per-validator corroboration count into processEpoch, and grow vstats:<id>
 	// to 56 bytes. Gated by postV8_3Fork's strict-greater-than.
 	v8_3AppliedHeight int64
+
+	// v8_4AppliedHeight is the block at which the v8.4 Domain-factor fork
+	// activated. Same semantics as the prior gates: zero means pre-fork
+	// (domain is the neutral 0.5 constant everywhere, byte-identical to v8.3.x);
+	// non-zero means blocks after this height (a) record each memory's domain in
+	// memdomain:<id> at submit, (b) credit a per-domain verdict-correctness EWMA
+	// in vstats_domain:<v>:<D> at terminal verdict, and (c) weight a validator's
+	// quorum vote on a non-shared-domain memory by its live verdict-correctness
+	// IN that domain. Gated by postV8_4Fork's strict-greater-than.
+	v8_4AppliedHeight int64
 }
 
 // v8UpgradeName is the canonical name for the v8.0 activation record. The
@@ -299,6 +309,10 @@ const v8_2UpgradeName = "app-v3"
 // v8_3UpgradeName is the canonical name for the v8.3 activation record.
 // Same naming discipline: "app-v<TargetAppVersion>".
 const v8_3UpgradeName = "app-v4"
+
+// v8_4UpgradeName is the canonical name for the v8.4 activation record.
+// Same naming discipline: "app-v<TargetAppVersion>".
+const v8_4UpgradeName = "app-v5"
 
 // postV8Fork is the consensus-side fork-gate predicate. Use it inside
 // processTx and other height-aware paths. Strict greater-than mirrors
@@ -435,6 +449,86 @@ func recordV8_3Branch(postFork bool) {
 	metrics.ForkBranchTotal.WithLabelValues("v8.3", branch).Inc()
 }
 
+// postV8_4Fork is the consensus-side fork-gate predicate for the v8.4
+// Domain-factor activation (memdomain:<id> writes at submit, per-domain
+// verdict-correctness EWMA in vstats_domain:<v>:<D>, and domain-conditional
+// quorum weight). Strict greater-than mirrors postV8_3Fork: the activation
+// block H_act itself still runs the pre-fork branch (no memdomain: write, no
+// per-domain crediting, neutral-domain quorum) so the only AppHash delta at
+// H_act is the MarkUpgradeApplied write. Blocks H > H_act enable the domain
+// signal.
+func (app *SageApp) postV8_4Fork(height int64) bool {
+	return app.v8_4AppliedHeight > 0 && height > app.v8_4AppliedHeight
+}
+
+// IsPostV8_4Fork is the off-consensus accessor reserved for any future
+// REST surface that wants to query the live fork state. Reads the cached
+// AppState.Height, advisory only — never use this in the consensus path.
+func (app *SageApp) IsPostV8_4Fork() bool {
+	return app.v8_4AppliedHeight > 0 && app.state != nil && app.state.Height > app.v8_4AppliedHeight
+}
+
+// refreshV8_4Fork populates v8_4AppliedHeight from the persisted upgrade
+// audit trail. Called on boot (so a node restarting on a post-fork chain
+// picks up the gate without waiting for activation) and after the
+// activation block in FinalizeBlock.
+func (app *SageApp) refreshV8_4Fork() {
+	rec, err := app.badgerStore.GetAppliedUpgrade(v8_4UpgradeName)
+	if err != nil {
+		app.logger.Warn().Err(err).Str("name", v8_4UpgradeName).Msg("read v8.4 applied-upgrade record")
+		return
+	}
+	if rec == nil {
+		return
+	}
+	app.v8_4AppliedHeight = rec.AppliedHeight
+}
+
+// recordV8_4Branch is the v8.4 sibling of recordV8_3Branch. Same metric
+// name (sage_fork_branch_total) with fork="v8.4" so dashboards can plot
+// all four activations side by side.
+func recordV8_4Branch(postFork bool) {
+	branch := "pre"
+	if postFork {
+		branch = "post"
+	}
+	metrics.ForkBranchTotal.WithLabelValues("v8.4", branch).Inc()
+}
+
+// reconcilePoEForkMonotonicity makes the v8.x PoE fork gates monotonic: a higher
+// fork being active implies every lower one is too. If an upgrade jumps straight
+// to a higher app version (e.g. app-v2 → app-v5, skipping app-v3/app-v4), the
+// intermediate gates would otherwise stay 0, producing an incoherent state where
+// postV8_4Fork is true but postV8_2Fork is false — domain-conditional weighting
+// live without the PoE-weighted quorum it assumes, 56-byte vstats written while
+// SetEpochWeights is suppressed (poe-drift audit). This backfills any unset lower
+// gate to the height of the higher activation.
+//
+// It is IN-MEMORY only — derived identically on every replica from the same
+// persisted activation records, so it never writes a key and never changes the
+// AppHash keyspace by itself. On a sequentially-upgraded chain (every real chain)
+// each lower gate already carries its own earlier height, so the `== 0` backfills
+// never fire and the reconciliation is a no-op — replay stays byte-identical.
+// Applied after the gate refreshes on boot AND after the activation block sets a
+// gate, so the two paths converge on the same coherent state.
+func (app *SageApp) reconcilePoEForkMonotonicity() {
+	// Gates ordered low→high. Walk from the top down, carrying the height of the
+	// nearest SET gate above; an unset gate inherits that height. This keeps the
+	// activation heights non-decreasing (v8 ≤ v8_2 ≤ v8_3 ≤ v8_4) so each lower
+	// fork is active wherever a higher one is — backfilling a skipped gate to the
+	// NEAREST higher activation, not the topmost (which would wrongly push a low
+	// gate's activation later than an already-set intermediate gate's).
+	gates := []*int64{&app.v8AppliedHeight, &app.v8_2AppliedHeight, &app.v8_3AppliedHeight, &app.v8_4AppliedHeight}
+	var nearestAbove int64
+	for i := len(gates) - 1; i >= 0; i-- {
+		if *gates[i] > 0 {
+			nearestAbove = *gates[i]
+		} else if nearestAbove > 0 {
+			*gates[i] = nearestAbove
+		}
+	}
+}
+
 // refreshPoEWeights hydrates each validator's in-memory PoEWeight from the
 // last poew:<id> set persisted by processEpoch. Called on boot after
 // LoadValidators so a node restarting between epoch boundaries does NOT
@@ -494,6 +588,48 @@ func poeWeightOrFallback(w float64, n int) float64 {
 	return 1.0 / float64(n)
 }
 
+// poeFactorsPostV83 computes the post-v8.3 PoE input factors (accuracy,
+// recency, corroboration) for a validator from its on-chain vstats record and
+// the current block context. It is the single source of truth shared by
+// processEpoch's per-epoch scalar weight and v8.4's per-memory domain-conditional
+// quorum weight — any divergence between the two computations would split
+// consensus, so both call here rather than inlining the arithmetic twice. A nil
+// stats (validator never reached a terminal verdict) reads as the EWMA
+// cold-start prior (0.5 accuracy), epsilon-floor recency, and zero corroboration.
+//
+// The same record shape backs both the global vstats:<v> stats and the per-domain
+// vstats_domain:<v>:<D> stats, so this helper computes a domain-scoped accuracy
+// just as readily as the global one — v8.4's quorum path calls it twice.
+func poeFactorsPostV83(stats *store.ValidatorStats, height int64, blockTime time.Time) (accuracy, recency, corroboration float64) {
+	var tracker poe.EWMATracker
+	if stats != nil {
+		tracker = poe.EWMATracker{
+			WeightedSum: stats.EWMAWeightedSum,
+			WeightDenom: stats.EWMAWeightDenom,
+			Count:       int64(stats.EWMACount), // #nosec G115 -- non-negative
+		}
+	}
+	accuracy = tracker.Accuracy()
+
+	if stats != nil && stats.LastBlockHeight > 0 {
+		blocksSinceLast := height - int64(stats.LastBlockHeight) // #nosec G115 -- block height fits in int64
+		if blocksSinceLast < 0 {
+			blocksSinceLast = 0
+		}
+		hoursSinceLast := float64(blocksSinceLast) * 3.0 / 3600.0
+		recency = poe.RecencyScore(blockTime.Add(-time.Duration(hoursSinceLast*float64(time.Hour))), blockTime)
+	} else {
+		recency = poe.EpsilonFloor
+	}
+
+	corrCount := 0
+	if stats != nil {
+		corrCount = int(stats.CorrCount) // #nosec G115 -- bounded count
+	}
+	corroboration = poe.CorroborationScore(corrCount, poe.CorrMax)
+	return
+}
+
 // defaultFlushMaxRetries caps Commit's SQLITE_BUSY retry loop. At 30 tries
 // with backoff capped at 5s, sustained contention is tolerated for several
 // minutes before the node panics — long enough to absorb realistic lock
@@ -541,6 +677,8 @@ func NewSageApp(badgerPath string, postgresURL string, logger zerolog.Logger) (*
 	app.refreshV8Fork()
 	app.refreshV8_2Fork()
 	app.refreshV8_3Fork()
+	app.refreshV8_4Fork()
+	app.reconcilePoEForkMonotonicity()
 
 	// Reload persisted validators from BadgerDB (survives restart)
 	persistedVals, err := bs.LoadValidators()
@@ -588,6 +726,8 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 	app.refreshV8Fork()
 	app.refreshV8_2Fork()
 	app.refreshV8_3Fork()
+	app.refreshV8_4Fork()
+	app.reconcilePoEForkMonotonicity()
 
 	persistedVals, err := bs.LoadValidators()
 	if err != nil {
@@ -819,6 +959,14 @@ func (app *SageApp) FinalizeBlock(_ context.Context, req *abcitypes.RequestFinal
 		if plan.Name == v8_3UpgradeName {
 			app.v8_3AppliedHeight = req.Height
 		}
+		if plan.Name == v8_4UpgradeName {
+			app.v8_4AppliedHeight = req.Height
+		}
+		// Keep the PoE fork gates monotonic if this activation jumped past an
+		// intermediate version (e.g. straight to app-v5) — backfill any unset
+		// lower gate so postV8_4Fork ⟹ postV8_3Fork ⟹ … holds. No-op for a
+		// sequentially-upgraded chain. See reconcilePoEForkMonotonicity.
+		app.reconcilePoEForkMonotonicity()
 		app.logger.Info().
 			Str("name", plan.Name).
 			Uint64("target_app_version", plan.TargetAppVersion).
@@ -1095,8 +1243,40 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 		contentHash = ch[:]
 	}
 
+	// v8.4: a memoryID that already reached a terminal verdict (committed or
+	// deprecated) must not be re-opened. Pre-v8.4, processMemorySubmit reset the
+	// on-chain status to proposed unconditionally, so re-submitting an existing
+	// ID rewound a committed memory to proposed; a fresh vote then re-reached
+	// quorum and the verdict-correctness EWMA / corroboration credit fired AGAIN
+	// — a repeatable reputation-gaming vector once v8.3 made those credits matter
+	// (poe-drift audit finding). Post-fork the proposed->terminal transition is
+	// one-way: reject the re-submit. Re-submitting a still-proposed memory stays
+	// allowed (legitimate re-broadcast). Fork-gated so pre-v8.4 blocks replay
+	// byte-identical.
+	if app.postV8_4Fork(height) {
+		if _, st, gErr := app.badgerStore.GetMemoryHash(memoryID); gErr == nil &&
+			(st == string(memory.StatusCommitted) || st == string(memory.StatusDeprecated)) {
+			return &abcitypes.ExecTxResult{Code: 11, Log: fmt.Sprintf(
+				"memory %s already reached terminal status %q; re-submit rejected", memoryID, st)}
+		}
+	}
+
 	if setErr := app.badgerStore.SetMemoryHash(memoryID, contentHash, string(memory.StatusProposed)); setErr != nil {
 		return &abcitypes.ExecTxResult{Code: 12, Log: fmt.Sprintf("badger write error: %v", setErr)}
+	}
+
+	// v8.4: record the memory's domain on-chain so checkAndApplyQuorum can read
+	// it deterministically at verdict time — the memory:<id> record stores only
+	// contentHash+status, not the domain. Post-fork only and only for a non-empty
+	// domain; the strict-> gate keeps pre-fork blocks and the activation block
+	// byte-identical (no memdomain: key enters the AppHash keyspace until H_act+1).
+	// Shared domains are recorded too — the quorum decides per-vote, via its own
+	// height-aware isSharedDomain check, whether to use the domain-conditional
+	// weight or fall back to the scalar.
+	if submit.DomainTag != "" && app.postV8_4Fork(height) {
+		if domErr := app.badgerStore.SetMemoryDomain(memoryID, submit.DomainTag); domErr != nil {
+			app.logger.Error().Err(domErr).Str("memory_id", memoryID).Msg("v8.4 set memory domain")
+		}
 	}
 
 	memType := txMemoryTypeToString(submit.MemoryType)
@@ -1255,22 +1435,74 @@ func (app *SageApp) checkAndApplyQuorum(memoryID string, height int64, blockTime
 		}
 	}
 
+	// v8.4: resolve the memory's domain so the weight loop can condition each
+	// validator's vote on its verdict-correctness IN that domain. Domain
+	// weighting engages only post-fork, for a recorded non-shared domain — shared
+	// catch-alls (general, self) and unknown/legacy memories (no memdomain: key)
+	// fall back to the v8.2 scalar weight, since subject-matter expertise is
+	// meaningless there. isSharedDomain is height-aware (honours governance
+	// promotions), keeping the gate deterministic across replicas.
+	domainWeighting := app.postV8_4Fork(height)
+	recordV8_4Branch(domainWeighting)
+	var memDomain string
+	if domainWeighting {
+		if d, derr := app.badgerStore.GetMemoryDomain(memoryID); derr == nil {
+			memDomain = d
+		}
+	}
+	useDomainWeight := domainWeighting && memDomain != "" && !app.isSharedDomain(memDomain, height)
+
 	app.logger.Debug().
 		Str("memory_id", memoryID).
 		Int("num_validators", len(validators)).
 		Bool("post_v8_2_fork", postFork).
 		Bool("post_v8_3_fork", creditVerdict).
+		Bool("post_v8_4_fork", domainWeighting).
+		Str("mem_domain", memDomain).
+		Bool("use_domain_weight", useDomainWeight).
 		Msg("checking quorum")
 
 	for _, v := range validators {
-		if postFork {
+		switch {
+		case useDomainWeight:
+			// v8.4: domain-conditional weight. The three global factors (accuracy,
+			// recency, corroboration) come from the validator's vstats:<v> record,
+			// recomputed live at quorum time via the shared helper; the domain
+			// factor is its verdict-correctness EWMA in vstats_domain:<v>:<D>. All
+			// inputs are committed on-chain state, so the per-memory weight is a
+			// deterministic function of chain state (replay-stable). Weights are
+			// the raw ComputeWeight outputs — NOT normalized — because HasQuorum is
+			// ratio-only and every validator in THIS call takes this same branch
+			// (useDomainWeight is a per-memory property), so the ratio is
+			// well-defined without the per-epoch RepCap normalization (which, with
+			// N<10 validators, would collapse all weights to equal and erase the
+			// domain signal). Domain experts thus carry genuinely more weight on
+			// in-domain memories. See docs/v8.4-PLAN.md.
+			gStats, _ := app.badgerStore.GetValidatorStats(v.ID)
+			acc, rec, corr := poeFactorsPostV83(gStats, height, blockTime)
+			// Domain accuracy defaults to the EWMA cold-start prior (0.5). A
+			// decode error / nil record is treated as cold-start, mirroring the
+			// nil-tolerance of the gStats path (poeFactorsPostV83's stats!=nil
+			// guard) — a corrupt record is byte-identical across replicas, so this
+			// stays deterministic rather than panicking one node into a halt.
+			domainScore := poe.NewEWMATracker().Accuracy()
+			if dStats, derr := app.badgerStore.GetValidatorDomainStats(v.ID, memDomain); derr == nil && dStats != nil {
+				domTracker := poe.EWMATracker{
+					WeightedSum: dStats.EWMAWeightedSum,
+					WeightDenom: dStats.EWMAWeightDenom,
+					Count:       int64(dStats.EWMACount), // #nosec G115 -- non-negative
+				}
+				domainScore = domTracker.Accuracy()
+			}
+			weights[v.ID] = poe.ComputeWeight(acc, domainScore, rec, corr)
+		case postFork:
 			// Bootstrap fallback (1/N) covers three cases: pre-first-epoch
 			// chain, mid-epoch governance add, and defensive guard for a
 			// missing poew:<id> entry. HasQuorum is ratio-only so the
 			// transient mix of "real" and "1/N" weights doesn't move the
 			// 2/3 threshold — see docs/v8.2-PLAN.md "Bootstrap fallback".
 			weights[v.ID] = poeWeightOrFallback(v.PoEWeight, len(validators))
-		} else {
+		default:
 			weights[v.ID] = 1.0 // Phase 1, pre-fork
 		}
 		voteKey := fmt.Sprintf("vote:%s:%s", memoryID, v.ID)
@@ -1297,7 +1529,11 @@ func (app *SageApp) checkAndApplyQuorum(memoryID string, height int64, blockTime
 	// and which one, so we credit verdict-match exactly once below.
 	var becameTerminal, finalAccepted bool
 	if reached {
-		// Transition to committed on-chain (BadgerDB)
+		// Transition to committed on-chain (BadgerDB). becameTerminal and the
+		// off-chain status mirror are gated on the on-chain write SUCCEEDING — a
+		// swallowed SetMemoryHash error must NOT leave us crediting a verdict (or
+		// mirroring a committed status to Postgres) for a memory whose on-chain
+		// status never actually changed. poe-drift audit finding.
 		if err := app.badgerStore.SetMemoryHash(memoryID, nil, string(memory.StatusCommitted)); err == nil {
 			app.logger.Info().
 				Str("memory_id", memoryID).
@@ -1305,22 +1541,26 @@ func (app *SageApp) checkAndApplyQuorum(memoryID string, height int64, blockTime
 				Float64("accept_weight", acceptWeight).
 				Float64("total_weight", totalWeight).
 				Msg("memory committed by quorum")
-		}
-		becameTerminal, finalAccepted = true, true
+			becameTerminal, finalAccepted = true, true
 
-		// Buffer PostgreSQL status update — flushes in Commit
-		app.pendingWrites = append(app.pendingWrites, pendingWrite{
-			writeType: "status_update",
-			data: &statusUpdate{
-				MemoryID: memoryID,
-				Status:   memory.StatusCommitted,
-				At:       blockTime,
-			},
-		})
+			// Buffer PostgreSQL status update — flushes in Commit
+			app.pendingWrites = append(app.pendingWrites, pendingWrite{
+				writeType: "status_update",
+				data: &statusUpdate{
+					MemoryID: memoryID,
+					Status:   memory.StatusCommitted,
+					At:       blockTime,
+				},
+			})
+		} else {
+			app.logger.Error().Err(err).Str("memory_id", memoryID).Int64("height", height).
+				Msg("commit status write failed — verdict NOT credited, status unchanged")
+		}
 	} else if len(votes) >= len(validators) && len(validators) > 0 {
 		// All validators voted but quorum not reached (e.g. 2-2 tie) — deprecate.
 		// Without this, the memory stays "proposed" forever and the validator
-		// ticker resubmits votes every 2 seconds, flooding the chain.
+		// ticker resubmits votes every 2 seconds, flooding the chain. Same
+		// write-success gating as the committed branch above.
 		if err := app.badgerStore.SetMemoryHash(memoryID, nil, string(memory.StatusDeprecated)); err == nil {
 			app.logger.Info().
 				Str("memory_id", memoryID).
@@ -1330,17 +1570,20 @@ func (app *SageApp) checkAndApplyQuorum(memoryID string, height int64, blockTime
 				Int("votes", len(votes)).
 				Int("validators", len(validators)).
 				Msg("memory rejected — all validators voted, quorum not reached")
-		}
-		becameTerminal, finalAccepted = true, false
+			becameTerminal, finalAccepted = true, false
 
-		app.pendingWrites = append(app.pendingWrites, pendingWrite{
-			writeType: "status_update",
-			data: &statusUpdate{
-				MemoryID: memoryID,
-				Status:   memory.StatusDeprecated,
-				At:       blockTime,
-			},
-		})
+			app.pendingWrites = append(app.pendingWrites, pendingWrite{
+				writeType: "status_update",
+				data: &statusUpdate{
+					MemoryID: memoryID,
+					Status:   memory.StatusDeprecated,
+					At:       blockTime,
+				},
+			})
+		} else {
+			app.logger.Error().Err(err).Str("memory_id", memoryID).Int64("height", height).
+				Msg("deprecate status write failed — verdict NOT credited, status unchanged")
+		}
 	}
 
 	// v8.3: credit per-validator verdict-correctness EWMA + corroboration count
@@ -1355,6 +1598,19 @@ func (app *SageApp) checkAndApplyQuorum(memoryID string, height int64, blockTime
 		}
 		if err := app.badgerStore.UpdateVerdictStats(matches); err != nil {
 			app.logger.Error().Err(err).Str("memory_id", memoryID).Msg("v8.3 verdict-stats update")
+		}
+		// v8.4: also credit per-domain verdict-correctness for non-shared domains,
+		// so domainAccuracy(v, D) reflects how often v is right specifically in D.
+		// Same once-per-terminal-transition guard (priorStatus == proposed) and the
+		// same match map as the global credit above — the two are independent
+		// accumulators (vstats: vs vstats_domain:<D>) fed from one event. Gated by
+		// useDomainWeight, which implies postV8_4Fork (⟹ creditVerdict) and a
+		// recorded non-shared domain; shared/unknown domains credit nothing
+		// per-domain (quorum falls back to the global weight for them anyway).
+		if useDomainWeight {
+			if err := app.badgerStore.UpdateDomainVerdictStats(memDomain, matches); err != nil {
+				app.logger.Error().Err(err).Str("memory_id", memoryID).Str("domain", memDomain).Msg("v8.4 domain verdict-stats update")
+			}
 		}
 	}
 }
@@ -2724,59 +2980,54 @@ func (app *SageApp) processEpoch(height int64, blockTime time.Time) {
 	for _, v := range validators {
 		stats := allStats[v.ID]
 
-		// Accuracy (A).
-		var accuracy float64
+		// Accuracy (A), recency (T), corroboration (S).
+		var accuracy, recencyScore, corrScore float64
 		if postV83 {
-			// Verdict-correctness EWMA. A validator absent from vstats: (never
-			// reached a terminal verdict) reconstructs as EWMATracker{0,0,0},
-			// whose Accuracy() is the 0.5 cold-start prior — so a fresh
-			// post-fork chain starts every validator at 0.5 and re-accrues.
-			var tracker poe.EWMATracker
-			if stats != nil {
-				tracker = poe.EWMATracker{
-					WeightedSum: stats.EWMAWeightedSum,
-					WeightDenom: stats.EWMAWeightDenom,
-					Count:       int64(stats.EWMACount), // #nosec G115 -- non-negative
+			// Post-fork: verdict-correctness EWMA accuracy, recency from last
+			// vote, and the real lifetime corroboration count — all from the
+			// shared poeFactorsPostV83 helper so the per-epoch scalar weight and
+			// v8.4's per-memory domain-conditional quorum weight compute these
+			// three factors with byte-identical arithmetic. A validator absent
+			// from vstats: reconstructs as EWMATracker{0,0,0} → 0.5 cold-start.
+			accuracy, recencyScore, corrScore = poeFactorsPostV83(stats, height, blockTime)
+		} else {
+			// Phase-1 (pre-fork): accept-ratio accuracy blend, recency from last
+			// vote, corroboration hardcoded 0 — byte-identical to v8.2.x.
+			if stats != nil && stats.TotalVotes > 0 {
+				realAccuracy := float64(stats.AcceptVotes) / float64(stats.TotalVotes)
+				// Cold-start blending: blend with 0.5 prior, full weight at K_min=10
+				blendFactor := float64(stats.TotalVotes) / 10.0
+				if blendFactor > 1.0 {
+					blendFactor = 1.0
 				}
+				accuracy = blendFactor*realAccuracy + (1.0-blendFactor)*0.5
+			} else {
+				accuracy = 0.5 // Cold-start prior
 			}
-			accuracy = tracker.Accuracy()
-		} else if stats != nil && stats.TotalVotes > 0 {
-			// Phase-1: accept ratio with cold-start blending (EWMA simplified).
-			realAccuracy := float64(stats.AcceptVotes) / float64(stats.TotalVotes)
-			// Cold-start blending: blend with 0.5 prior, full weight at K_min=10
-			blendFactor := float64(stats.TotalVotes) / 10.0
-			if blendFactor > 1.0 {
-				blendFactor = 1.0
+
+			if stats != nil && stats.LastBlockHeight > 0 {
+				// Approximate: each block ~3s, so blocks_ago * 3s = seconds since last active
+				blocksSinceLast := height - int64(stats.LastBlockHeight) // #nosec G115 -- block height fits in int64
+				if blocksSinceLast < 0 {
+					blocksSinceLast = 0
+				}
+				hoursSinceLast := float64(blocksSinceLast) * 3.0 / 3600.0
+				recencyScore = poe.RecencyScore(blockTime.Add(-time.Duration(hoursSinceLast*float64(time.Hour))), blockTime)
+			} else {
+				recencyScore = poe.EpsilonFloor // No activity
 			}
-			accuracy = blendFactor*realAccuracy + (1.0-blendFactor)*0.5
-		} else {
-			accuracy = 0.5 // Cold-start prior
+
+			corrScore = poe.CorroborationScore(0, poe.CorrMax)
 		}
 
-		// Domain: Phase 1 uses default 0.5 (no per-domain tracking yet — v8.4+)
+		// Domain (D): the per-epoch scalar weight keeps the neutral 0.5 baseline
+		// even post-v8.4. v8.4 realizes the domain factor PER-MEMORY in
+		// checkAndApplyQuorum — a validator's vote on a domain-D memory is
+		// weighted by its verdict-correctness in D. This scalar is only the
+		// fallback weight for shared/unknown-domain memories, where subject-matter
+		// expertise is meaningless by design, so 0.5 (neutral) is the right
+		// baseline here. See docs/v8.4-PLAN.md.
 		domainScore := 0.5
-
-		// Recency: exp(-lambda * hours_since_last_vote)
-		var recencyScore float64
-		if stats != nil && stats.LastBlockHeight > 0 {
-			// Approximate: each block ~3s, so blocks_ago * 3s = seconds since last active
-			blocksSinceLast := height - int64(stats.LastBlockHeight) // #nosec G115 -- block height fits in int64
-			if blocksSinceLast < 0 {
-				blocksSinceLast = 0
-			}
-			hoursSinceLast := float64(blocksSinceLast) * 3.0 / 3600.0
-			recencyScore = poe.RecencyScore(blockTime.Add(-time.Duration(hoursSinceLast*float64(time.Hour))), blockTime)
-		} else {
-			recencyScore = poe.EpsilonFloor // No activity
-		}
-
-		// Corroboration (S): post-fork, the real lifetime verdict-match count;
-		// pre-fork, the Phase-1 hardcoded 0 (epsilon-floored in ComputeWeight).
-		corrCount := 0
-		if postV83 && stats != nil {
-			corrCount = int(stats.CorrCount) // #nosec G115 -- bounded count
-		}
-		corrScore := poe.CorroborationScore(corrCount, poe.CorrMax)
 
 		// Compute PoE weight
 		weight := poe.ComputeWeight(accuracy, domainScore, recencyScore, corrScore)
@@ -2804,8 +3055,20 @@ func (app *SageApp) processEpoch(height int64, blockTime time.Time) {
 			Msg("epoch score computed")
 	}
 
-	// Normalize weights with rep cap
-	normalized := poe.NormalizeWeights(rawWeights)
+	// Normalize weights with rep cap. v8.4: post-fork, sum the weight map in
+	// sorted-key order (NormalizeWeightsDeterministic) so the persisted poew:<id>
+	// float64 bits — and therefore the AppHash at every epoch boundary — are
+	// independent of Go's randomized map-iteration order. The legacy
+	// (map-order) sum is non-associative and could split AppHash across honest
+	// replicas with ≥3 distinct-magnitude weights; it is retained pre-fork ONLY
+	// so v8.2/v8.3 blocks replay byte-identical. Gated like every other v8.x
+	// consensus-rule change. See docs/v8.4-PLAN.md / the poe-drift audit.
+	var normalized map[string]float64
+	if app.postV8_4Fork(height) {
+		normalized = poe.NormalizeWeightsDeterministic(rawWeights)
+	} else {
+		normalized = poe.NormalizeWeights(rawWeights)
+	}
 
 	// v8.2: persist the normalized weight set on-chain so a node restart
 	// between epoch boundaries does not reset PoEWeight to zero (which

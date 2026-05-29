@@ -513,6 +513,147 @@ func (s *BadgerStore) GetAllValidatorStats() (map[string]*ValidatorStats, error)
 	return result, nil
 }
 
+// --- Per-domain validator stats (v8.4) ---
+
+// validatorDomainStatsKey returns the BadgerDB key for a validator's
+// verdict-correctness stats scoped to a single domain. The validator ID is a
+// fixed-width 64-char hex string (Ed25519 pubkey) so the trailing domain — which
+// may itself contain ':' — is unambiguous for the point lookups this key serves;
+// there is no prefix-scan that needs to split it back apart (the quorum path only
+// ever does direct gets).
+func validatorDomainStatsKey(validatorID, domain string) []byte {
+	return []byte("vstats_domain:" + validatorID + ":" + domain)
+}
+
+// memoryDomainKey returns the BadgerDB key recording a memory's domain tag.
+// Written at submit time post-v8.4 so checkAndApplyQuorum can resolve the
+// memory's domain deterministically — the memory:<id> record stores only
+// contentHash+status, not the domain.
+func memoryDomainKey(memoryID string) []byte {
+	return []byte("memdomain:" + memoryID)
+}
+
+// SetMemoryDomain records a memory's domain tag on-chain. Caller gates on
+// postV8_4Fork so pre-fork blocks never write this key (byte-identical replay).
+func (s *BadgerStore) SetMemoryDomain(memoryID, domain string) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(memoryDomainKey(memoryID), []byte(domain))
+	})
+}
+
+// GetMemoryDomain returns a memory's recorded domain tag, or "" if no
+// memdomain: key exists (legacy/pre-fork memory, or a memory submitted with an
+// empty domain). A missing key is not an error — the quorum treats "" as
+// "unknown domain" and falls back to the v8.2 scalar weight.
+func (s *BadgerStore) GetMemoryDomain(memoryID string) (string, error) {
+	var domain string
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, getErr := txn.Get(memoryDomainKey(memoryID))
+		if getErr != nil {
+			return getErr
+		}
+		return item.Value(func(val []byte) error {
+			domain = string(val)
+			return nil
+		})
+	})
+	if err == badger.ErrKeyNotFound {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return domain, nil
+}
+
+// GetValidatorDomainStats retrieves a validator's verdict-correctness stats for
+// one domain. Returns a zero-valued record (which reads as the EWMA cold-start
+// prior 0.5) when the validator has no history in that domain — so a generalist
+// who never voted on the domain starts neutral and re-accrues. Reuses the
+// v8.3 24/56-byte codec; the key prefix is the only difference from vstats:.
+func (s *BadgerStore) GetValidatorDomainStats(validatorID, domain string) (*ValidatorStats, error) {
+	var stats *ValidatorStats
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, getErr := txn.Get(validatorDomainStatsKey(validatorID, domain))
+		if getErr != nil {
+			return getErr
+		}
+		return item.Value(func(val []byte) error {
+			decoded, decErr := decodeValidatorStats(val)
+			if decErr != nil {
+				return decErr
+			}
+			stats = decoded
+			return nil
+		})
+	})
+	if err == badger.ErrKeyNotFound {
+		return &ValidatorStats{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return stats, nil
+}
+
+// UpdateDomainVerdictStats is the per-domain sibling of UpdateVerdictStats. It
+// credits the same verdict-correctness EWMA + corroboration signals, but scoped
+// to the memory's domain D, into vstats_domain:<v>:<D>. Same atomicity (one
+// db.Update, sorted iteration) and same "always write the 56-byte record"
+// discipline — this is only ever called post-v8.4-fork for a non-shared domain.
+// The global vstats: record is credited separately by UpdateVerdictStats; the
+// two are independent accumulators fed from the one terminal-verdict event.
+func (s *BadgerStore) UpdateDomainVerdictStats(domain string, matches map[string]bool) error {
+	ids := make([]string, 0, len(matches))
+	for id := range matches {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	return s.db.Update(func(txn *badger.Txn) error {
+		for _, id := range ids {
+			key := validatorDomainStatsKey(id, domain)
+			stats := &ValidatorStats{}
+			item, getErr := txn.Get(key)
+			if getErr == nil {
+				valErr := item.Value(func(val []byte) error {
+					existing, decErr := decodeValidatorStats(val)
+					if decErr != nil {
+						return decErr
+					}
+					stats = existing
+					return nil
+				})
+				if valErr != nil {
+					return valErr
+				}
+			} else if getErr != badger.ErrKeyNotFound {
+				return getErr
+			}
+
+			tracker := &poe.EWMATracker{
+				WeightedSum: stats.EWMAWeightedSum,
+				WeightDenom: stats.EWMAWeightDenom,
+				Count:       int64(stats.EWMACount), // #nosec G115 -- non-negative count
+			}
+			outcome := 0.0
+			if matches[id] {
+				outcome = 1.0
+				stats.CorrCount++
+			}
+			tracker.Update(outcome)
+			stats.EWMAWeightedSum = tracker.WeightedSum
+			stats.EWMAWeightDenom = tracker.WeightDenom
+			stats.EWMACount = uint64(tracker.Count) // #nosec G115 -- Count is monotonic non-negative
+
+			if err := txn.Set(key, encodeValidatorStats(stats, true)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // --- PoE epoch weights (v8.2) ---
 
 // poeWeightsPrefix is the BadgerDB key prefix for per-validator PoE epoch
