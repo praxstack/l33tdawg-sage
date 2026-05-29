@@ -1203,7 +1203,7 @@ func (app *SageApp) processMemoryVote(parsedTx *tx.ParsedTx, height int64, block
 	// Increment on-chain validator vote stats for PoE scoring
 	accepted := decision == "accept"
 	uHeight := uint64(height) // #nosec G115 -- height is always non-negative
-	if err := app.badgerStore.IncrementVoteStats(validatorID, accepted, uHeight); err != nil {
+	if err := app.badgerStore.IncrementVoteStats(validatorID, accepted, uHeight, app.postV8_3Fork(height)); err != nil {
 		app.logger.Error().Err(err).Str("validator", validatorID).Msg("failed to increment vote stats")
 	}
 
