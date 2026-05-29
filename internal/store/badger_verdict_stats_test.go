@@ -97,9 +97,9 @@ func TestUpdateVerdictStats_Math(t *testing.T) {
 	}))
 
 	// Three sequential single-validator updates: true, true, false.
-	require.NoError(t, s.UpdateVerdictStats(map[string]bool{vid: true}, 11))
-	require.NoError(t, s.UpdateVerdictStats(map[string]bool{vid: true}, 12))
-	require.NoError(t, s.UpdateVerdictStats(map[string]bool{vid: false}, 13))
+	require.NoError(t, s.UpdateVerdictStats(map[string]bool{vid: true}))
+	require.NoError(t, s.UpdateVerdictStats(map[string]bool{vid: true}))
+	require.NoError(t, s.UpdateVerdictStats(map[string]bool{vid: false}))
 
 	got, err := s.GetValidatorStats(vid)
 	require.NoError(t, err)
@@ -137,7 +137,7 @@ func TestUpdateVerdictStats_Atomic(t *testing.T) {
 	require.NoError(t, err)
 
 	// Sorted iteration hits v-a (ok) then v-b (decode error) → batch aborts.
-	err = s.UpdateVerdictStats(map[string]bool{"v-a": true, "v-b": true}, 99)
+	err = s.UpdateVerdictStats(map[string]bool{"v-a": true, "v-b": true})
 	require.Error(t, err)
 
 	after, err := s.GetValidatorStats("v-a")

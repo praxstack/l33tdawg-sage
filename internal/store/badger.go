@@ -398,8 +398,9 @@ func (s *BadgerStore) IncrementVoteStats(validatorID string, accepted bool, bloc
 // iterating (belt-and-braces; BadgerDB's commit log is order-independent at the
 // key-set level, but sorting keeps the write sequence deterministic regardless).
 // The whole batch runs in one db.Update so a mid-batch error leaves no record
-// changed (atomicity).
-func (s *BadgerStore) UpdateVerdictStats(matches map[string]bool, blockHeight uint64) error {
+// changed (atomicity). LastBlockHeight is intentionally NOT touched here — it
+// records vote time (set by IncrementVoteStats), not verdict-resolution time.
+func (s *BadgerStore) UpdateVerdictStats(matches map[string]bool) error {
 	ids := make([]string, 0, len(matches))
 	for id := range matches {
 		ids = append(ids, id)
