@@ -182,12 +182,15 @@ func buildUpgradeProposeTx(cfg upgradeWatchdogConfig) (*tx.ParsedTx, error) {
 	}
 	agentID := hex.EncodeToString(pub)
 
-	// Body the agent signs over — just the plan name, matching the
-	// pattern used by upgrade_handlers_test.go::makeUpgradeProposeTx.
-	name := cfg.BinaryVersion
-	if name == "" {
-		name = fmt.Sprintf("app-v%d", upgradeTargetAppVersion)
-	}
+	// The plan Name is the fork-gate activation key, NOT a human label.
+	// internal/abci matches plan.Name against the canonical "app-v<N>"
+	// constants to flip the v8.x PoE fork gates and keys the applied-upgrade
+	// audit record by it (read back by name on every boot). Naming the plan
+	// after cfg.BinaryVersion (e.g. "v8.4.0", or "dev" — main.version is
+	// never empty, so the old canonical fallback was dead code) bumped the
+	// app version while leaving every postV8_*Fork gate false forever. Always
+	// derive the name from the single source of truth.
+	name := tx.CanonicalUpgradeName(upgradeTargetAppVersion)
 	body := []byte(name)
 	bodyHash := sha256.Sum256(body)
 

@@ -5,7 +5,22 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/l33tdawg/sage/internal/tx"
 )
+
+// TestUpgradeNameConstantsAreCanonical couples the v8.x activation-name
+// constants to tx.CanonicalUpgradeName — the single source of truth the
+// watchdog proposer derives plan names from. If the naming scheme ever
+// drifts in one place but not the other, the activation block stops
+// matching plan.Name and every postV8_*Fork gate silently stays false
+// (the upgrade-watchdog naming bug). Keep these locked together.
+func TestUpgradeNameConstantsAreCanonical(t *testing.T) {
+	assert.Equal(t, tx.CanonicalUpgradeName(2), v8UpgradeName)
+	assert.Equal(t, tx.CanonicalUpgradeName(3), v8_2UpgradeName)
+	assert.Equal(t, tx.CanonicalUpgradeName(4), v8_3UpgradeName)
+	assert.Equal(t, tx.CanonicalUpgradeName(5), v8_4UpgradeName)
+}
 
 // TestV8Fork_DefaultZero asserts a freshly-created app reports zero fork
 // height and answers all post-fork predicates with false. This is the

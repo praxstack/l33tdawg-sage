@@ -134,6 +134,17 @@ func TestMaybeProposeUpgrade_BuildsValidProposal(t *testing.T) {
 	if ptx.UpgradePropose.TargetAppVersion != upgradeTargetAppVersion {
 		t.Errorf("TargetAppVersion = %d, want %d", ptx.UpgradePropose.TargetAppVersion, upgradeTargetAppVersion)
 	}
+	// The plan name MUST be the canonical fork-gate activation key
+	// ("app-v<target>"), NOT the human BinaryVersion we passed in. Naming it
+	// after the binary version bumps the app version but leaves every
+	// postV8_*Fork gate false forever (the bug this asserts against).
+	wantName := tx.CanonicalUpgradeName(upgradeTargetAppVersion)
+	if ptx.UpgradePropose.Name != wantName {
+		t.Errorf("UpgradePropose.Name = %q, want canonical %q", ptx.UpgradePropose.Name, wantName)
+	}
+	if ptx.UpgradePropose.Name == "v7.5.0-test" {
+		t.Errorf("UpgradePropose.Name leaked the BinaryVersion %q; must use the canonical app-v<N> form", ptx.UpgradePropose.Name)
+	}
 	if len(ptx.AgentSig) != ed25519.SignatureSize {
 		t.Errorf("AgentSig length = %d, want %d", len(ptx.AgentSig), ed25519.SignatureSize)
 	}

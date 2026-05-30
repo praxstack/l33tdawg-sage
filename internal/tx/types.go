@@ -1,6 +1,9 @@
 package tx
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // TxType identifies the type of transaction.
 type TxType uint8
@@ -313,11 +316,28 @@ type GovCancel struct {
 // derives ActivationHeight deterministically at execution time, so validators
 // only race to propose — they don't pick the height.
 type UpgradePropose struct {
-	Name               string // e.g. "v7.5.0"
+	Name               string // fork-gate activation key — MUST be CanonicalUpgradeName(TargetAppVersion), NOT a human label
 	TargetAppVersion   uint64 // bumps consensus_params.version.app
 	BinarySHA256       string // optional, may be empty — pinned digest for verification
 	ProposerID         string // agent_id of the validator that seeded this proposal
 	UpgradeDelayBlocks int64  // suggested delay before activation; chain may override
+}
+
+// CanonicalUpgradeName is the single source of truth for the name an
+// UpgradePlan must carry for a given target app version: "app-v<N>".
+//
+// This is NOT cosmetic. The activation path in internal/abci keys off it
+// twice: (1) FinalizeBlock matches plan.Name against the v8*UpgradeName
+// constants ("app-v2".."app-v5") to flip the corresponding v8.x PoE fork
+// gate, and (2) the applied-upgrade audit record is persisted under this
+// name and read back by name on every boot (refreshV8_*Fork). A plan named
+// anything else (e.g. the human binary version "v8.4.0") still bumps the
+// CometBFT app version — TargetAppVersion drives that independently — but
+// leaves every postV8_*Fork gate false forever, silently disabling the
+// consensus rules the upgrade was supposed to activate. The watchdog
+// proposer and the abci activator MUST agree on this exact form.
+func CanonicalUpgradeName(targetAppVersion uint64) string {
+	return fmt.Sprintf("app-v%d", targetAppVersion)
 }
 
 // UpgradeCancel aborts a pending upgrade plan before its ActivationHeight.
