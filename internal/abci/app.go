@@ -3813,6 +3813,46 @@ func (app *SageApp) processUpgradePropose(parsedTx *tx.ParsedTx, height int64, b
 		return &abcitypes.ExecTxResult{Code: 47, Log: "upgrade propose: target_app_version must be > 0"}
 	}
 
+	// app-v6 (postV8_5Fork): self-defending consensus guards on the proposal.
+	// Pre-fork this entire block is skipped, so historical blocks — which
+	// accepted non-canonical names / regressions with Code 0 — replay
+	// byte-identically. At this point Name != "" (rejected above) and
+	// TargetAppVersion != 0 are already guaranteed, so CanonicalUpgradeName(0)
+	// is never compared. recordV8_5Branch fires once here for the whole
+	// handler, mirroring processDomainReassign's single recordV8Branch call.
+	postV85 := app.postV8_5Fork(height)
+	recordV8_5Branch(postV85)
+	if postV85 {
+		// Change 1: the plan Name MUST be the canonical fork-gate activation
+		// key for its TargetAppVersion. A mismatch (e.g. a human binary label
+		// "v8.5.0" instead of "app-v6") bumps the CometBFT app version at
+		// activation but leaves every postV8_*Fork gate false forever,
+		// silently disabling the consensus rules the upgrade was meant to
+		// enable. The watchdog already derives Name from CanonicalUpgradeName;
+		// this defends the chain against any other proposer that does not.
+		if want := tx.CanonicalUpgradeName(prop.TargetAppVersion); prop.Name != want {
+			return &abcitypes.ExecTxResult{Code: 47, Log: fmt.Sprintf(
+				"upgrade propose: non-canonical name %q for target_app_version=%d (want %q)",
+				prop.Name, prop.TargetAppVersion, want)}
+		}
+
+		// Change 2: regression / no-op guard. CometBFT offers no protection
+		// against a plan that bumps consensus_params.version.app DOWNWARD
+		// (a fatal app-version regression at the handshake) or re-proposes the
+		// current version (a no-op that burns the single pending-plan slot).
+		// currentAppVersion() is the chain's committed version — the same value
+		// Info() announces and FinalizeBlock bumps version.app to — derived
+		// deterministically from the activated fork gates, so every replica
+		// evaluates this identically at this height. <= rejects equality too
+		// (the no-op case); skip-ahead stays legal (reconcile backfills gates).
+		cur := app.currentAppVersion()
+		if prop.TargetAppVersion <= cur {
+			return &abcitypes.ExecTxResult{Code: 47, Log: fmt.Sprintf(
+				"upgrade propose: target_app_version %d must exceed current committed app version %d (regression/no-op rejected)",
+				prop.TargetAppVersion, cur)}
+		}
+	}
+
 	// Refuse if another plan is already pending. At-most-one semantics
 	// keep the FinalizeBlock activation check deterministic and avoid
 	// the question of "which plan wins" when two arrive in the same block.
@@ -3906,7 +3946,17 @@ func (app *SageApp) processUpgradeCancel(parsedTx *tx.ParsedTx, height int64, _ 
 	return &abcitypes.ExecTxResult{Code: 0, Log: fmt.Sprintf("upgrade plan %q cancelled", cancel.Name)}
 }
 
-// processUpgradeRevert handles a TxTypeUpgradeRevert transaction (stub).
+// processUpgradeRevert handles a TxTypeUpgradeRevert transaction.
+//
+// Pre-app-v6 (postV8_5Fork false) this is a byte-identical Code-0 no-op stub —
+// every block on every chain that exists today replays unchanged. Post-app-v6
+// it is an EXPLICIT REJECT (Code 90): a live in-band downgrade is replay-unsafe
+// by construction. Clearing a fork gate retroactively flips the execution
+// branch of committed blocks H_act+1..H_revert, so their AppHashes no longer
+// reproduce on replay → CometBFT halt. True rollback is a forward upgrade plus
+// an off-chain snapshot rewind, not a consensus-rule tx. The identity + payload
+// validation (Code 49) runs on BOTH branches, before the fork gate, so those
+// failures stay byte-identical pre- and post-fork.
 func (app *SageApp) processUpgradeRevert(parsedTx *tx.ParsedTx, height int64, _ time.Time) *abcitypes.ExecTxResult {
 	revert := parsedTx.UpgradeRevert
 	if revert == nil {
@@ -3924,16 +3974,36 @@ func (app *SageApp) processUpgradeRevert(parsedTx *tx.ParsedTx, height int64, _ 
 		return &abcitypes.ExecTxResult{Code: 49, Log: "upgrade revert: name is required"}
 	}
 
-	app.logger.Info().
+	postFork := app.postV8_5Fork(height)
+	recordV8_5Branch(postFork)
+
+	if !postFork {
+		// Pre-app-v6: byte-identical no-op stub (Code 0, no state mutation).
+		app.logger.Info().
+			Str("name", revert.Name).
+			Uint64("target_app_version", revert.TargetAppVersion).
+			Int64("reverting_from_height", revert.RevertingFromHeight).
+			Str("proposer_id", proposerID).
+			Str("payload_proposer_id", revert.ProposerID).
+			Int64("height", height).
+			Msg("upgrade revert received (pre-fork stub — no state mutation)")
+
+		return &abcitypes.ExecTxResult{Code: 0, Log: "upgrade tx accepted (pre-fork stub — no state mutation)"}
+	}
+
+	// Post-app-v6: reject. An in-band downgrade is replay-unsafe — clearing a
+	// fork gate retroactively flips the execution branch of committed blocks
+	// H_act+1..H_revert, so their AppHashes no longer reproduce on replay.
+	// True rollback = forward upgrade + off-chain snapshot rewind, not a tx.
+	app.logger.Warn().
 		Str("name", revert.Name).
 		Uint64("target_app_version", revert.TargetAppVersion).
 		Int64("reverting_from_height", revert.RevertingFromHeight).
 		Str("proposer_id", proposerID).
-		Str("payload_proposer_id", revert.ProposerID).
 		Int64("height", height).
-		Msg("upgrade revert received (pre-fork stub — no state mutation)")
+		Msg("upgrade revert rejected: in-band downgrade is replay-unsafe; use a forward upgrade + snapshot rollback")
 
-	return &abcitypes.ExecTxResult{Code: 0, Log: "upgrade tx accepted (pre-fork stub — no state mutation)"}
+	return &abcitypes.ExecTxResult{Code: 90, Log: "upgrade revert: in-band downgrade unsupported (replay-unsafe); use a forward upgrade and off-chain snapshot rollback"}
 }
 
 // ---------------------------------------------------------------------------
