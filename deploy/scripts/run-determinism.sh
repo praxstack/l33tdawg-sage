@@ -38,7 +38,11 @@ echo "--- regenerating a fresh 4-node testnet genesis (app_version 0) ---"
 bash deploy/init-testnet.sh
 
 echo "--- building + starting the isolated cluster (cold build, be patient) ---"
-POSTGRES_PASSWORD=ci_test_password "${COMPOSE[@]}" up -d --build
+# Only the services the determinism test needs: it submits NO memories, so the
+# ollama embedding stack (which pulls ~1.3GB of models) is skipped — abci depends
+# only on postgres, not ollama.
+POSTGRES_PASSWORD=ci_test_password "${COMPOSE[@]}" up -d --build \
+  postgres abci0 abci1 abci2 abci3 cometbft0 cometbft1 cometbft2 cometbft3
 
 echo "--- waiting for all 4 REST endpoints to report healthy ---"
 healthy=0

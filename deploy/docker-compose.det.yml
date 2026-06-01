@@ -28,3 +28,9 @@ services:
   abci3:
     ports: !override
       - "127.0.0.1:18093:8080"
+
+  # The determinism run reaches postgres only over the internal docker network
+  # (abci -> postgres:5432); it needs no host binding. Drop it so the run never
+  # collides with a postgres already bound on the host's 5432.
+  postgres:
+    ports: !reset null
