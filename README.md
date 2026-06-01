@@ -57,7 +57,21 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What's New in v8.5
+## What's New in v8.6.0
+
+**PoE observability + cleanup.** Three of the four Phase-2 quorum-weight factors have been real on-chain since v8.2–v8.4 but were invisible to clients and operators; v8.6.0 surfaces them and removes the last dead scaffold a multi-agent audit found. **No consensus-rule change** — the binary's on-chain behavior and AppHash are byte-identical to v8.5.1 (verified by the full `replay_v8_*` suite).
+
+- **PoE factors are now readable.** `GET /v1/agent/me` returns `corr_count` (lifetime corroboration), per-domain `domain_expertise` (the β factor, from `vstats_domain:`), and an authoritative `accuracy` read straight from the on-chain `vstats:` EWMA rather than the off-chain mirror. The Python SDK `AgentProfile` model gains the matching optional fields — additive, so old-client ↔ new-server and new-client ↔ old-server both still round-trip.
+- **The `sage_poe_weight` Prometheus gauge is fed.** It was declared but never `Set`; `processEpoch` now publishes each validator's normalized weight once per epoch (reset-then-repopulate, so a governance-removed validator doesn't leave a stale series). Process-local — no BadgerDB write, outside the AppHash path.
+- **Dead Phase-1 scaffold removed.** The unused domain-vector machinery (`DomainRegistry`/`ExpertiseProfile`/`CosineSimilarity`/`ValidatorState`), the write-only `poeEngine` field, and four zero-caller `IsPostV8_x` accessors are deleted — proven AppHash-neutral (dead/off-chain only) by the replay suite. The always-empty off-chain `ExpertiseVec` column is intentionally retained to avoid a no-benefit SQL migration.
+- **Cross-node determinism harness.** A new `make determinism` target (`test/integration/apphash_determinism_test.go`) stands up an isolated 4-validator devnet and asserts every node's committed AppHash is byte-identical at matched heights across an epoch boundary and a fork activation — turning the single-process determinism guarantee into a repeatable cross-node observation.
+
+Designed by a multi-agent investigation (dead-code replay-safety verdict + sequenced, conflict-aware plan). SDK 8.6.0.
+
+## Older releases
+
+<details>
+<summary>v8.5 — PoE Phase 2 complete + app-v6 upgrade-machinery hardening</summary>
 
 **Proof-of-Experience Phase 2 is complete.** Across the v8 line, all four factors of a validator's quorum weight are now real and consensus-active: **accuracy** (verdict-correctness EWMA, `app-v4`), **corroboration** (lifetime verdict-match count, `app-v4`), **recency**, and **domain expertise** (domain-conditional weight, `app-v5`). A 2/3 quorum is no longer a 2/3 *majority* — it's a 2/3 *weighted* vote where weight is a validator's demonstrated track record, in context.
 
@@ -71,7 +85,7 @@ Reviewed by a multi-agent adversarial pass (0 blockers, replay-safe, pre-fork by
 
 **v8.5.1 (patch) — PoE Phase 2 audit follow-ups.** Test-net and doc hardening from a multi-agent audit of the full Phase 2 PoE work (v8.2→v8.5); **no consensus-rule or behavior change** (byte-identical replay, no new keyspace). Adds the previously-missing `replay_v8_3` byte-parity test — v8.3 is the one fork that *mutates the value bytes of an already-hashed key* (the `vstats:` 24→56-byte growth) rather than only adding key prefixes, so it was the highest-risk seam left without a dedicated AppHash test. Adds a regression guard proving the legacy map-iteration weight sum is genuinely order-sensitive (so `NormalizeWeightsDeterministic` is load-bearing, not a rename), closing the half-covered v8.4 consensus-split fix. Doc corrections: the domain-weight shared-domain fallback set is `{general, self, meta}` **plus the `sage-*` prefix family** (the docs had understated it as `{general, self}`); INDEX.md no longer contradicts ARCHITECTURE on PoE-weighted quorum; and the consensus-decay reference's `app.go` file:line anchors were re-checked against the v8.5 tree. SDK 8.5.1.
 
-## Older releases
+</details>
 
 <details>
 <summary>v8.4 — real Domain factor + the v8.4.1/8.4.2 upgrade-activation fix</summary>

@@ -96,3 +96,39 @@ def test_agent_registration_fresh_register_has_no_height():
     })
     assert reg.on_chain_height is None
     assert reg.tx_hash == "DEADBEEF"
+
+
+def test_agent_profile_parses_poe_signals():
+    # v8.6: /v1/agent/me now surfaces the on-chain PoE factors (corr_count,
+    # per-domain expertise, authoritative accuracy). The model must parse them.
+    from sage_sdk.models import AgentProfile
+
+    profile = AgentProfile.model_validate({
+        "agent_id": "abc123",
+        "display_name": "my-agent",
+        "domains": ["pwn_heap"],
+        "poe_weight": 0.25,
+        "vote_count": 7,
+        "accuracy": 0.6,
+        "corr_count": 2,
+        "domain_expertise": {"pwn_heap": 0.55},
+        "on_chain_height": 1200,
+    })
+    assert profile.corr_count == 2
+    assert profile.domain_expertise == {"pwn_heap": 0.55}
+    assert profile.accuracy == 0.6
+
+
+def test_agent_profile_tolerates_old_server_omitting_poe_signals():
+    # An older server omits the new fields entirely; the additive Optional
+    # fields default to None so the model still validates (forward/back compat).
+    from sage_sdk.models import AgentProfile
+
+    profile = AgentProfile.model_validate({
+        "agent_id": "abc123",
+        "poe_weight": 0.1,
+        "vote_count": 0,
+    })
+    assert profile.corr_count is None
+    assert profile.domain_expertise is None
+    assert profile.accuracy is None

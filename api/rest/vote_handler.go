@@ -68,13 +68,23 @@ type CorroborateResponse struct {
 
 // AgentProfileResponse is the JSON body for GET /v1/agent/me.
 type AgentProfileResponse struct {
-	AgentID       string   `json:"agent_id"`
-	DisplayName   string   `json:"display_name"`
-	Domains       []string `json:"domains"`
-	PoEWeight     float64  `json:"poe_weight"`
-	VoteCount     int64    `json:"vote_count"`
-	Accuracy      float64  `json:"accuracy"`
-	OnChainHeight int64    `json:"on_chain_height"`
+	AgentID     string   `json:"agent_id"`
+	DisplayName string   `json:"display_name"`
+	Domains     []string `json:"domains"`
+	PoEWeight   float64  `json:"poe_weight"`
+	VoteCount   int64    `json:"vote_count"`
+	Accuracy    float64  `json:"accuracy"`
+	// CorrCount is the validator's lifetime corroboration count (votes that
+	// matched a terminal verdict) — the δ factor of the PoE quorum weight,
+	// read from the authoritative on-chain vstats:<id> record. Not mirrored
+	// off-chain.
+	CorrCount int64 `json:"corr_count"`
+	// DomainExpertise maps each domain the agent has voted in to its
+	// per-domain verdict-correctness EWMA (the β factor, read from
+	// vstats_domain:<id>:<D>). Omitted for domains with no voting history so
+	// generalists don't emit a wall of 0.5 cold-start values.
+	DomainExpertise map[string]float64 `json:"domain_expertise,omitempty"`
+	OnChainHeight   int64              `json:"on_chain_height"`
 }
 
 // PendingMemoriesResponse is the JSON body for GET /v1/validator/pending.
@@ -430,6 +440,40 @@ func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
 			Count:       score.VoteCount,
 		}
 		resp.Accuracy = tracker.Accuracy()
+	}
+
+	// Authoritative on-chain PoE signals from BadgerDB (the consensus source of
+	// truth — the off-chain mirror above can lag a block). corr_count and the
+	// per-domain expertise EWMA are not mirrored off-chain at all, so they can
+	// only come from here. Nil-guarded: the handler test suite constructs a
+	// Server without a badgerStore.
+	if s.badgerStore != nil {
+		if vs, err := s.badgerStore.GetValidatorStats(agentID); err == nil && vs != nil {
+			resp.CorrCount = int64(vs.CorrCount) // #nosec G115 -- corroboration count is small/non-negative
+			if vs.EWMACount > 0 {
+				resp.Accuracy = (&poe.EWMATracker{
+					WeightedSum: vs.EWMAWeightedSum,
+					WeightDenom: vs.EWMAWeightDenom,
+					Count:       int64(vs.EWMACount), // #nosec G115 -- non-negative
+				}).Accuracy()
+			}
+		}
+		// Per-domain verdict-correctness, only for domains the agent has actually
+		// voted in (EWMACount > 0) so the payload stays focused.
+		for _, d := range resp.Domains {
+			ds, err := s.badgerStore.GetValidatorDomainStats(agentID, d)
+			if err != nil || ds == nil || ds.EWMACount == 0 {
+				continue
+			}
+			if resp.DomainExpertise == nil {
+				resp.DomainExpertise = make(map[string]float64)
+			}
+			resp.DomainExpertise[d] = (&poe.EWMATracker{
+				WeightedSum: ds.EWMAWeightedSum,
+				WeightDenom: ds.EWMAWeightDenom,
+				Count:       int64(ds.EWMACount), // #nosec G115 -- non-negative
+			}).Accuracy()
+		}
 	}
 
 	writeJSON(w, http.StatusOK, resp)

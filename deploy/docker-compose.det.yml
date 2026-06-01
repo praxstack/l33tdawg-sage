@@ -1,0 +1,30 @@
+# SAGE determinism-harness port override (audit residual #6).
+#
+# Layered ON TOP of docker-compose.yml + docker-compose.test.yml to move the abci
+# REST host ports OFF 18080-18083 (which a separately running bench/dev container
+# may already bind) to 18090-18093. Uses Compose's `!override` tag (v2.24+) to
+# REPLACE the merged `ports` list rather than append to it, so the base 8080 and
+# test-override 18080 bindings are dropped. The CometBFT RPC ports (36657-36957)
+# come from docker-compose.test.yml and are left as-is.
+#
+# Usage (always with -p sage-det so it never collides with other compose projects):
+#   docker compose -p sage-det \
+#     -f deploy/docker-compose.yml \
+#     -f deploy/docker-compose.test.yml \
+#     -f deploy/docker-compose.det.yml up -d --build
+#
+# Driven by deploy/scripts/run-determinism.sh / `make determinism`.
+
+services:
+  abci0:
+    ports: !override
+      - "127.0.0.1:18090:8080"
+  abci1:
+    ports: !override
+      - "127.0.0.1:18091:8080"
+  abci2:
+    ports: !override
+      - "127.0.0.1:18092:8080"
+  abci3:
+    ports: !override
+      - "127.0.0.1:18093:8080"

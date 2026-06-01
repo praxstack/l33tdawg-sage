@@ -115,3 +115,16 @@ func RecordTx(txType string, duration time.Duration, err error) {
 func RecordQuery(domain string, duration time.Duration) {
 	QueryLatency.WithLabelValues(domain).Observe(duration.Seconds())
 }
+
+// SetPoEWeights publishes the per-validator sage_poe_weight gauge from a freshly
+// computed normalized weight set (called once per epoch boundary). Reset() drops
+// every prior series first, then the current set is repopulated — so a validator
+// removed via governance does not leave a frozen, misleading last-known weight.
+// Gauge writes are process-local and order-independent: this touches no BadgerDB
+// key and no pendingWrite, so it never affects the AppHash.
+func SetPoEWeights(weights map[string]float64) {
+	PoEWeight.Reset()
+	for id, w := range weights {
+		PoEWeight.WithLabelValues(id).Set(w)
+	}
+}

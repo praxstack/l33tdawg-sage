@@ -237,7 +237,6 @@ type SageApp struct {
 	badgerStore   *store.BadgerStore
 	offchainStore store.OffchainStore
 	validators    *validator.ValidatorSet
-	poeEngine     *poe.DomainRegistry
 	phiTracker    *poe.PhiTracker
 	govEngine     *governance.Engine
 	state         *AppState
@@ -385,13 +384,6 @@ func (app *SageApp) postV8_2Fork(height int64) bool {
 	return app.v8_2AppliedHeight > 0 && height > app.v8_2AppliedHeight
 }
 
-// IsPostV8_2Fork is the off-consensus accessor reserved for any future
-// REST surface that wants to query the live fork state. Reads the cached
-// AppState.Height, advisory only — never use this in the consensus path.
-func (app *SageApp) IsPostV8_2Fork() bool {
-	return app.v8_2AppliedHeight > 0 && app.state != nil && app.state.Height > app.v8_2AppliedHeight
-}
-
 // refreshV8_2Fork populates v8_2AppliedHeight from the persisted upgrade
 // audit trail. Called on boot (so a node restarting on a post-fork chain
 // picks up the gate without waiting for activation) and after the
@@ -428,13 +420,6 @@ func recordV8_2Branch(postFork bool) {
 // MarkUpgradeApplied write. Blocks H > H_act feed the real signals.
 func (app *SageApp) postV8_3Fork(height int64) bool {
 	return app.v8_3AppliedHeight > 0 && height > app.v8_3AppliedHeight
-}
-
-// IsPostV8_3Fork is the off-consensus accessor reserved for any future
-// REST surface that wants to query the live fork state. Reads the cached
-// AppState.Height, advisory only — never use this in the consensus path.
-func (app *SageApp) IsPostV8_3Fork() bool {
-	return app.v8_3AppliedHeight > 0 && app.state != nil && app.state.Height > app.v8_3AppliedHeight
 }
 
 // refreshV8_3Fork populates v8_3AppliedHeight from the persisted upgrade
@@ -476,13 +461,6 @@ func (app *SageApp) postV8_4Fork(height int64) bool {
 	return app.v8_4AppliedHeight > 0 && height > app.v8_4AppliedHeight
 }
 
-// IsPostV8_4Fork is the off-consensus accessor reserved for any future
-// REST surface that wants to query the live fork state. Reads the cached
-// AppState.Height, advisory only — never use this in the consensus path.
-func (app *SageApp) IsPostV8_4Fork() bool {
-	return app.v8_4AppliedHeight > 0 && app.state != nil && app.state.Height > app.v8_4AppliedHeight
-}
-
 // refreshV8_4Fork populates v8_4AppliedHeight from the persisted upgrade
 // audit trail. Called on boot (so a node restarting on a post-fork chain
 // picks up the gate without waiting for activation) and after the
@@ -519,13 +497,6 @@ func recordV8_4Branch(postFork bool) {
 // guards.
 func (app *SageApp) postV8_5Fork(height int64) bool {
 	return app.v8_5AppliedHeight > 0 && height > app.v8_5AppliedHeight
-}
-
-// IsPostV8_5Fork is the off-consensus accessor reserved for any future
-// REST surface that wants to query the live fork state. Reads the cached
-// AppState.Height, advisory only — never use this in the consensus path.
-func (app *SageApp) IsPostV8_5Fork() bool {
-	return app.v8_5AppliedHeight > 0 && app.state != nil && app.state.Height > app.v8_5AppliedHeight
 }
 
 // refreshV8_5Fork populates v8_5AppliedHeight from the persisted upgrade
@@ -716,17 +687,12 @@ func NewSageApp(badgerPath string, postgresURL string, logger zerolog.Logger) (*
 		return nil, fmt.Errorf("load state: %w", err)
 	}
 
-	// Initialize domain registry with default domains
-	domains := []string{"crypto", "vuln_intel", "challenge_generation", "solver_feedback", "calibration", "infrastructure"}
-	domainReg := poe.NewDomainRegistry(domains)
-
 	valSet := validator.NewValidatorSet()
 
 	app := &SageApp{
 		badgerStore:     bs,
 		offchainStore:   ps,
 		validators:      valSet,
-		poeEngine:       domainReg,
 		phiTracker:      poe.NewPhiTracker(50),
 		govEngine:       governance.NewEngine(bs, &validatorSetAdapter{vs: valSet}),
 		state:           state,
@@ -767,16 +733,12 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 		return nil, fmt.Errorf("load state: %w", err)
 	}
 
-	domains := []string{"crypto", "vuln_intel", "challenge_generation", "solver_feedback", "calibration", "infrastructure"}
-	domainReg := poe.NewDomainRegistry(domains)
-
 	valSet := validator.NewValidatorSet()
 
 	app := &SageApp{
 		badgerStore:     bs,
 		offchainStore:   offchain,
 		validators:      valSet,
-		poeEngine:       domainReg,
 		phiTracker:      poe.NewPhiTracker(50),
 		govEngine:       governance.NewEngine(bs, &validatorSetAdapter{vs: valSet}),
 		state:           state,
@@ -3240,6 +3202,13 @@ func (app *SageApp) processEpoch(height int64, blockTime time.Time) {
 			data:      scoreUpdate,
 		})
 	}
+
+	// Publish the per-validator PoE weight gauge from the normalized epoch
+	// weights. Process-local (no BadgerDB write, no pendingWrite, no ordering
+	// effect) so it stays outside the AppHash path; co-located with EpochCurrent
+	// for the same once-per-epoch cadence. Reset-then-repopulate prunes stale
+	// series for governance-removed validators.
+	metrics.SetPoEWeights(normalized)
 }
 
 // Commit persists finalized state.

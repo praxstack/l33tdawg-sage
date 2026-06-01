@@ -182,6 +182,16 @@ class AgentProfile(BaseModel):
     agent_id: str
     poe_weight: float
     vote_count: int
+    display_name: str | None = None
+    domains: list[str] | None = None
+    # Global verdict-correctness accuracy (the EWMA driving quorum weight).
+    accuracy: float | None = None
+    # Lifetime corroboration count — votes that matched a terminal verdict.
+    corr_count: int | None = None
+    # Per-domain verdict-correctness expertise, keyed by domain tag. Only
+    # present for domains the agent has actually voted in.
+    domain_expertise: dict[str, float] | None = None
+    on_chain_height: int | None = None
 
 
 class AgentRegistration(BaseModel):

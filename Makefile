@@ -1,4 +1,4 @@
-.PHONY: build build-all test lint fmt proto init up up-full down down-clean status logs logs-abci integration byzantine benchmark benchmark-k6 sdk-test clean help
+.PHONY: build build-all test lint fmt proto init up up-full down down-clean status logs logs-abci integration byzantine determinism benchmark benchmark-k6 sdk-test clean help
 
 BINARY=bin/amid
 COMPOSE_FILE=deploy/docker-compose.yml
@@ -66,6 +66,9 @@ integration: ## Run integration tests (requires running network)
 
 byzantine: ## Run Byzantine fault tolerance tests (requires running network)
 	go test ./test/byzantine/... -v -count=1 -timeout 120s -tags=byzantine
+
+determinism: ## Stand up an isolated 4-node devnet and assert byte-identical AppHash across nodes (audit residual #6; ~15-20 min, cold build)
+	bash deploy/scripts/run-determinism.sh
 
 benchmark: ## Run authenticated load test (Python, Ed25519 signed)
 	cd test/benchmark && pip install -q httpx pynacl && python load_test.py
