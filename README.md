@@ -57,7 +57,20 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What's New in v8.6.0
+## What's New in v8.7.0
+
+**Layer-2 content-validator plumbing (dormant) + a memory-write resilience fix.** v8.7.0 lands the generic, deployment-agnostic scaffolding for a consensus-time content-aware schema gate, shipped **dormant** — no validators are registered, the gate is disabled by default, and its activation fork (`app-v7`) is not triggered, so the binary's on-chain behavior and AppHash are **byte-identical to v8.6.0** on every existing chain (full `replay_v8_*`/upgrade/quorum suites green; `golangci-lint` v2.12.2 = 0 issues).
+
+- **Generic content-validator registry (`internal/contentvalidator`).** A deployment registers validators keyed by `(domain, outcome_class)`; a registered validator that rejects a record turns the submit into a deterministic on-chain reject (`Code 18`), evaluated identically on every replica *before any state write*. With nothing registered it is pure pass-through — the path every current deployment takes. It carries zero deployment-specific schemas; this is the plumbing only.
+- **Triple-gated dormancy.** The gate fires only when content-validation is explicitly enabled **and** the `app-v7` fork is active **and** a registry is installed — all three default off. The fork gate is strict-`>` and deliberately independent of the v8.x PoE fork chain, so it cannot perturb PoE activation heights.
+- **MCP write-path self-heal.** When a node is restarted under a live MCP session (e.g. an in-place upgrade), signed memory writes the node rejects at the identity/access layer now auto-re-handshake (re-register + fresh connections + a short bounded retry) instead of surfacing a bare `Broadcast error: access denied` until a manual reconnect. First-attempt writes are untouched; a genuine denial still fails fast with an actionable hint. Covers every store path (`sage_turn` / `sage_remember` / `sage_reflect` / `sage_task`).
+
+The Layer-2 slice is dormant-by-default and AppHash-neutral; the MCP fix is operational-only (client write path) with zero consensus surface. SDK 8.7.0.
+
+## Older releases
+
+<details>
+<summary>v8.6 — PoE observability + dead-code cleanup + cross-node determinism harness</summary>
 
 **PoE observability + cleanup.** Three of the four Phase-2 quorum-weight factors have been real on-chain since v8.2–v8.4 but were invisible to clients and operators; v8.6.0 surfaces them and removes the last dead scaffold an audit of the Phase-2 work flagged. **No consensus-rule change** — the binary's on-chain behavior and AppHash are byte-identical to v8.5.1 (verified by the full `replay_v8_*` suite).
 
@@ -68,7 +81,7 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 The dead-code removal was verified replay-safe — it touches no AppHash-affecting bytes — before landing. SDK 8.6.0.
 
-## Older releases
+</details>
 
 <details>
 <summary>v8.5 — PoE Phase 2 complete + app-v6 upgrade-machinery hardening</summary>

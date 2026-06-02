@@ -430,7 +430,7 @@ func (s *Server) toolRemember(ctx context.Context, params map[string]any) (any, 
 		Status   string `json:"status"`
 		TxHash   string `json:"tx_hash"`
 	}
-	if err := s.doSignedJSON(ctx, "POST", "/v1/memory/submit", submitReq, &submitResp); err != nil {
+	if err := s.submitMemoryResilient(ctx, submitReq, &submitResp); err != nil {
 		return nil, fmt.Errorf("submit memory: %w", err)
 	}
 
@@ -1254,7 +1254,7 @@ func (s *Server) toolTask(ctx context.Context, params map[string]any) (any, erro
 			MemoryID string `json:"memory_id"`
 			Status   string `json:"status"`
 		}
-		if err := s.doSignedJSON(ctx, "POST", "/v1/memory/submit", submitReq, &submitResp); err != nil {
+		if err := s.submitMemoryResilient(ctx, submitReq, &submitResp); err != nil {
 			return nil, fmt.Errorf("submit task: %w", err)
 		}
 		memoryID = submitResp.MemoryID
@@ -1535,7 +1535,7 @@ func (s *Server) storeMemory(ctx context.Context, content, domain, memType strin
 		"confidence_score": confidence,
 		"embedding":        embedResp.Embedding,
 	})
-	return s.doSignedJSON(ctx, "POST", "/v1/memory/submit", submitReq, nil)
+	return s.submitMemoryResilient(ctx, submitReq, nil)
 }
 
 // --- Param helpers ---

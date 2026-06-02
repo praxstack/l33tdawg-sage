@@ -500,6 +500,92 @@ func (s *Server) doSignedJSON(ctx context.Context, method, path string, body []b
 	return nil
 }
 
+// submitRehealBackoffs is the wait schedule between re-handshake retries of a
+// stalled memory submit. The first retry is immediate (the agent has just been
+// re-registered and stale keep-alive connections dropped); the second gives a
+// node that is still finishing an in-place restart a moment to rebuild its
+// in-memory access-grant/ownership index before we give up. Overridable in
+// tests so they don't sleep.
+var submitRehealBackoffs = []time.Duration{0, 750 * time.Millisecond}
+
+// isStaleSessionErr reports whether a memory-write error carries the signature
+// of a SAGE node that was restarted (e.g. an in-place v8.x upgrade) out from
+// under a live MCP session. In that window a signed write reaches the node but
+// is rejected at the identity/access layer ("access denied" / "agent identity
+// verification failed"), or the keep-alive connection to the dead process drops
+// ("connection refused" / "connection reset" / "EOF"). All of these clear once
+// the agent re-handshakes against the fresh process — which is exactly what a
+// manual /mcp reconnect did.
+//
+// We match on the inner detail (e.g. "access denied"), NOT the generic
+// "Broadcast error" title the REST layer stamps on EVERY consensus rejection —
+// matching the title would also catch permanent application rejects (e.g. a
+// future content-schema reject surfaces as "Broadcast error: request rejected")
+// and burn a needless re-handshake + retries on a write that can never succeed.
+//
+// A GENUINE, permanent ACL denial carries the same "access denied" text, so the
+// caller MUST bound the retry: a real denial simply fails again and is returned
+// with a clearer hint, rather than looping.
+func isStaleSessionErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, sig := range []string{
+		"access denied",
+		"agent identity verification failed",
+		"connection refused",
+		"connection reset",
+		"eof",
+	} {
+		if strings.Contains(msg, sig) {
+			return true
+		}
+	}
+	return false
+}
+
+// submitMemoryResilient POSTs /v1/memory/submit and, on a stale-session failure,
+// auto-heals the way a manual /mcp reconnect used to: it re-registers this agent
+// against the (possibly restarted) node, drops stale keep-alive connections, and
+// retries on a short bounded schedule. This removes the failure mode where a
+// node restart under a live session surfaced to the agent as a bare
+// "Broadcast error: access denied" on every sage_turn store until the human ran
+// /mcp by hand. Writes that succeed on the first attempt — the overwhelming
+// common case — incur ZERO extra latency. A genuine permanent denial exhausts
+// the bounded retries and is returned with an actionable hint.
+func (s *Server) submitMemoryResilient(ctx context.Context, submitReq []byte, out any) error {
+	err := s.doSignedJSON(ctx, "POST", "/v1/memory/submit", submitReq, out)
+	if err == nil || !isStaleSessionErr(err) {
+		return err
+	}
+
+	// Re-handshake: re-establish this agent's on-chain identity against the
+	// fresh node process and force new TCP connections, mirroring what a /mcp
+	// reconnect does, then retry.
+	fmt.Fprintf(os.Stderr, "SAGE MCP: memory submit failed (%v) — node may have restarted; re-registering and retrying\n", err)
+	s.autoRegister(ctx)
+	s.httpClient.CloseIdleConnections()
+
+	for _, d := range submitRehealBackoffs {
+		if d > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(d):
+			}
+		}
+		retryErr := s.doSignedJSON(ctx, "POST", "/v1/memory/submit", submitReq, out)
+		if retryErr == nil {
+			fmt.Fprintln(os.Stderr, "SAGE MCP: memory submit recovered after re-registration")
+			return nil
+		}
+		err = retryErr
+	}
+	return fmt.Errorf("%w (still failing after re-registration; if this persists, run /mcp to reconnect, "+
+		"or this agent genuinely lacks write access to the domain)", err)
+}
+
 // defaultBaseURL returns the default SAGE API URL based on whether TLS certs exist.
 // Quorum mode (certs present) → https://localhost:8443
 // Personal mode (no certs) → http://localhost:8080

@@ -16,6 +16,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/l33tdawg/sage/internal/auth"
+	"github.com/l33tdawg/sage/internal/contentvalidator"
 	"github.com/l33tdawg/sage/internal/governance"
 	"github.com/l33tdawg/sage/internal/memory"
 	"github.com/l33tdawg/sage/internal/metrics"
@@ -305,6 +306,13 @@ type SageApp struct {
 	// an upgrade revert outright (in-band downgrade is replay-unsafe). Gated by
 	// postV8_5Fork's strict-greater-than.
 	v8_5AppliedHeight int64
+
+	// Layer-2 content-validation gate (Sentinel-agnostic core). All three are
+	// zero-valued by default so a node that never calls the setters and never
+	// activates the sentinel fork behaves bit-for-bit as before.
+	contentValidators        *contentvalidator.ContentValidatorRegistry // nil  => disabled
+	contentValidationEnabled bool                                       // false => disabled
+	sentinelAppliedHeight    int64                                      // 0     => fork dormant
 }
 
 // v8UpgradeName is the canonical name for the v8.0 activation record. The
@@ -327,6 +335,12 @@ const v8_4UpgradeName = "app-v5"
 // v8_5UpgradeName is the canonical name for the v8.5 / app-v6 activation
 // record. Same naming discipline: "app-v<TargetAppVersion>".
 const v8_5UpgradeName = "app-v6"
+
+// sentinelUpgradeName is the canonical activation-record name for the
+// content-validator (Layer-2 schema gate) fork. Same naming discipline:
+// "app-v<TargetAppVersion>". This fork is an INDEPENDENT feature gate and is
+// deliberately NOT part of the v8.x PoE monotonic chain.
+const sentinelUpgradeName = "app-v7"
 
 // postV8Fork is the consensus-side fork-gate predicate. Use it inside
 // processTx and other height-aware paths. Strict greater-than mirrors
@@ -515,6 +529,32 @@ func (app *SageApp) refreshV8_5Fork() {
 	app.v8_5AppliedHeight = rec.AppliedHeight
 }
 
+// postSentinelFork is the consensus-side fork-gate predicate for the
+// content-validator (Layer-2 schema gate) activation. Strict greater-than
+// mirrors postV8_5Fork: the activation block H_act itself still runs the
+// pre-fork branch (gate dormant) so the only AppHash delta at H_act is the
+// MarkUpgradeApplied write. The gate only ever runs when this returns true
+// AND contentValidationEnabled AND contentValidators != nil.
+func (app *SageApp) postSentinelFork(height int64) bool {
+	return app.sentinelAppliedHeight > 0 && height > app.sentinelAppliedHeight
+}
+
+// refreshSentinelFork populates sentinelAppliedHeight from the persisted
+// upgrade audit trail. Called on boot (so a node restarting on a post-fork
+// chain picks up the gate without waiting for activation) and after the
+// activation block in FinalizeBlock.
+func (app *SageApp) refreshSentinelFork() {
+	rec, err := app.badgerStore.GetAppliedUpgrade(sentinelUpgradeName)
+	if err != nil {
+		app.logger.Warn().Err(err).Str("name", sentinelUpgradeName).Msg("read sentinel applied-upgrade record")
+		return
+	}
+	if rec == nil {
+		return
+	}
+	app.sentinelAppliedHeight = rec.AppliedHeight
+}
+
 // recordV8_5Branch is the v8.5 sibling of recordV8_4Branch. Same metric
 // name (sage_fork_branch_total) with fork="v8.5" so dashboards can plot
 // all five activations side by side.
@@ -524,6 +564,20 @@ func recordV8_5Branch(postFork bool) {
 		branch = "post"
 	}
 	metrics.ForkBranchTotal.WithLabelValues("v8.5", branch).Inc()
+}
+
+// SetContentValidators installs the Layer-2 content-validator registry. nil is
+// allowed (leaves the gate disabled). Boot-only: call once before the chain
+// starts producing blocks; not safe to call concurrently with FinalizeBlock.
+func (app *SageApp) SetContentValidators(r *contentvalidator.ContentValidatorRegistry) {
+	app.contentValidators = r
+}
+
+// SetContentValidationEnabled toggles the Layer-2 content-validation gate.
+// false (the default) keeps the gate dormant regardless of fork state. Boot-only:
+// not safe to call concurrently with FinalizeBlock.
+func (app *SageApp) SetContentValidationEnabled(enabled bool) {
+	app.contentValidationEnabled = enabled
 }
 
 // reconcilePoEForkMonotonicity makes the v8.x PoE fork gates monotonic: a higher
@@ -549,6 +603,10 @@ func (app *SageApp) reconcilePoEForkMonotonicity() {
 	// lower fork is active wherever a higher one is — backfilling a skipped gate to
 	// the NEAREST higher activation, not the topmost (which would wrongly push a low
 	// gate's activation later than an already-set intermediate gate's).
+	// NOTE: sentinelAppliedHeight (content-validator fork) is DELIBERATELY
+	// excluded from this slice. It is an independent feature gate, not part of
+	// the v8 PoE monotonic chain (v8 <= v8_2 <= ... <= v8_5); coupling its
+	// activation height to the PoE forks would be wrong.
 	gates := []*int64{&app.v8AppliedHeight, &app.v8_2AppliedHeight, &app.v8_3AppliedHeight, &app.v8_4AppliedHeight, &app.v8_5AppliedHeight}
 	var nearestAbove int64
 	for i := len(gates) - 1; i >= 0; i-- {
@@ -705,6 +763,7 @@ func NewSageApp(badgerPath string, postgresURL string, logger zerolog.Logger) (*
 	app.refreshV8_3Fork()
 	app.refreshV8_4Fork()
 	app.refreshV8_5Fork()
+	app.refreshSentinelFork()
 	app.reconcilePoEForkMonotonicity()
 
 	// Reload persisted validators from BadgerDB (survives restart)
@@ -751,6 +810,7 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 	app.refreshV8_3Fork()
 	app.refreshV8_4Fork()
 	app.refreshV8_5Fork()
+	app.refreshSentinelFork()
 	app.reconcilePoEForkMonotonicity()
 
 	persistedVals, err := bs.LoadValidators()
@@ -1028,6 +1088,9 @@ func (app *SageApp) FinalizeBlock(_ context.Context, req *abcitypes.RequestFinal
 		if plan.Name == v8_5UpgradeName {
 			app.v8_5AppliedHeight = req.Height
 		}
+		if plan.Name == sentinelUpgradeName {
+			app.sentinelAppliedHeight = req.Height
+		}
 		// Keep the PoE fork gates monotonic if this activation jumped past an
 		// intermediate version (e.g. straight to app-v5) — backfill any unset
 		// lower gate so postV8_4Fork ⟹ postV8_3Fork ⟹ … holds. No-op for a
@@ -1129,6 +1192,22 @@ func (app *SageApp) processTx(parsedTx *tx.ParsedTx, height int64, blockTime tim
 	default:
 		return &abcitypes.ExecTxResult{Code: 10, Log: "unknown tx type"}
 	}
+}
+
+// parseOutcomeClass extracts the outcome_class field from a content body that
+// carries a versioned JSON envelope. It is a pure function of the input bytes:
+// on any unmarshal error (incl. a non-JSON or malformed body) it returns the
+// empty string, which the content-validation gate treats as the no-outcome-class
+// key. Deterministic across all validators.
+func parseOutcomeClass(content string) string {
+	var env struct {
+		SchemaVersion int    `json:"schema_version"`
+		OutcomeClass  string `json:"outcome_class"`
+	}
+	if err := json.Unmarshal([]byte(content), &env); err != nil {
+		return ""
+	}
+	return env.OutcomeClass
 }
 
 // txMemoryTypeToString converts the wire-format MemoryType (uint8) to the model string.
@@ -1327,6 +1406,32 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 		}
 	}
 
+	memType := txMemoryTypeToString(submit.MemoryType)
+
+	// Layer-2 content-aware schema gate. Deterministic: pure function of submit
+	// bytes + frozen in-binary schemas + read-only Badger lookups. Runs ONLY in
+	// FinalizeBlock so the reject is byte-identical on every validator and feeds
+	// ComputeAppHash. Fork-gated + config-gated => opt-in + replay-safe. Placed
+	// BEFORE SetMemoryHash so a rejected record never mutates Badger / the AppHash.
+	if app.contentValidationEnabled && app.postSentinelFork(height) && app.contentValidators != nil {
+		recView := &memory.MemoryRecord{
+			MemoryID:        memoryID,
+			SubmittingAgent: agentID,
+			Content:         submit.Content,
+			ContentHash:     contentHash,
+			MemoryType:      memory.MemoryType(memType),
+			DomainTag:       submit.DomainTag,
+			ConfidenceScore: submit.ConfidenceScore,
+		}
+		outcomeClass := parseOutcomeClass(submit.Content)
+		if rejected, reason := app.contentValidators.Validate(submit.DomainTag, outcomeClass, recView); rejected {
+			return &abcitypes.ExecTxResult{
+				Code: 18,
+				Log:  fmt.Sprintf("content schema rejected for (%s,%s): %s", submit.DomainTag, outcomeClass, reason),
+			}
+		}
+	}
+
 	if setErr := app.badgerStore.SetMemoryHash(memoryID, contentHash, string(memory.StatusProposed)); setErr != nil {
 		return &abcitypes.ExecTxResult{Code: 12, Log: fmt.Sprintf("badger write error: %v", setErr)}
 	}
@@ -1344,8 +1449,6 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 			app.logger.Error().Err(domErr).Str("memory_id", memoryID).Msg("v8.4 set memory domain")
 		}
 	}
-
-	memType := txMemoryTypeToString(submit.MemoryType)
 
 	// Buffer PostgreSQL write for Commit — this is the ONLY path that writes
 	// memories to the offchain store, enforcing consensus-first ordering.
