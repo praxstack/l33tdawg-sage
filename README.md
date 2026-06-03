@@ -57,7 +57,21 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What's New in v9.0.0
+## What's New in v9.1.0
+
+**Consensus-path nonce/replay enforcement and defense-in-depth hardening.** v9.1.0 activates a new independent `app-v9` consensus fork that closes the replay boundary v9.0.0 flagged and tightens two more authorization seams. Like every SAGE fork it is replay-safe by construction: no existing chain has activated `app-v9`, so every historical block replays byte-identically, and the new rules apply only after an operator governance-activates the fork.
+
+- **Nonce/replay is now enforced in the consensus path.** v9.0.0 verified tx signatures in `FinalizeBlock` but still checked nonces only at `CheckTx` (advisory). Post-`app-v9`, `FinalizeBlock` rejects a tx whose nonce was already consumed (and rejects the nonce-0 sentinel), so a Byzantine proposer can no longer replay a victim's previously-valid signed tx into a block. Because strict-monotonic nonces are now consensus-enforced, every in-process transaction producer (validators, REST/web handlers, the upgrade watchdog) moved onto a process-global, strictly-increasing nonce allocator keyed by signing identity, replacing wall-clock timestamps that could collide.
+- **Admin role can no longer be self-granted over the wire.** Pre-`app-v9`, `agent_register` took the role straight from the payload, so any key could register itself as `admin`. Post-fork a wire `role="admin"` is silently downgraded to `member` (the registration still succeeds). The real upgrade-authority gate remains the 2/3 quorum plus the v9.0.0 consensus signature verification; this just removes the cheap path to a privileged role. Operator admins are unaffected: existing admins are grandfathered, and the operator-blessed bootstrap path is untouched.
+- **Validators auto-vote on upgrades, gated on readiness.** Under `app-v8` an upgrade needs an explicit 2/3 governance vote, but nothing cast it automatically, so a proposal could expire unvoted. The in-process validators now auto-vote accept on an active upgrade proposal, but only if the running binary actually supports the target app version. An upgrade to a version the binary can't execute never draws a quorum, which neutralizes a halt footgun (committing an app version the binary doesn't understand) at the liveness layer, with no new consensus rule.
+- **Independent, halt-safe fork.** `app-v9` ranks highest in the committed app version, and a higher independent fork now subsumes the lower forks' rules, so a chain cannot activate `app-v9` and silently lose `app-v8`'s guarantees. The upgrade watchdog stays targeted at `app-v6`, so `app-v9` never auto-fires; it activates only via an explicit governance upgrade plan.
+
+SDK 9.1.0.
+
+## Older releases
+
+<details>
+<summary>v9.0.0 — governance-gated upgrades + consensus-path signature verification</summary>
 
 **Governance-gated upgrades and consensus-path signature verification.** v9.0.0 activates a new independent `app-v8` consensus fork that hardens how the chain authorizes high-value actions. It is replay-safe by construction: no existing chain has activated `app-v8`, so every historical block replays byte-identically, and the new rules apply only after an operator governance-activates the fork.
 
@@ -65,11 +79,9 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 - **Transaction signatures are now verified in the consensus path.** `tx.VerifyTx` (the outer Ed25519 check) runs inside `FinalizeBlock`, not only at mempool admission (`CheckTx`). `CheckTx` is advisory: a Byzantine block proposer can include txs that never passed an honest node's mempool. Without this, a forged `UpgradePropose` or `GovVote` bearing a victim's public key (signed by the attacker) would execute, letting one proposer fabricate the very 2/3 quorum the upgrade gate relies on. The gate covers every tx type, so all governance (validator-set changes, memory votes, access control) is now authenticated in consensus, not just at the mempool.
 - **Independent, halt-safe fork.** `app-v8` is decoupled from the PoE fork ladder (like `app-v7`) and ranks highest in the committed app version. The upgrade watchdog stays targeted at `app-v6`, so `app-v8` never auto-fires; it activates only via an explicit governance upgrade plan.
 
-Known boundary (tracked for a future fork): consensus-path nonce/replay is still enforced only at `CheckTx`. The tx handlers absorb a replayed signed tx idempotently (duplicate-vote rejection, the single-active-proposal slot, content-hash dedup), so it is safe in practice.
-
 Also: `MemoryRecord` in the Python SDK now reads back the `provider` provenance tag the server emits (thanks to [@ihubanov](https://github.com/ihubanov), #30). SDK 9.0.0.
 
-## Older releases
+</details>
 
 <details>
 <summary>v8.9.0 — fail-safe content-validation routing + consensus-pure enforcement</summary>
