@@ -307,12 +307,15 @@ type SageApp struct {
 	// postV8_5Fork's strict-greater-than.
 	v8_5AppliedHeight int64
 
-	// Layer-2 content-validation gate (deployment-agnostic core). All three are
-	// zero-valued by default so a node that never calls the setters and never
-	// activates the app-v7 fork behaves bit-for-bit as before.
-	contentValidators        *contentvalidator.ContentValidatorRegistry // nil  => disabled
-	contentValidationEnabled bool                                       // false => disabled
-	appV7AppliedHeight       int64                                      // 0     => fork dormant
+	// Layer-2 content-validation gate (deployment-agnostic core). Both are
+	// zero-valued by default so a node that never wires a registry and never
+	// activates the app-v7 fork behaves bit-for-bit as before. Enforcement is a
+	// pure function of consensus state (the app-v7 fork height) AND whether a
+	// validator registry is compiled in — there is NO separate runtime enable
+	// flag, so two nodes on the same binary cannot disagree on whether the gate
+	// is live.
+	contentValidators  *contentvalidator.ContentValidatorRegistry // nil => no gate
+	appV7AppliedHeight int64                                      // 0   => fork dormant
 }
 
 // v8UpgradeName is the canonical name for the v8.0 activation record. The
@@ -534,7 +537,7 @@ func (app *SageApp) refreshV8_5Fork() {
 // mirrors postV8_5Fork: the activation block H_act itself still runs the
 // pre-fork branch (gate dormant) so the only AppHash delta at H_act is the
 // MarkUpgradeApplied write. The gate only ever runs when this returns true
-// AND contentValidationEnabled AND contentValidators != nil.
+// AND contentValidators != nil.
 func (app *SageApp) postAppV7Fork(height int64) bool {
 	return app.appV7AppliedHeight > 0 && height > app.appV7AppliedHeight
 }
@@ -566,18 +569,42 @@ func recordV8_5Branch(postFork bool) {
 	metrics.ForkBranchTotal.WithLabelValues("v8.5", branch).Inc()
 }
 
-// SetContentValidators installs the Layer-2 content-validator registry. nil is
-// allowed (leaves the gate disabled). Boot-only: call once before the chain
-// starts producing blocks; not safe to call concurrently with FinalizeBlock.
+// SetContentValidators installs the Layer-2 content-validator registry. nil (the
+// default) leaves the gate inert — no registry, no enforcement. This is the ONLY
+// runtime knob for the gate: there is no separate enable flag. Once a registry is
+// wired AND the chain has activated the app-v7 fork, enforcement is automatic and
+// chain-wide (driven by consensus state), not a per-node toggle. Boot-only: call
+// once before the chain starts producing blocks; not safe to call concurrently
+// with FinalizeBlock.
 func (app *SageApp) SetContentValidators(r *contentvalidator.ContentValidatorRegistry) {
 	app.contentValidators = r
 }
 
-// SetContentValidationEnabled toggles the Layer-2 content-validation gate.
-// false (the default) keeps the gate dormant regardless of fork state. Boot-only:
-// not safe to call concurrently with FinalizeBlock.
-func (app *SageApp) SetContentValidationEnabled(enabled bool) {
-	app.contentValidationEnabled = enabled
+// ContentValidationEnforcementWarning returns a non-empty operator warning when
+// this node will NOT enforce the Layer-2 content-validation gate on a chain that
+// has already activated it — i.e. the app-v7 fork is live (appV7AppliedHeight > 0)
+// but no validator registry is compiled in. Such a node is internally consistent
+// and MUST stay bootable (a generic-only fleet is a valid deployment), so this is
+// an advisory, not a fatal guard: returning an error here would brick a healthy
+// app-v7 chain on restart.
+//
+// The hazard it surfaces is a MIXED fleet — if some validators run a registry-
+// wired binary and others do not, the wired nodes reject (Code 18) where the bare
+// nodes write (Code 0), diverging the AppHash. A local boot check cannot see
+// peers, so it cannot prove parity; it can only flag that THIS node won't enforce
+// so operators ensure every validator runs the same registry-wired build before
+// activating app-v7. Returns "" when there is nothing to warn about.
+func (app *SageApp) ContentValidationEnforcementWarning() string {
+	if app.appV7AppliedHeight > 0 && app.contentValidators == nil {
+		return fmt.Sprintf(
+			"content-validation fork app-v7 is active at height %d but this node has no "+
+				"content-validator registry compiled in: it will NOT enforce the Layer-2 gate. "+
+				"If any peer validator DOES enforce, this node will diverge (it writes Code 0 "+
+				"where an enforcing peer rejects Code 18). Ensure every validator runs the same "+
+				"registry-wired build.",
+			app.appV7AppliedHeight)
+	}
+	return ""
 }
 
 // RoleResolver returns a deterministic, read-only role lookup over on-chain
@@ -1262,20 +1289,48 @@ func (app *SageApp) processTx(parsedTx *tx.ParsedTx, height int64, blockTime tim
 	}
 }
 
-// parseOutcomeClass extracts the outcome_class field from a content body that
-// carries a versioned JSON envelope. It is a pure function of the input bytes:
-// on any unmarshal error (incl. a non-JSON or malformed body) it returns the
-// empty string, which the content-validation gate treats as the no-outcome-class
-// key. Deterministic across all validators.
+// parseOutcomeClass extracts the outcome_class routing key from a content body.
+// It is a pure function of the input bytes and is fail-SAFE, not fail-open.
+//
+// Two hardenings over the naive envelope decode that close a fail-open routing hole:
+//   - It decodes ONLY outcome_class and ignores every sibling envelope field, so
+//     a malformed sibling — a float/string/overflowing schema_version, etc. — can
+//     no longer abort the whole Unmarshal and null the route. (The old struct
+//     carried a `SchemaVersion int` that was never read here yet, by type-checking,
+//     let any non-int value bypass the gate by forcing this to "".)
+//   - It unwraps a top-level single-element JSON array first, matching the rest of
+//     the body-reading stack, so a "[ {…} ]" body routes by its real class instead
+//     of failing the object decode.
+//
+// On any error it returns "" — which, for a CLOSED domain, the registry treats as
+// an unregistered class and REJECTS rather than passing through. Deterministic
+// across all validators.
 func parseOutcomeClass(content string) string {
 	var env struct {
-		SchemaVersion int    `json:"schema_version"`
-		OutcomeClass  string `json:"outcome_class"`
+		OutcomeClass string `json:"outcome_class"`
 	}
-	if err := json.Unmarshal([]byte(content), &env); err != nil {
+	if err := json.Unmarshal([]byte(unwrapSingleElementJSONArray(content)), &env); err != nil {
 		return ""
 	}
 	return env.OutcomeClass
+}
+
+// unwrapSingleElementJSONArray returns the inner element of a top-level
+// single-element JSON array ("[ {…} ]" => "{…}"); for any other shape (object,
+// empty, non-JSON, multi-element array) it returns content unchanged. Pure
+// function of the bytes. The router and SAGE's body readers must resolve the
+// SAME routing key — a body the readers unwrap to one object would otherwise
+// null the route here and bypass the gate.
+func unwrapSingleElementJSONArray(content string) string {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" || trimmed[0] != '[' {
+		return content
+	}
+	var arr []json.RawMessage
+	if err := json.Unmarshal([]byte(trimmed), &arr); err != nil || len(arr) != 1 {
+		return content
+	}
+	return string(arr[0])
 }
 
 // txMemoryTypeToString converts the wire-format MemoryType (uint8) to the model string.
@@ -1479,9 +1534,11 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 	// Layer-2 content-aware schema gate. Deterministic: pure function of submit
 	// bytes + frozen in-binary schemas + read-only Badger lookups. Runs ONLY in
 	// FinalizeBlock so the reject is byte-identical on every validator and feeds
-	// ComputeAppHash. Fork-gated + config-gated => opt-in + replay-safe. Placed
+	// ComputeAppHash. Enforcement is a pure function of consensus state (the
+	// app-v7 fork height) AND a compiled-in registry — no runtime enable flag —
+	// so it is replay-safe and cannot be toggled per-node out of band. Placed
 	// BEFORE SetMemoryHash so a rejected record never mutates Badger / the AppHash.
-	if app.contentValidationEnabled && app.postAppV7Fork(height) && app.contentValidators != nil {
+	if app.postAppV7Fork(height) && app.contentValidators != nil {
 		recView := &memory.MemoryRecord{
 			MemoryID:        memoryID,
 			SubmittingAgent: agentID,

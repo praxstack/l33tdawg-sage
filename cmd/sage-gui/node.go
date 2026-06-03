@@ -183,6 +183,15 @@ func runServe() (rerr error) {
 	app.Version = version
 	defer func() { _ = app.Close() }()
 
+	// Content-validation enforcement advisory (non-fatal): warn when the app-v7
+	// fork is active on this chain but this binary has no validator registry
+	// compiled in, so this node won't enforce the Layer-2 gate. Bootable by
+	// design — a generic-only fleet is valid — but a MIXED fleet (some nodes
+	// wired, some not) would diverge the AppHash, so surface it loudly.
+	if warn := app.ContentValidationEnforcementWarning(); warn != "" {
+		logger.Warn().Msg(warn)
+	}
+
 	// v7.5 snapshot scheduler: anchor every 10k blocks and every 6h
 	// of wall time. Snapshots include the live binary so a rollback
 	// can re-exec without operator intervention. Encryption posture
