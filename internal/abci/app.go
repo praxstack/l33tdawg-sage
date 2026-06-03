@@ -335,6 +335,15 @@ type SageApp struct {
 	// byte-identically. INDEPENDENT gate, like appV7/appV8 — NOT part of the
 	// v8.x PoE monotonic ladder.
 	appV9AppliedHeight int64 // 0 => fork dormant
+
+	// appV10AppliedHeight gates the app-v10 fork (v9.2). Once set (> 0) the
+	// corroboration integrity guard takes effect at H+1: processMemorySubmit
+	// records the memory's author on-chain (memauthor:), and
+	// processMemoryCorroborate rejects a self-corroboration (corroborator is the
+	// on-chain author) or a duplicate corroboration (same agent twice). Zero by
+	// default, so every existing chain replays the pre-fork branches
+	// byte-identically. INDEPENDENT gate, like appV7/appV8/appV9.
+	appV10AppliedHeight int64 // 0 => fork dormant
 }
 
 // v8UpgradeName is the canonical name for the v8.0 activation record. The
@@ -378,6 +387,12 @@ const appV8UpgradeName = "app-v8"
 // chain. Governance-only — the watchdog target stays at 6, so app-v9 only
 // activates via an explicit governance plan {Name:"app-v9", TargetAppVersion:9}.
 const appV9UpgradeName = "app-v9"
+
+// appV10UpgradeName is the canonical activation-record name for the app-v10 fork
+// (v9.2: corroboration integrity guard + on-chain author field). Same naming
+// discipline. Like app-v7/v8/v9, an INDEPENDENT feature gate, NOT part of the
+// v8.x PoE monotonic chain. Governance-only — the watchdog target stays at 6.
+const appV10UpgradeName = "app-v10"
 
 // postV8Fork is the consensus-side fork-gate predicate. Use it inside
 // processTx and other height-aware paths. Strict greater-than mirrors
@@ -641,22 +656,41 @@ func (app *SageApp) postAppV9Fork(height int64) bool {
 	return app.appV9AppliedHeight > 0 && height > app.appV9AppliedHeight
 }
 
+// postAppV10Fork is the consensus-side fork-gate predicate for the app-v10
+// activation (v9.2: corroboration integrity guard + on-chain author field).
+// Strict greater-than mirrors the other gates; every existing chain (none has
+// activated app-v10) returns false, so historical blocks replay byte-identically.
+func (app *SageApp) postAppV10Fork(height int64) bool {
+	return app.appV10AppliedHeight > 0 && height > app.appV10AppliedHeight
+}
+
 // postAppV8Rules reports whether app-v8's consensus rules (consensus-path
 // signature verification + quorum/admin-gated upgrade governance) are in force
-// at this height. app-v7/v8/v9 are INDEPENDENT gates — governance MAY
+// at this height. app-v7/v8/v9/v10 are INDEPENDENT gates — governance MAY
 // skip-activate a higher one without the lower, because the upgrade-propose
 // regression guard only checks target > currentAppVersion(), and
 // reconcilePoEForkMonotonicity excludes these gates. But a HIGHER app version
-// SUBSUMES the lower's rules: a chain that reports version 9 must still enforce
+// SUBSUMES the lower's rules: a chain that reports version 10 must still enforce
 // app-v8's quorum-gated upgrades and sig-verification. So app-v8's rules are
-// active whenever app-v8 OR any higher independent gate (app-v9) is. Every
-// callsite that gates an app-v8 rule MUST use this, not postAppV8Fork alone —
-// otherwise an app-v9-without-app-v8 chain silently drops the rule while
-// advertising version 9 (the skip-ahead class of bug). On every existing chain
-// appV9AppliedHeight==0, so this collapses to exactly postAppV8Fork and
-// historical blocks replay byte-identically.
+// active whenever app-v8 OR any higher independent gate (app-v9, app-v10) is.
+// Every callsite that gates an app-v8 rule MUST use this, not postAppV8Fork alone
+// — otherwise a skip-ahead chain silently drops the rule while advertising the
+// higher version (the skip-ahead class of bug). On every existing chain the
+// higher gates are 0, so this collapses to exactly postAppV8Fork and historical
+// blocks replay byte-identically.
 func (app *SageApp) postAppV8Rules(height int64) bool {
-	return app.postAppV8Fork(height) || app.postAppV9Fork(height)
+	return app.postAppV8Fork(height) || app.postAppV9Fork(height) || app.postAppV10Fork(height)
+}
+
+// postAppV9Rules reports whether app-v9's consensus rules (consensus-path
+// nonce/replay enforcement + admin self-grant downgrade) are in force at this
+// height. Same subsumption logic as postAppV8Rules: app-v9's rules are active
+// whenever app-v9 OR any higher independent gate (app-v10) is, so an
+// app-v10-without-app-v9 chain still enforces them. Collapses to exactly
+// postAppV9Fork on every existing chain (appV10AppliedHeight==0), so replay is
+// byte-identical.
+func (app *SageApp) postAppV9Rules(height int64) bool {
+	return app.postAppV9Fork(height) || app.postAppV10Fork(height)
 }
 
 // refreshAppV9Fork populates appV9AppliedHeight from the persisted upgrade
@@ -676,6 +710,22 @@ func (app *SageApp) refreshAppV9Fork() {
 	app.appV9AppliedHeight = rec.AppliedHeight
 }
 
+// refreshAppV10Fork populates appV10AppliedHeight from the persisted upgrade
+// audit trail. Called on boot and after the activation block in FinalizeBlock.
+// Returns nil-record on every existing chain (no "app-v10" record has ever been
+// written), so the gate stays dormant and replay is unaffected.
+func (app *SageApp) refreshAppV10Fork() {
+	rec, err := app.badgerStore.GetAppliedUpgrade(appV10UpgradeName)
+	if err != nil {
+		app.logger.Warn().Err(err).Str("name", appV10UpgradeName).Msg("read app-v10 applied-upgrade record")
+		return
+	}
+	if rec == nil {
+		return
+	}
+	app.appV10AppliedHeight = rec.AppliedHeight
+}
+
 // recordAppV9Branch records which branch (pre/post app-v9) a gated handler took,
 // as a Prometheus counter for the fork-activation dashboard. Metrics do NOT
 // enter the AppHash (ComputeAppHash reads BadgerDB only), so this is purely
@@ -686,6 +736,16 @@ func recordAppV9Branch(postFork bool) {
 		branch = "post"
 	}
 	metrics.ForkBranchTotal.WithLabelValues("app-v9", branch).Inc()
+}
+
+// recordAppV10Branch is the app-v10 sibling of recordAppV9Branch. Metrics-only,
+// never in the AppHash.
+func recordAppV10Branch(postFork bool) {
+	branch := "pre"
+	if postFork {
+		branch = "post"
+	}
+	metrics.ForkBranchTotal.WithLabelValues("app-v10", branch).Inc()
 }
 
 // recordV8_5Branch is the v8.5 sibling of recordV8_4Branch. Same metric
@@ -948,6 +1008,7 @@ func NewSageApp(badgerPath string, postgresURL string, logger zerolog.Logger) (*
 	app.refreshAppV7Fork()
 	app.refreshAppV8Fork()
 	app.refreshAppV9Fork()
+	app.refreshAppV10Fork()
 	app.reconcilePoEForkMonotonicity()
 
 	// Reload persisted validators from BadgerDB (survives restart)
@@ -997,6 +1058,7 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 	app.refreshAppV7Fork()
 	app.refreshAppV8Fork()
 	app.refreshAppV9Fork()
+	app.refreshAppV10Fork()
 	app.reconcilePoEForkMonotonicity()
 
 	persistedVals, err := bs.LoadValidators()
@@ -1060,8 +1122,10 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 // 6 <= 7, so the watchdog stops without re-proposing.
 func (app *SageApp) currentAppVersion() uint64 {
 	switch {
+	case app.appV10AppliedHeight > 0:
+		return 10 // app-v10 (corroboration integrity guard + on-chain author) — independent gate, highest version, must rank first (10 > 9)
 	case app.appV9AppliedHeight > 0:
-		return 9 // app-v9 (consensus-path nonce + admin self-grant downgrade) — independent gate, highest version, must rank first (9 > 8)
+		return 9 // app-v9 (consensus-path nonce + admin self-grant downgrade) — independent gate, ranks above app-v8 (9 > 8)
 	case app.appV8AppliedHeight > 0:
 		return 8 // app-v8 (quorum-gated upgrades) — independent gate, ranks above app-v7 (8 > 7)
 	case app.appV7AppliedHeight > 0:
@@ -1088,7 +1152,7 @@ func (app *SageApp) currentAppVersion() uint64 {
 // still runs at N-1, halting the chain on the next CometBFT handshake (the
 // maxSupportedAppVersion footgun). Bump this in lockstep with every new
 // appV<N>UpgradeName fork gate added above.
-const maxSupportedAppVersion uint64 = 9
+const maxSupportedAppVersion uint64 = 10
 
 // ActiveUpgradeVote reports the currently active OpUpgrade governance proposal,
 // if any, for the in-process app-validators' auto-vote. It returns the proposal
@@ -1235,7 +1299,7 @@ func (app *SageApp) CheckTx(_ context.Context, req *abcitypes.RequestCheckTx) (*
 	// app-v9: reject the nonce-0 sentinel at mempool admission too, mirroring the
 	// consensus-path gate (processTx). Gated on the app-v9 fork via state.Height so
 	// pre-fork behaviour is unchanged.
-	if parsedTx.Nonce == 0 && app.postAppV9Fork(app.state.Height) {
+	if parsedTx.Nonce == 0 && app.postAppV9Rules(app.state.Height) {
 		metrics.TxRejectedTotal.WithLabelValues("replay_nonce").Inc()
 		return &abcitypes.ResponseCheckTx{Code: 4, Log: "nonce 0 not permitted"}, nil
 	}
@@ -1393,6 +1457,9 @@ func (app *SageApp) FinalizeBlock(_ context.Context, req *abcitypes.RequestFinal
 		if plan.Name == appV9UpgradeName {
 			app.appV9AppliedHeight = req.Height
 		}
+		if plan.Name == appV10UpgradeName {
+			app.appV10AppliedHeight = req.Height
+		}
 		// Keep the PoE fork gates monotonic if this activation jumped past an
 		// intermediate version (e.g. straight to app-v5) — backfill any unset
 		// lower gate so postV8_4Fork ⟹ postV8_3Fork ⟹ … holds. No-op for a
@@ -1468,7 +1535,7 @@ func (app *SageApp) processTx(parsedTx *tx.ParsedTx, height int64, blockTime tim
 	//   nonce check fires on app-v9             (replay protection)
 	// On every chain today appV9AppliedHeight==0, so each `|| postAppV9Fork`
 	// collapses to the v9.0.0 behaviour and historical blocks replay byte-identically.
-	postV9 := app.postAppV9Fork(height)
+	postV9 := app.postAppV9Rules(height)
 	if app.postAppV8Rules(height) {
 		if valid, err := tx.VerifyTx(parsedTx); err != nil || !valid {
 			return &abcitypes.ExecTxResult{Code: 2, Log: "invalid tx signature (rejected in consensus path)"}
@@ -1867,6 +1934,24 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 		}
 	}
 
+	// app-v10: record the memory's author (submitting agent) on-chain so the
+	// corroboration guard can reject self-corroboration deterministically — the
+	// memory:<id> record stores only contentHash+status, not the author. Written
+	// IMMUTABLY (only when unset): a still-proposed memory may be re-submitted
+	// (legitimate re-broadcast), and a client-supplied memoryID could be reused by
+	// a different agent, so overwriting would let a re-submitter displace the
+	// original author and then slip that original author past the self-check.
+	// First post-fork writer wins. Post-fork only; the strict-> gate keeps pre-fork
+	// blocks + the activation block byte-identical (no memauthor: key enters the
+	// AppHash keyspace until H_act+1).
+	if app.postAppV10Fork(height) {
+		if existing, gErr := app.badgerStore.GetMemoryAuthor(memoryID); gErr == nil && existing == "" {
+			if authErr := app.badgerStore.SetMemoryAuthor(memoryID, agentID); authErr != nil {
+				app.logger.Error().Err(authErr).Str("memory_id", memoryID).Msg("app-v10 set memory author")
+			}
+		}
+	}
+
 	// Buffer PostgreSQL write for Commit — this is the ONLY path that writes
 	// memories to the offchain store, enforcing consensus-first ordering.
 	record := &memory.MemoryRecord{
@@ -2255,6 +2340,49 @@ func (app *SageApp) processMemoryCorroborate(parsedTx *tx.ParsedTx, height int64
 	agentID, err := verifyAgentIdentity(parsedTx)
 	if err != nil {
 		return &abcitypes.ExecTxResult{Code: 17, Log: fmt.Sprintf("agent identity verification failed: %v", err)}
+	}
+
+	// app-v10: corroboration integrity guard. Corroboration is the multi-agent
+	// trust signal that moves a memory from attributed toward consensus, so it must
+	// come from someone OTHER than the author and count at most once per agent.
+	// Both checks read BadgerDB only (the memauthor: / corrob: keys), so every
+	// replica reaches the same verdict deterministically. Gated post-fork; pre-fork
+	// blocks replay byte-identically. Forward-looking: a memory submitted before
+	// app-v10 has no memauthor: record (author == ""), so the self-check is skipped
+	// for it. The corrob: dedup marker is written in the consensus path (immediate,
+	// not buffered) so two same-agent corroborations in ONE block are caught.
+	if app.postAppV10Fork(height) {
+		recordAppV10Branch(true)
+		// The memory must already exist on-chain. memoryID is client-supplied, and
+		// without this an attacker corroborates an ID it controls BEFORE submitting
+		// it: the author is empty so the self-check is skipped, a corrob: marker is
+		// written, then the attacker submits that exact ID and becomes its immutable
+		// first-writer author — holding a self-corroboration marker on its own
+		// memory and defeating the guard. The check also stops unbounded
+		// attacker-chosen corrob: keys (one per tx) from permanently entering the
+		// AppHash keyspace. memory:<id> is written by EVERY submit (ungated, pre- or
+		// post-fork), so a legitimately submitted memory — including a pre-app-v10
+		// one with no memauthor: record — still passes.
+		if _, _, gErr := app.badgerStore.GetMemoryHash(corrob.MemoryID); gErr != nil {
+			return &abcitypes.ExecTxResult{Code: 17, Log: fmt.Sprintf("corroborate: unknown memory %s", corrob.MemoryID)}
+		}
+		author, aErr := app.badgerStore.GetMemoryAuthor(corrob.MemoryID)
+		if aErr != nil {
+			return &abcitypes.ExecTxResult{Code: 17, Log: fmt.Sprintf("corroborate: author lookup failed: %v", aErr)}
+		}
+		if author != "" && author == agentID {
+			return &abcitypes.ExecTxResult{Code: 17, Log: fmt.Sprintf("corroborate: agent %s cannot corroborate its own memory %s", agentID[:16], corrob.MemoryID)}
+		}
+		already, hErr := app.badgerStore.HasCorroborated(corrob.MemoryID, agentID)
+		if hErr != nil {
+			return &abcitypes.ExecTxResult{Code: 17, Log: fmt.Sprintf("corroborate: dedup lookup failed: %v", hErr)}
+		}
+		if already {
+			return &abcitypes.ExecTxResult{Code: 17, Log: fmt.Sprintf("corroborate: agent %s already corroborated memory %s", agentID[:16], corrob.MemoryID)}
+		}
+		if sErr := app.badgerStore.SetCorroborated(corrob.MemoryID, agentID); sErr != nil {
+			return &abcitypes.ExecTxResult{Code: 17, Log: fmt.Sprintf("corroborate: badger write error: %v", sErr)}
+		}
 	}
 
 	// Buffer corroboration write
@@ -3191,7 +3319,7 @@ func (app *SageApp) processAgentRegister(parsedTx *tx.ParsedTx, height int64, bl
 	// operator admin still arrives via the operator-blessed bootstrapAdminFromSQL
 	// path (processAgentSetPermission). Org-scoped roles are set elsewhere
 	// (processOrgAddMember, gated by org-admin) and are untouched.
-	if app.postAppV9Fork(height) && role == "admin" {
+	if app.postAppV9Rules(height) && role == "admin" {
 		recordAppV9Branch(true)
 		app.logger.Warn().Str("agent_id", regAgentID[:16]).Msg("app-v9: wire-supplied role=admin on self-registration downgraded to member")
 		role = "member"
