@@ -315,15 +315,24 @@ type GovCancel struct {
 
 // UpgradePropose proposes a chain-wide app-version bump.
 //
-// AUTHORITY MODEL (read before trusting the key handling):
-// this is a SINGLE-SIGNER authority op, NOT quorum-gated. processUpgradePropose
-// persists the plan on one Ed25519-verified tx (verifyAgentIdentity checks the
-// signature only — not registration, role, or validator-set membership), so any
-// well-formed key can schedule a fork. From app-v6 (postV8_5Fork) the handler
-// additionally enforces a canonical plan Name and rejects version regressions/
-// no-ops, but there is still no 2/3 vote. Operators MUST protect the proposer
-// key accordingly. The chain derives ActivationHeight deterministically at
-// execution time, so a proposer cannot pick the height.
+// AUTHORITY MODEL (read before trusting the key handling) — FORK-CONDITIONAL:
+//
+//   - PRE-app-v8: SINGLE-SIGNER, NOT quorum-gated. processUpgradePropose
+//     persists a self-activating plan on one Ed25519-verified tx
+//     (verifyAgentIdentity checks the signature only — not registration, role,
+//     or validator-set membership), so any well-formed key can schedule a fork.
+//     From app-v6 (postV8_5Fork) the handler additionally enforces a canonical
+//     plan Name and rejects version regressions/no-ops, but there is still no vote.
+//
+//   - POST-app-v8 (postAppV8Fork): the same tx no longer self-activates. The
+//     proposer must be an admin agent, and the propose only CREATES a
+//     governance proposal (governance.OpUpgrade); the plan is persisted and
+//     scheduled only after a 2/3 validator-power quorum accepts. This is the
+//     authority gate that closes the lone-signer self-activation hole.
+//
+// Either way the chain derives ActivationHeight deterministically at execution
+// time, so a proposer cannot pick the height. Operators on pre-app-v8 chains
+// MUST still protect the proposer key accordingly.
 type UpgradePropose struct {
 	Name               string // fork-gate activation key — MUST be CanonicalUpgradeName(TargetAppVersion), NOT a human label
 	TargetAppVersion   uint64 // bumps consensus_params.version.app
@@ -350,7 +359,11 @@ func CanonicalUpgradeName(targetAppVersion uint64) string {
 }
 
 // UpgradeCancel aborts a pending upgrade plan before its ActivationHeight.
-// Quorum-gated; no-op once the upgrade has already executed.
+// No-op once the upgrade has already executed. Pre-app-v8 it is single-signer
+// (any Ed25519-verified key); post-app-v8 it requires an admin agent, so a 2/3-
+// quorum-approved plan cannot be torn down by a lone non-admin during its
+// activation delay. (A pending upgrade PROPOSAL — pre-quorum, no plan persisted
+// yet — is aborted with GovCancel by the proposer, not UpgradeCancel.)
 type UpgradeCancel struct {
 	Name        string
 	CancellerID string

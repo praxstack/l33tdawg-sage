@@ -316,6 +316,15 @@ type SageApp struct {
 	// is live.
 	contentValidators  *contentvalidator.ContentValidatorRegistry // nil => no gate
 	appV7AppliedHeight int64                                      // 0   => fork dormant
+
+	// appV8AppliedHeight gates the app-v8 fork: once set (> 0), UpgradePropose
+	// no longer self-activates a plan — it routes through the existing 2/3
+	// governance quorum (governance.OpUpgrade) and the plan is persisted only
+	// after the supermajority accepts. Zero by default, so every existing chain
+	// (none has activated app-v8) replays the pre-fork self-activating branch
+	// byte-identically. INDEPENDENT gate, like appV7AppliedHeight — NOT part of
+	// the v8.x PoE monotonic ladder (excluded from reconcilePoEForkMonotonicity).
+	appV8AppliedHeight int64 // 0 => fork dormant
 }
 
 // v8UpgradeName is the canonical name for the v8.0 activation record. The
@@ -344,6 +353,13 @@ const v8_5UpgradeName = "app-v6"
 // "app-v<TargetAppVersion>". This fork is an INDEPENDENT feature gate and is
 // deliberately NOT part of the v8.x PoE monotonic chain.
 const appV7UpgradeName = "app-v7"
+
+// appV8UpgradeName is the canonical activation-record name for the app-v8
+// fork (UpgradePropose routed through 2/3 governance quorum). Same naming
+// discipline: "app-v<TargetAppVersion>". Like app-v7, this is an INDEPENDENT
+// feature gate, deliberately NOT part of the v8.x PoE monotonic chain — it
+// changes the upgrade-proposal handler, which is orthogonal to the PoE ladder.
+const appV8UpgradeName = "app-v8"
 
 // postV8Fork is the consensus-side fork-gate predicate. Use it inside
 // processTx and other height-aware paths. Strict greater-than mirrors
@@ -556,6 +572,46 @@ func (app *SageApp) refreshAppV7Fork() {
 		return
 	}
 	app.appV7AppliedHeight = rec.AppliedHeight
+}
+
+// postAppV8Fork is the consensus-side fork-gate predicate for the app-v8
+// activation (UpgradePropose routed through 2/3 governance quorum). Strict
+// greater-than mirrors postAppV7Fork: the activation block H_act itself still
+// runs the pre-fork branch (gate dormant), so the propose that SEEDED app-v8
+// — which ran at some height < H_act while this returned false — self-activates
+// via the old path, avoiding any chicken-and-egg. Post-activation, every later
+// UpgradePropose routes through governance.
+func (app *SageApp) postAppV8Fork(height int64) bool {
+	return app.appV8AppliedHeight > 0 && height > app.appV8AppliedHeight
+}
+
+// refreshAppV8Fork populates appV8AppliedHeight from the persisted upgrade
+// audit trail. Called on boot (so a node restarting on a post-fork chain picks
+// up the gate without waiting for activation) and after the activation block in
+// FinalizeBlock. Returns nil-record on every existing chain (no "app-v8" record
+// has ever been written), so the gate stays dormant and replay is unaffected.
+func (app *SageApp) refreshAppV8Fork() {
+	rec, err := app.badgerStore.GetAppliedUpgrade(appV8UpgradeName)
+	if err != nil {
+		app.logger.Warn().Err(err).Str("name", appV8UpgradeName).Msg("read app-v8 applied-upgrade record")
+		return
+	}
+	if rec == nil {
+		return
+	}
+	app.appV8AppliedHeight = rec.AppliedHeight
+}
+
+// recordAppV8Branch records which branch (pre/post app-v8) processUpgradePropose
+// took, as a Prometheus counter for the fork-activation dashboard. Metrics do
+// NOT enter the AppHash (ComputeAppHash reads BadgerDB only), so this is purely
+// observational and never affects replay.
+func recordAppV8Branch(postFork bool) {
+	branch := "pre"
+	if postFork {
+		branch = "post"
+	}
+	metrics.ForkBranchTotal.WithLabelValues("app-v8", branch).Inc()
 }
 
 // recordV8_5Branch is the v8.5 sibling of recordV8_4Branch. Same metric
@@ -816,6 +872,7 @@ func NewSageApp(badgerPath string, postgresURL string, logger zerolog.Logger) (*
 	app.refreshV8_4Fork()
 	app.refreshV8_5Fork()
 	app.refreshAppV7Fork()
+	app.refreshAppV8Fork()
 	app.reconcilePoEForkMonotonicity()
 
 	// Reload persisted validators from BadgerDB (survives restart)
@@ -863,6 +920,7 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 	app.refreshV8_4Fork()
 	app.refreshV8_5Fork()
 	app.refreshAppV7Fork()
+	app.refreshAppV8Fork()
 	app.reconcilePoEForkMonotonicity()
 
 	persistedVals, err := bs.LoadValidators()
@@ -926,8 +984,10 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 // 6 <= 7, so the watchdog stops without re-proposing.
 func (app *SageApp) currentAppVersion() uint64 {
 	switch {
+	case app.appV8AppliedHeight > 0:
+		return 8 // app-v8 (quorum-gated upgrades) — independent gate, highest version, must rank first (8 > 7)
 	case app.appV7AppliedHeight > 0:
-		return 7 // app-v7 (content-validation activation) — independent gate, highest version, must rank first
+		return 7 // app-v7 (content-validation activation) — independent gate, ranks above the PoE ladder
 	case app.v8_5AppliedHeight > 0:
 		return 6 // app-v6 (v8.5 upgrade-machinery hardening)
 	case app.v8_4AppliedHeight > 0:
@@ -1186,6 +1246,9 @@ func (app *SageApp) FinalizeBlock(_ context.Context, req *abcitypes.RequestFinal
 		if plan.Name == appV7UpgradeName {
 			app.appV7AppliedHeight = req.Height
 		}
+		if plan.Name == appV8UpgradeName {
+			app.appV8AppliedHeight = req.Height
+		}
 		// Keep the PoE fork gates monotonic if this activation jumped past an
 		// intermediate version (e.g. straight to app-v5) — backfill any unset
 		// lower gate so postV8_4Fork ⟹ postV8_3Fork ⟹ … holds. No-op for a
@@ -1223,6 +1286,34 @@ func (app *SageApp) FinalizeBlock(_ context.Context, req *abcitypes.RequestFinal
 
 // processTx handles a single transaction deterministically.
 func (app *SageApp) processTx(parsedTx *tx.ParsedTx, height int64, blockTime time.Time) *abcitypes.ExecTxResult {
+	// app-v8: verify the tx's outer Ed25519 signature in the CONSENSUS path, not
+	// only in CheckTx. CheckTx (mempool admission) is advisory — a Byzantine block
+	// proposer can place txs into a block that never passed any honest node's
+	// CheckTx. Without this gate FinalizeBlock would EXECUTE a forged tx (e.g. an
+	// UpgradePropose or GovVote bearing a victim's PublicKey but signed by the
+	// attacker), letting a single proposer forge governance proposals and votes and
+	// drive the 2/3 quorum that app-v8 relies on. tx.VerifyTx is the identical check
+	// CheckTx runs (app.go CheckTx) and is deterministic (EncodeTx + SHA-256 +
+	// ed25519.Verify), so every replica reaches the same verdict.
+	//
+	// Gated behind postAppV8Fork's strict greater-than: pre-fork (every chain that
+	// exists today) this is skipped, so historical blocks replay byte-identically;
+	// post-fork blocks are all produced by binaries that enforce this gate, so they
+	// too replay identically. A forged tx is rejected (Code 2, no state mutation),
+	// deterministically, exactly like any other reject.
+	if app.postAppV8Fork(height) {
+		if valid, err := tx.VerifyTx(parsedTx); err != nil || !valid {
+			return &abcitypes.ExecTxResult{Code: 2, Log: "invalid tx signature (rejected in consensus path)"}
+		}
+		// BOUNDARY (deferred to a future fork): nonce replay is still enforced
+		// only in CheckTx, not here. A Byzantine proposer could replay a
+		// previously-valid signed tx; the tx handlers absorb this idempotently
+		// (duplicate-vote rejection, the gov:active singleton + pending-plan
+		// guard, content-hash dedup), so it is safe in practice. Consensus-path
+		// nonce enforcement interacts with mempool tx-ordering and warrants its
+		// own replay-safety analysis, so it is intentionally NOT added here.
+	}
+
 	switch parsedTx.Type {
 	case tx.TxTypeMemorySubmit:
 		return app.processMemorySubmit(parsedTx, height, blockTime)
@@ -3848,6 +3939,17 @@ func (app *SageApp) processGovPropose(parsedTx *tx.ParsedTx, height int64, _ tim
 	gp := parsedTx.GovPropose
 	op := governance.ProposalOp(gp.Operation)
 
+	// app-v8: OpUpgrade proposals must NOT be creatable on the generic gov path —
+	// they would bypass processUpgradePropose's canonical-name + regression +
+	// at-most-one-pending guards (a non-canonical name bumps version.app yet
+	// flips no fork gate: the v8.4.x halt class). Force them through
+	// processUpgradePropose, which is the only sanctioned creation site. Gated
+	// behind postAppV8Fork so pre-fork chains (where op==5 was an undefined no-op
+	// that errored at apply) replay byte-identically.
+	if app.postAppV8Fork(height) && op == governance.OpUpgrade {
+		return &abcitypes.ExecTxResult{Code: 72, Log: "governance propose: OpUpgrade must be created via UpgradePropose, not GovPropose"}
+	}
+
 	proposalID, propErr := app.govEngine.Propose(
 		proposerID, op, gp.TargetID, gp.TargetPubKey,
 		gp.TargetPower, gp.ExpiryBlocks, gp.Reason, height,
@@ -3995,6 +4097,101 @@ func (app *SageApp) processGovCancel(parsedTx *tx.ParsedTx, height int64, _ time
 // UpgradeDelayBlocks is zero or below the floor. ~10 min at 3s blocks.
 const defaultUpgradeDelayBlocks = int64(200)
 
+// UpgradeProposalPayload is the JSON body carried in a governance OpUpgrade
+// proposal's Payload (app-v8). It fully determines the UpgradePlanRecord that
+// gets persisted once the proposal reaches 2/3 quorum, so the supermajority is
+// approving an exact, immutable plan — there is nothing for an executor to
+// substitute (unlike OpDomainReassign, which needs a follow-up body-match tx).
+type UpgradeProposalPayload struct {
+	Name               string `json:"name"`
+	TargetAppVersion   uint64 `json:"target_app_version"`
+	BinarySHA256       string `json:"binary_sha256,omitempty"`
+	UpgradeDelayBlocks int64  `json:"upgrade_delay_blocks,omitempty"`
+}
+
+// applyUpgradeProposal persists the pending UpgradePlanRecord for an executed
+// (2/3-accepted) app-v8 OpUpgrade proposal. Runs in FinalizeBlock's governance
+// post-processing (before the activation block), so the plan's ActivationHeight
+// (= height + delay, delay >= 200) is always in the future and never activates
+// in the same block. Deterministic on every replica: it reads only consensus
+// state (the proposal payload, currentAppVersion, the pending-plan slot).
+func (app *SageApp) applyUpgradeProposal(proposal *governance.ProposalState, height int64) error {
+	var p UpgradeProposalPayload
+	if err := json.Unmarshal(proposal.Payload, &p); err != nil {
+		// Should never happen — we marshalled this payload ourselves at propose
+		// time. Log and skip rather than fail the block (deterministic skip:
+		// every replica sees the same bytes and the same error).
+		app.logger.Error().Err(err).Str("proposal_id", proposal.ProposalID).Msg("app-v8: cannot decode upgrade proposal payload; skipping activation")
+		return nil
+	}
+
+	// Canonical-name re-guard at EXECUTE time (defense in depth). The sanctioned
+	// creation path (processUpgradePropose) already enforces this, but a proposal
+	// that predates the app-v8 gate could in principle have been created via the
+	// generic gov path with a non-canonical name; persisting it would bump
+	// version.app while flipping no fork gate (the v8.4.x halt class). Skip it.
+	if want := tx.CanonicalUpgradeName(p.TargetAppVersion); p.Name != want {
+		app.logger.Warn().
+			Str("name", p.Name).
+			Uint64("target_app_version", p.TargetAppVersion).
+			Str("want", want).
+			Msg("app-v8: approved upgrade has a non-canonical name; skipping plan persist")
+		return nil
+	}
+
+	// Execution-height regression re-guard: the chain's committed app version
+	// may have advanced (another upgrade activated) between propose and quorum.
+	// currentAppVersion() reads in-memory fork heights set identically on every
+	// replica at this point, so this branch is replica-deterministic.
+	if p.TargetAppVersion <= app.currentAppVersion() {
+		app.logger.Warn().
+			Str("name", p.Name).
+			Uint64("target_app_version", p.TargetAppVersion).
+			Uint64("current_app_version", app.currentAppVersion()).
+			Msg("app-v8: approved upgrade no longer advances the app version (regression/no-op); skipping plan persist")
+		return nil
+	}
+
+	// At-most-one-pending-plan re-guard at EXECUTE time. The propose-time check
+	// ran when no plan was pending, but the gov:active singleton only serialises
+	// PROPOSALS — a plan persisted by a prior approved upgrade (awaiting its
+	// ActivationHeight) is a separate slot. Never overwrite it; SetUpgradePlan
+	// would clobber the single 'upgrade:plan' key silently.
+	if existing, getErr := app.badgerStore.GetUpgradePlan(); getErr == nil && existing != nil {
+		app.logger.Warn().
+			Str("name", p.Name).
+			Str("pending_plan", existing.Name).
+			Int64("pending_activation_height", existing.ActivationHeight).
+			Msg("app-v8: a plan is already pending; skipping persist of the newly-approved upgrade")
+		return nil
+	}
+
+	delay := p.UpgradeDelayBlocks
+	if delay < defaultUpgradeDelayBlocks {
+		delay = defaultUpgradeDelayBlocks
+	}
+	rec := &store.UpgradePlanRecord{
+		Name:             p.Name,
+		TargetAppVersion: p.TargetAppVersion,
+		ActivationHeight: height + delay,
+		BinarySHA256:     p.BinarySHA256,
+		ProposedAt:       height,
+		ProposerID:       proposal.ProposerID,
+	}
+	if setErr := app.badgerStore.SetUpgradePlan(rec); setErr != nil {
+		app.logger.Error().Err(setErr).Str("name", p.Name).Msg("app-v8: persist approved upgrade plan failed")
+		return setErr
+	}
+	app.logger.Info().
+		Str("name", p.Name).
+		Uint64("target_app_version", p.TargetAppVersion).
+		Int64("activation_height", rec.ActivationHeight).
+		Str("proposal_id", proposal.ProposalID).
+		Int64("height", height).
+		Msg("app-v8: upgrade plan persisted after 2/3 governance quorum")
+	return nil
+}
+
 // processUpgradePropose handles a TxTypeUpgradePropose transaction.
 // On success, persists an UpgradePlanRecord in BadgerDB with
 // ActivationHeight = height + max(payload.UpgradeDelayBlocks, defaultUpgradeDelayBlocks).
@@ -4060,6 +4257,122 @@ func (app *SageApp) processUpgradePropose(parsedTx *tx.ParsedTx, height int64, b
 		}
 	}
 
+	// app-v8: once active, an UpgradePropose no longer self-activates. It is
+	// routed through the existing 2/3 governance quorum (governance.OpUpgrade) —
+	// the UpgradePlanRecord is persisted only after a validator supermajority
+	// accepts (applyUpgradeProposal). Gated by postAppV8Fork's strict
+	// greater-than, so pre-fork chains (every chain that exists today) replay the
+	// self-activating path below BYTE-IDENTICALLY, and app-v8's OWN activating
+	// propose — which runs while appV8AppliedHeight is still 0 — takes that same
+	// old path (no chicken-and-egg). recordAppV8Branch fires once for the handler.
+	postV8 := app.postAppV8Fork(height)
+	recordAppV8Branch(postV8)
+	if postV8 {
+		// Canonical-name + regression guards run UNCONDITIONALLY on the app-v8
+		// path: app-v8 is an INDEPENDENT gate, so it can be active on a chain
+		// where postV8_5Fork is false and the guards above were skipped. Keeping
+		// a non-canonical name (which would bump version.app yet flip no fork
+		// gate — the v8.4.x halt class) or a version regression off the governance
+		// ballot in the first place. Idempotent when both forks are active.
+		if want := tx.CanonicalUpgradeName(prop.TargetAppVersion); prop.Name != want {
+			return &abcitypes.ExecTxResult{Code: 47, Log: fmt.Sprintf(
+				"upgrade propose: non-canonical name %q for target_app_version=%d (want %q)",
+				prop.Name, prop.TargetAppVersion, want)}
+		}
+		if prop.TargetAppVersion <= app.currentAppVersion() {
+			return &abcitypes.ExecTxResult{Code: 47, Log: fmt.Sprintf(
+				"upgrade propose: target_app_version %d must exceed current committed app version %d (regression/no-op rejected)",
+				prop.TargetAppVersion, app.currentAppVersion())}
+		}
+
+		// The governance proposer is the TX-SIGNING identity — the same
+		// validator-power identity every other gov handler (processGovPropose,
+		// processGovVote) and the validator set use. Keying the auto-accept vote
+		// by the signing key is what lets a validator-proposer's own vote count
+		// toward the 2/3 quorum (the agent-proof key may differ and would not).
+		govProposerID := auth.PublicKeyToAgentID(parsedTx.PublicKey)
+
+		// Admin-gated: seeding a chain-wide upgrade proposal occupies the single
+		// governance slot, so restrict it to admin agents (mirrors
+		// processGovPropose). This also closes a griefing vector — otherwise any
+		// Ed25519 key could squat gov:active and stall validator-set governance,
+		// and the per-proposer cooldown is defeated by key rotation. The
+		// auto-upgrade watchdog targets a pre-app-v8 version, so it never reaches
+		// this branch; app-v8+ upgrades are operator-driven.
+		proposer, getErr := app.badgerStore.GetRegisteredAgent(govProposerID)
+		if getErr != nil {
+			return &abcitypes.ExecTxResult{Code: 47, Log: "upgrade propose: proposer not registered: " + getErr.Error()}
+		}
+		if proposer.Role != "admin" {
+			return &abcitypes.ExecTxResult{Code: 47, Log: "upgrade propose: under app-v8 only admin agents may propose upgrades (2/3 governance quorum required)"}
+		}
+
+		// Don't open a new upgrade vote while a previously-approved plan is still
+		// pending activation: the gov:active singleton only serialises PROPOSALS,
+		// not the separate pending-plan slot (see applyUpgradeProposal's re-guard).
+		if existing, planErr := app.badgerStore.GetUpgradePlan(); planErr == nil && existing != nil {
+			return &abcitypes.ExecTxResult{Code: 47, Log: fmt.Sprintf(
+				"upgrade propose: plan %q is already pending (activation_height=%d)",
+				existing.Name, existing.ActivationHeight)}
+		}
+
+		payload, mErr := json.Marshal(UpgradeProposalPayload{
+			Name:               prop.Name,
+			TargetAppVersion:   prop.TargetAppVersion,
+			BinarySHA256:       prop.BinarySHA256,
+			UpgradeDelayBlocks: prop.UpgradeDelayBlocks,
+		})
+		if mErr != nil {
+			return &abcitypes.ExecTxResult{Code: 47, Log: fmt.Sprintf("upgrade propose: encode payload: %v", mErr)}
+		}
+
+		reason := "app-version upgrade to " + prop.Name
+		proposalID, propErr := app.govEngine.Propose(
+			govProposerID, governance.OpUpgrade, prop.Name, nil, 0,
+			0 /* default expiry */, reason, height, payload,
+		)
+		if propErr != nil {
+			return &abcitypes.ExecTxResult{Code: 47, Log: "upgrade propose: governance propose failed: " + propErr.Error()}
+		}
+
+		// Mirror processGovPropose's offchain buffering so the proposal and the
+		// proposer's auto-accept vote surface in the SQL mirror / dashboard.
+		app.pendingWrites = append(app.pendingWrites, pendingWrite{
+			writeType: "gov_proposal",
+			data: govProposalData{
+				ProposalID:    proposalID,
+				Operation:     opToString(governance.OpUpgrade),
+				TargetID:      prop.Name,
+				ProposerID:    govProposerID,
+				Status:        string(governance.StatusVoting),
+				CreatedHeight: height,
+				ExpiryHeight:  height + governance.DefaultExpiryBlocks,
+				Reason:        reason,
+			},
+		})
+		app.pendingWrites = append(app.pendingWrites, pendingWrite{
+			writeType: "gov_vote",
+			data: govVoteData{
+				ProposalID:  proposalID,
+				ValidatorID: govProposerID,
+				Decision:    "accept",
+				Height:      height,
+			},
+		})
+
+		app.logger.Info().
+			Str("name", prop.Name).
+			Uint64("target_app_version", prop.TargetAppVersion).
+			Str("proposal_id", proposalID).
+			Str("proposer_id", govProposerID).
+			Int64("height", height).
+			Msg("app-v8: upgrade routed through 2/3 governance quorum (awaiting validator votes)")
+
+		return &abcitypes.ExecTxResult{Code: 0, Log: fmt.Sprintf(
+			"upgrade proposal created (awaiting 2/3 quorum): proposal_id=%s name=%s target_app_version=%d",
+			proposalID, prop.Name, prop.TargetAppVersion)}
+	}
+
 	// Refuse if another plan is already pending. At-most-one semantics
 	// keep the FinalizeBlock activation check deterministic and avoid
 	// the question of "which plan wins" when two arrive in the same block.
@@ -4119,6 +4432,21 @@ func (app *SageApp) processUpgradeCancel(parsedTx *tx.ParsedTx, height int64, _ 
 	cancellerID, err := verifyAgentIdentity(parsedTx)
 	if err != nil {
 		return &abcitypes.ExecTxResult{Code: 48, Log: fmt.Sprintf("agent identity verification failed: %v", err)}
+	}
+
+	// app-v8: a pending plan post-fork was approved by a 2/3 quorum, so it must
+	// not be deletable by a lone non-admin key (approve needs 2/3, cancel would
+	// otherwise need 1). Require admin to cancel post-fork — matching the
+	// admin-gated propose path. Gated behind postAppV8Fork so pre-fork chains
+	// replay the single-signer behaviour byte-identically.
+	if app.postAppV8Fork(height) {
+		canceller, regErr := app.badgerStore.GetRegisteredAgent(auth.PublicKeyToAgentID(parsedTx.PublicKey))
+		if regErr != nil {
+			return &abcitypes.ExecTxResult{Code: 48, Log: "upgrade cancel: canceller not registered: " + regErr.Error()}
+		}
+		if canceller.Role != "admin" {
+			return &abcitypes.ExecTxResult{Code: 48, Log: "upgrade cancel: under app-v8 only admin agents may cancel a pending upgrade plan"}
+		}
 	}
 
 	// Validate required fields.
@@ -4380,6 +4708,19 @@ func (app *SageApp) processDomainReassign(parsedTx *tx.ParsedTx, height int64, b
 // applyGovernanceProposal applies an executed governance proposal to the validator set
 // and returns a CometBFT ValidatorUpdate. Called from FinalizeBlock post-processing.
 func (app *SageApp) applyGovernanceProposal(proposal *governance.ProposalState, height int64) (*abcitypes.ValidatorUpdate, error) {
+	// app-v8: an executed OpUpgrade proposal persists the pending UpgradePlan
+	// (no validator-set effect, no target pubkey). MUST be dispatched BEFORE
+	// the validator-set pubkey derivation below — its 32-byte guard would
+	// otherwise reject this proposal (TargetID="app-v<N>" is not a hex pubkey)
+	// and the upgrade would silently never activate after quorum. Gated behind
+	// postAppV8Fork: pre-fork an op==5 proposal (which could only have been
+	// created by the generic gov path on a chain that predates this gate) falls
+	// through to the unknown-op error below, exactly as it did before app-v8 —
+	// so historical replay stays byte-identical.
+	if proposal.Operation == governance.OpUpgrade && app.postAppV8Fork(height) {
+		return nil, app.applyUpgradeProposal(proposal, height)
+	}
+
 	pubKeyBytes := proposal.TargetPubKey
 	if len(pubKeyBytes) == 0 {
 		// Derive from target ID (which is hex-encoded pubkey for non-app validators)
@@ -4491,6 +4832,8 @@ func opToString(op governance.ProposalOp) string {
 		return "update_power"
 	case governance.OpDomainReassign:
 		return "domain_reassign"
+	case governance.OpUpgrade:
+		return "upgrade"
 	default:
 		return fmt.Sprintf("unknown_%d", op)
 	}
