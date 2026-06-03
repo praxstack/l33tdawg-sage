@@ -57,13 +57,27 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What's New in v8.8.1
+## What's New in v8.9.0
+
+**Hardened the Layer-2 content-validation seam so the gate cannot fail open, and made its enforcement a pure function of consensus state.** Three fixes to the generic, deployment-agnostic content gate from v8.7.0/v8.8.0. All are AppHash-neutral for existing chains: the gate only runs once a chain activates the `app-v7` fork, and a stock build (no validators compiled in) stays byte-identical to v8.8.1.
+
+- **Fail-safe routing (was fail-open).** The router that maps a memory body to its `(domain, outcome_class)` validator used to return the empty class on any JSON error, so a malformed sibling field (a float or string `schema_version`), an array-wrapped body, or a cross-class value routed to an unregistered key and committed unvalidated. `parseOutcomeClass` now reads `outcome_class` independently of sibling-field types and unwraps a single-element array, so a malformed neighbor can no longer null the route.
+- **Closed-domain registration.** New `RegisterClosedDomain(domain)` on the validator registry: once a domain has at least one registered validator, a submission whose `outcome_class` has no validator is rejected (`Code 18`) instead of passing through. Open domains keep the backward-compatible pass-through, so existing wiring is unaffected. With the router fix, all three bypass vectors above now reject rather than commit unvalidated.
+- **Enforcement is consensus state, not a per-node flag.** Removed the runtime `SetContentValidationEnabled` toggle (breaking: callers should drop it). The gate now fires purely on `postAppV7Fork(height) && contentValidators != nil`, so two nodes on one binary cannot disagree on whether the gate is live. A node on an `app-v7` chain with no validators compiled in logs a startup warning that it will not enforce (a mixed fleet would diverge) but stays bootable.
+- **Doc correctness: `UpgradePropose` is a single-signer authority op, not 2/3-quorum-gated.** The type comment claimed a quorum gate the code never implemented; it now documents the real model so operators protect the proposer key. A true authority gate is tracked for a future `app-v8`.
+
+SDK 8.9.0.
+
+## Older releases
+
+<details>
+<summary>v8.8.1 — /v1/embed reports the actual embedding model</summary>
 
 **`POST /v1/embed` now reports the model that actually produced the embedding.** The handler previously wrote `model: "nomic-embed-text"` into every response regardless of the configured provider, so a node running the `openai-compatible` embedder mislabeled its vectors (e.g. `Alibaba-NLP/gte-Qwen2-1.5B-instruct` was reported as `nomic-embed-text`). `handleEmbed` now feature-detects the optional `embedding.Modeler` interface and reports the provider's real model, mirroring how the sibling `/v1/embed/info` already resolves `provider`. It falls back to the legacy default only for providers that don't expose a model (the hash provider), so that path is unchanged. Read-path REST only: no tx, no consensus, no AppHash contribution. SDK 8.8.1.
 
 Thanks to [@ihubanov](https://github.com/ihubanov) for the fix (#29).
 
-## Older releases
+</details>
 
 <details>
 <summary>v8.8 — governance-activatable app-v7 content-validation + halt-safety floor</summary>
