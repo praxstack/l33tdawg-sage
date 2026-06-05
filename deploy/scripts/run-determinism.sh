@@ -75,12 +75,16 @@ if [ "${DET_SHORT:-0}" = "1" ]; then
 fi
 
 echo "--- running the determinism test ---"
+# DET_TEST overrides which determinism test runs (default: the general 4-node gate).
+# e.g. DET_TEST=TestAppHashDeterminism_AppV11Activation to exercise the app-v11 seam.
+DET_TEST="${DET_TEST:-TestAppHashDeterminism_FourValidators}"
+echo "--- test: ${DET_TEST} ---"
 SAGE_TEST_API_URL=http://localhost:18090 \
 SAGE_TEST_API0=http://localhost:18090 SAGE_TEST_API1=http://localhost:18091 \
 SAGE_TEST_API2=http://localhost:18092 SAGE_TEST_API3=http://localhost:18093 \
 SAGE_TEST_RPC0=http://localhost:36657 SAGE_TEST_RPC1=http://localhost:36757 \
 SAGE_TEST_RPC2=http://localhost:36857 SAGE_TEST_RPC3=http://localhost:36957 \
-  go test ./test/integration/ -run TestAppHashDeterminism_FourValidators \
+  go test ./test/integration/ -run "${DET_TEST}" \
   -tags=integration -count=1 -v -timeout 1800s $SHORT_FLAG
 
 echo "=== DETERMINISM RUN PASSED: AppHash byte-identical across all 4 nodes ==="

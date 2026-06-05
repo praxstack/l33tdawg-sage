@@ -156,3 +156,56 @@ func TestAppHashDeterminism_FourValidators(t *testing.T) {
 	t.Logf("PHASE 2 PASS: AppHash byte-identical across the %s activation seam at height %d, app_version lifted to %d on all %d nodes",
 		name, activation, target, cometRPCCount)
 }
+
+// TestAppHashDeterminism_AppV11Activation is the canonical cross-node gate for the
+// app-v11 fork (#35 + #36). It drives a real app-v11 activation across the
+// 4-validator devnet and asserts the AppHash stays byte-identical across the
+// activation seam — where the #36 SQL-admin-bootstrap suppression engages and the
+// #35 activation-block materializer (materializeAppV11Admin) writes a NEW agent:
+// record (the smallest validator, if no admin exists) on every node. A per-node
+// divergence here — the exact production halt symptom — fails the test.
+//
+// app-v11 is proposed as a skip-ahead from the watchdog's app-v6: while the chain
+// is below app-v8 there is no admin gate, so the legacy self-activating path
+// accepts the random-key propose (broadcastUpgradePropose). The determinism
+// property is independent of the skip; we assert AppHash agreement at the seam and
+// a uniform version lift to 11. (The materializer/suppression are pure functions of
+// committed BadgerDB — never per-node SQL — so all 4 nodes must agree.)
+func TestAppHashDeterminism_AppV11Activation(t *testing.T) {
+	requireNetwork(t)
+	rpcs := allCometRPCs()
+	if len(rpcs) < cometRPCCount {
+		t.Skipf("need %d validator RPCs, have %d", cometRPCCount, len(rpcs))
+	}
+	if testing.Short() {
+		t.Skip("skipping the 200-block app-v11 activation in -short mode")
+	}
+
+	preVer := readAppVersion(t, rpcs[0])
+	if preVer >= 8 {
+		t.Skipf("chain is at app-v%d; this skip-ahead propose needs current < app-v8 (legacy self-activating path, random key)", preVer)
+	}
+	const target uint64 = 11
+	name := fmt.Sprintf("app-v%d", target)
+
+	proposeH := readHeight(t, rpcs[0])
+	if _, err := broadcastUpgradePropose(t, rpcs[0], name, target, 200); err != nil {
+		t.Fatalf("broadcast upgrade propose %s: %v", name, err)
+	}
+	activation := proposeH + 200 // defaultUpgradeDelayBlocks floor (app.go), not env-overridable
+	t.Logf("proposed %s at height %d (from app-v%d), activation expected at %d (~%d min at 3s/block)",
+		name, proposeH, preVer, activation, (activation-proposeH)*3/60)
+
+	driveChainPast(t, rpcs[0], activation+2, 20*time.Minute)
+
+	for _, h := range []int64{activation - 1, activation, activation + 1} {
+		assertAppHashAgreement(t, rpcs, h)
+	}
+	for i, rpc := range rpcs {
+		if v := readAppVersion(t, rpc); v != target {
+			t.Fatalf("node%d app_version=%d after activation, want %d", i, v, target)
+		}
+	}
+	t.Logf("PASS: AppHash byte-identical across all %d nodes at the app-v11 activation seam (height %d); app_version lifted to 11 — materializeAppV11Admin + #36 suppression deterministic across the cluster",
+		cometRPCCount, activation)
+}
