@@ -344,6 +344,15 @@ type SageApp struct {
 	// default, so every existing chain replays the pre-fork branches
 	// byte-identically. INDEPENDENT gate, like appV7/appV8/appV9.
 	appV10AppliedHeight int64 // 0 => fork dormant
+
+	// appV11AppliedHeight gates the app-v11 fork (v10.0): the per-node SQL→chain
+	// admin bootstrap (bootstrapAdminFromSQL) is disabled on the consensus path
+	// (it wrote a BadgerDB agent: record off per-node SQL — an AppHash-divergence
+	// hazard, #36), and the chain-admin is instead established deterministically
+	// at the app-v11 activation block (#35, materializeAppV11Admin). Zero by
+	// default, so every existing chain replays the pre-fork branches byte-identically.
+	// INDEPENDENT gate, like appV7/appV8/appV9/appV10.
+	appV11AppliedHeight int64 // 0 => fork dormant
 }
 
 // v8UpgradeName is the canonical name for the v8.0 activation record. The
@@ -393,6 +402,14 @@ const appV9UpgradeName = "app-v9"
 // discipline. Like app-v7/v8/v9, an INDEPENDENT feature gate, NOT part of the
 // v8.x PoE monotonic chain. Governance-only — the watchdog target stays at 6.
 const appV10UpgradeName = "app-v10"
+
+// appV11UpgradeName is the canonical activation-record name for the app-v11 fork
+// (v10.0: deterministic genesis chain-admin + consensus-path SQL-admin-bootstrap
+// disable). Same naming discipline. Like app-v7/v8/v9/v10, an INDEPENDENT feature
+// gate, NOT part of the v8.x PoE monotonic chain. Governance-only — the watchdog
+// target stays at 6, so app-v11 activates only via an explicit governance plan
+// {Name:"app-v11", TargetAppVersion:11}.
+const appV11UpgradeName = "app-v11"
 
 // postV8Fork is the consensus-side fork-gate predicate. Use it inside
 // processTx and other height-aware paths. Strict greater-than mirrors
@@ -664,6 +681,15 @@ func (app *SageApp) postAppV10Fork(height int64) bool {
 	return app.appV10AppliedHeight > 0 && height > app.appV10AppliedHeight
 }
 
+// postAppV11Fork is the consensus-side fork-gate predicate for the app-v11
+// activation (v10.0: deterministic genesis chain-admin + SQL-admin-bootstrap
+// disable). Strict greater-than mirrors the other gates; every existing chain
+// (none has activated app-v11) returns false, so historical blocks replay
+// byte-identically.
+func (app *SageApp) postAppV11Fork(height int64) bool {
+	return app.appV11AppliedHeight > 0 && height > app.appV11AppliedHeight
+}
+
 // postAppV8Rules reports whether app-v8's consensus rules (consensus-path
 // signature verification + quorum/admin-gated upgrade governance) are in force
 // at this height. app-v7/v8/v9/v10 are INDEPENDENT gates — governance MAY
@@ -679,18 +705,40 @@ func (app *SageApp) postAppV10Fork(height int64) bool {
 // higher gates are 0, so this collapses to exactly postAppV8Fork and historical
 // blocks replay byte-identically.
 func (app *SageApp) postAppV8Rules(height int64) bool {
-	return app.postAppV8Fork(height) || app.postAppV9Fork(height) || app.postAppV10Fork(height)
+	return app.postAppV8Fork(height) || app.postAppV9Fork(height) || app.postAppV10Fork(height) || app.postAppV11Fork(height)
 }
 
 // postAppV9Rules reports whether app-v9's consensus rules (consensus-path
 // nonce/replay enforcement + admin self-grant downgrade) are in force at this
 // height. Same subsumption logic as postAppV8Rules: app-v9's rules are active
-// whenever app-v9 OR any higher independent gate (app-v10) is, so an
-// app-v10-without-app-v9 chain still enforces them. Collapses to exactly
-// postAppV9Fork on every existing chain (appV10AppliedHeight==0), so replay is
-// byte-identical.
+// whenever app-v9 OR any higher independent gate (app-v10, app-v11) is, so an
+// app-v10/v11-without-app-v9 chain still enforces them. Collapses to exactly
+// postAppV9Fork on every existing chain (appV10/appV11AppliedHeight==0), so replay
+// is byte-identical.
 func (app *SageApp) postAppV9Rules(height int64) bool {
-	return app.postAppV9Fork(height) || app.postAppV10Fork(height)
+	return app.postAppV9Fork(height) || app.postAppV10Fork(height) || app.postAppV11Fork(height)
+}
+
+// postAppV10Rules reports whether app-v10's consensus rules (corroboration
+// integrity guard + on-chain memory author) are in force at this height. Same
+// subsumption logic: app-v10's rules are active whenever app-v10 OR any higher
+// independent gate (app-v11) is, so an app-v11-without-app-v10 chain still
+// enforces them. Collapses to exactly postAppV10Fork on every existing chain
+// (appV11AppliedHeight==0), so historical blocks replay byte-identically. Added
+// when app-v11 landed — app-v10 was the highest fork until then and needed no
+// subsumption helper.
+func (app *SageApp) postAppV10Rules(height int64) bool {
+	return app.postAppV10Fork(height) || app.postAppV11Fork(height)
+}
+
+// postAppV11Rules reports whether app-v11's consensus rules (the per-node
+// SQL-admin-bootstrap disable, #36) are in force at this height. app-v11 is the
+// highest independent gate today, so for now this is exactly postAppV11Fork; it
+// exists as a named helper so the NEXT fork can OR itself in here without touching
+// every callsite (the subsumption discipline that keeps a skip-ahead chain from
+// silently dropping the rule).
+func (app *SageApp) postAppV11Rules(height int64) bool {
+	return app.postAppV11Fork(height)
 }
 
 // refreshAppV9Fork populates appV9AppliedHeight from the persisted upgrade
@@ -726,6 +774,22 @@ func (app *SageApp) refreshAppV10Fork() {
 	app.appV10AppliedHeight = rec.AppliedHeight
 }
 
+// refreshAppV11Fork populates appV11AppliedHeight from the persisted upgrade
+// audit trail. Called on boot and after the activation block in FinalizeBlock.
+// Returns nil-record on every existing chain (no "app-v11" record has ever been
+// written), so the gate stays dormant and replay is unaffected.
+func (app *SageApp) refreshAppV11Fork() {
+	rec, err := app.badgerStore.GetAppliedUpgrade(appV11UpgradeName)
+	if err != nil {
+		app.logger.Warn().Err(err).Str("name", appV11UpgradeName).Msg("read app-v11 applied-upgrade record")
+		return
+	}
+	if rec == nil {
+		return
+	}
+	app.appV11AppliedHeight = rec.AppliedHeight
+}
+
 // recordAppV9Branch records which branch (pre/post app-v9) a gated handler took,
 // as a Prometheus counter for the fork-activation dashboard. Metrics do NOT
 // enter the AppHash (ComputeAppHash reads BadgerDB only), so this is purely
@@ -746,6 +810,70 @@ func recordAppV10Branch(postFork bool) {
 		branch = "post"
 	}
 	metrics.ForkBranchTotal.WithLabelValues("app-v10", branch).Inc()
+}
+
+// recordAppV11Branch is the app-v11 sibling of recordAppV10Branch. Metrics-only,
+// never in the AppHash.
+func recordAppV11Branch(postFork bool) {
+	branch := "pre"
+	if postFork {
+		branch = "post"
+	}
+	metrics.ForkBranchTotal.WithLabelValues("app-v11", branch).Inc()
+}
+
+// materializeAppV11Admin establishes a deterministic on-chain chain-admin at the
+// app-v11 activation block so disabling the per-node SQL admin bootstrap (#36) can
+// never leave the chain admin-less (#35). It is a NO-OP when an admin already
+// exists — the normal case, since a post-app-v8 chain needed an admin to PROPOSE
+// this very upgrade — and only fires for the degenerate state where none does
+// (e.g. a skip-ahead that proposed app-v11 from a pre-app-v8 height, before the
+// admin gate). The admin is the lexicographically-smallest committed validator: a
+// pure function of the committed validator set (BadgerDB), identical on every
+// replica, so the RegisterAgent write keeps the AppHash in lockstep — never per-node
+// SQL. (A governance-supplied admin ID in the upgrade plan is a possible future
+// refinement.) Called once, from the FinalizeBlock activation arm.
+func (app *SageApp) materializeAppV11Admin(height int64) {
+	// Already have an admin? Do nothing — don't mint an unwanted validator-admin.
+	agents, err := app.badgerStore.ListRegisteredAgents()
+	if err != nil {
+		app.logger.Error().Err(err).Msg("app-v11 admin materialize: list agents failed")
+		return
+	}
+	for i := range agents {
+		if agents[i].Role == "admin" {
+			return
+		}
+	}
+	// No admin on chain — deterministically pick the smallest committed validator.
+	vals, err := app.badgerStore.LoadValidators()
+	if err != nil {
+		app.logger.Error().Err(err).Msg("app-v11 admin materialize: load validators failed")
+		return
+	}
+	smallest := ""
+	for id := range vals {
+		if smallest == "" || id < smallest {
+			smallest = id
+		}
+	}
+	if smallest == "" {
+		app.logger.Error().Int64("height", height).Msg("app-v11 admin materialize: no validators to derive an admin from — chain left admin-less")
+		return
+	}
+	// If the chosen validator is already a registered agent (e.g. a member with
+	// metadata), elevate it to admin while PRESERVING its identity fields rather
+	// than blind-overwriting them; register fresh otherwise. Reads committed state
+	// only, so the choice and the written bytes are identical on every replica.
+	name, bio, provider, p2p := "chain-admin", "", "", ""
+	if existing, gErr := app.badgerStore.GetRegisteredAgent(smallest); gErr == nil && existing != nil {
+		name, bio, provider, p2p = existing.Name, existing.BootBio, existing.Provider, existing.P2PAddress
+	}
+	if regErr := app.badgerStore.RegisterAgent(smallest, name, "admin", bio, provider, p2p, height); regErr != nil {
+		app.logger.Error().Err(regErr).Str("admin_id", smallest[:16]).Msg("app-v11 admin materialize: RegisterAgent failed")
+		return
+	}
+	app.logger.Warn().Str("admin_id", smallest[:16]).Int64("height", height).Msg("app-v11: no on-chain admin at activation — materialized the smallest validator as chain-admin")
 }
 
 // recordV8_5Branch is the v8.5 sibling of recordV8_4Branch. Same metric
@@ -1009,6 +1137,7 @@ func NewSageApp(badgerPath string, postgresURL string, logger zerolog.Logger) (*
 	app.refreshAppV8Fork()
 	app.refreshAppV9Fork()
 	app.refreshAppV10Fork()
+	app.refreshAppV11Fork()
 	app.reconcilePoEForkMonotonicity()
 
 	// Reload persisted validators from BadgerDB (survives restart)
@@ -1059,6 +1188,7 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 	app.refreshAppV8Fork()
 	app.refreshAppV9Fork()
 	app.refreshAppV10Fork()
+	app.refreshAppV11Fork()
 	app.reconcilePoEForkMonotonicity()
 
 	persistedVals, err := bs.LoadValidators()
@@ -1122,8 +1252,10 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 // 6 <= 7, so the watchdog stops without re-proposing.
 func (app *SageApp) currentAppVersion() uint64 {
 	switch {
+	case app.appV11AppliedHeight > 0:
+		return 11 // app-v11 (activation-block deterministic chain-admin + SQL-admin-bootstrap disable) — independent gate, highest version, must rank first (11 > 10)
 	case app.appV10AppliedHeight > 0:
-		return 10 // app-v10 (corroboration integrity guard + on-chain author) — independent gate, highest version, must rank first (10 > 9)
+		return 10 // app-v10 (corroboration integrity guard + on-chain author) — independent gate, ranks above app-v9 (10 > 9)
 	case app.appV9AppliedHeight > 0:
 		return 9 // app-v9 (consensus-path nonce + admin self-grant downgrade) — independent gate, ranks above app-v8 (9 > 8)
 	case app.appV8AppliedHeight > 0:
@@ -1146,13 +1278,13 @@ func (app *SageApp) currentAppVersion() uint64 {
 }
 
 // maxSupportedAppVersion is the highest app version this binary has a compiled
-// fork gate for (currently app-v10). It is the readiness ceiling for upgrade
+// fork gate for (currently app-v11). It is the readiness ceiling for upgrade
 // auto-voting: a validator must never vote to activate an upgrade it cannot
 // execute — doing so would commit consensus version.app=N while the binary
 // still runs at N-1, halting the chain on the next CometBFT handshake (the
 // maxSupportedAppVersion footgun). Bump this in lockstep with every new
 // appV<N>UpgradeName fork gate added above.
-const maxSupportedAppVersion uint64 = 10
+const maxSupportedAppVersion uint64 = 11
 
 // MaxSupportedAppVersion returns the highest app version this binary has a
 // compiled fork gate for. Operator tooling (cmd/sage-gui `upgrade propose`)
@@ -1467,6 +1599,15 @@ func (app *SageApp) FinalizeBlock(_ context.Context, req *abcitypes.RequestFinal
 		}
 		if plan.Name == appV10UpgradeName {
 			app.appV10AppliedHeight = req.Height
+		}
+		if plan.Name == appV11UpgradeName {
+			app.appV11AppliedHeight = req.Height
+			// app-v11 disables the per-node SQL admin bootstrap (#36). Establish a
+			// deterministic on-chain chain-admin at the activation block so the chain
+			// is never left admin-less afterward (#35). Pure function of committed
+			// consensus state — never per-node SQL — so every replica computes the
+			// identical write and the AppHash stays in lockstep.
+			app.materializeAppV11Admin(req.Height)
 		}
 		// Keep the PoE fork gates monotonic if this activation jumped past an
 		// intermediate version (e.g. straight to app-v5) — backfill any unset
@@ -1952,7 +2093,7 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 	// First post-fork writer wins. Post-fork only; the strict-> gate keeps pre-fork
 	// blocks + the activation block byte-identical (no memauthor: key enters the
 	// AppHash keyspace until H_act+1).
-	if app.postAppV10Fork(height) {
+	if app.postAppV10Rules(height) {
 		if existing, gErr := app.badgerStore.GetMemoryAuthor(memoryID); gErr == nil && existing == "" {
 			if authErr := app.badgerStore.SetMemoryAuthor(memoryID, agentID); authErr != nil {
 				app.logger.Error().Err(authErr).Str("memory_id", memoryID).Msg("app-v10 set memory author")
@@ -2359,7 +2500,7 @@ func (app *SageApp) processMemoryCorroborate(parsedTx *tx.ParsedTx, height int64
 	// app-v10 has no memauthor: record (author == ""), so the self-check is skipped
 	// for it. The corrob: dedup marker is written in the consensus path (immediate,
 	// not buffered) so two same-agent corroborations in ONE block are caught.
-	postV10 := app.postAppV10Fork(height)
+	postV10 := app.postAppV10Rules(height)
 	recordAppV10Branch(postV10) // both branches counted so the dashboard sees the pre/post split
 	if postV10 {
 		// The memory must already exist on-chain. memoryID is client-supplied, and
@@ -3452,6 +3593,27 @@ func (app *SageApp) processAgentUpdate(parsedTx *tx.ParsedTx, height int64, bloc
 // downstream auth check) and true on success, or (nil, false) if SQL has
 // no admin record for senderID.
 func (app *SageApp) bootstrapAdminFromSQL(senderID string, height int64, blockTime time.Time) (*store.OnChainAgent, bool) {
+	// app-v11 (#36): disable the SQL→chain admin bootstrap on the consensus path.
+	// It reads app.offchainStore (per-node SQLite, seeded divergently — each node
+	// admins its own validator slot keyed by its own agent.key) and writes a
+	// BadgerDB agent: record that enters the AppHash, so on a multi-validator chain
+	// it diverges the AppHash and halts consensus. Post-app-v11 the chain-admin is
+	// established deterministically at the app-v11 activation block (#35) instead; callers fall through
+	// to their existing not-registered rejection. Gated on postAppV11Rules
+	// (subsumption-OR) so a skip-ahead chain that activates a higher fork without
+	// app-v11 still suppresses it. Collapses to a no-op on every existing chain
+	// (appV11AppliedHeight==0), so historical blocks replay byte-identically.
+	//
+	// An existing chain keeps any admin it already materialized (the agent: record
+	// persists in BadgerDB) — only the FUTURE self-heal is removed. The admin-less
+	// case is covered deterministically at the app-v11 activation block by
+	// materializeAppV11Admin (from the committed validator set), so disabling this
+	// per-node-SQL path here cannot strand a chain.
+	postV11 := app.postAppV11Rules(height)
+	recordAppV11Branch(postV11)
+	if postV11 {
+		return nil, false
+	}
 	if app.offchainStore == nil {
 		return nil, false
 	}
