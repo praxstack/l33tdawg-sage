@@ -943,7 +943,11 @@ func (m *mockAgentStore) GetAgent(_ context.Context, agentID string) (*store.Age
 }
 
 func (m *mockAgentStore) ListAgents(_ context.Context) ([]*store.AgentEntry, error) {
-	return nil, nil
+	out := make([]*store.AgentEntry, 0, len(m.agents))
+	for _, a := range m.agents {
+		out = append(out, a)
+	}
+	return out, nil
 }
 
 func (m *mockAgentStore) CreateAgent(_ context.Context, _ *store.AgentEntry) error { return nil }

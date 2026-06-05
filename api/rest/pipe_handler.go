@@ -269,6 +269,23 @@ func (s *Server) handlePipeResult(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// callerCanViewPipe reports whether callerID is a party to msg (sender,
+// addressed recipient, or matching destination provider) or an operator/admin.
+func (s *Server) callerCanViewPipe(ctx context.Context, callerID string, msg *store.PipelineMessage) bool {
+	if callerID == "" || msg == nil {
+		return false
+	}
+	if callerID == msg.FromAgent || callerID == msg.ToAgent {
+		return true
+	}
+	if msg.ToProvider != "" && s.agentStore != nil {
+		if a, err := s.agentStore.GetAgent(ctx, callerID); err == nil && a != nil && a.Provider == msg.ToProvider {
+			return true
+		}
+	}
+	return s.callerIsOperatorOrAdmin(ctx, callerID)
+}
+
 // handlePipeStatus returns the current status of a pipeline message.
 func (s *Server) handlePipeStatus(w http.ResponseWriter, r *http.Request) {
 	pipeID := chi.URLParam(r, "pipe_id")
@@ -279,9 +296,25 @@ func (s *Server) handlePipeStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// pipeNotFoundDetail is shared by the genuine-not-found and the
+	// exists-but-unauthorized branches so the two 404s are byte-for-byte
+	// identical — an unrelated caller cannot distinguish "pipe exists but I'm not
+	// a party" from "pipe does not exist" (the anti-enumeration goal below).
+	pipeNotFoundDetail := fmt.Sprintf("No pipeline message with id %s.", pipeID)
+
 	msg, err := pipeStore.GetPipeline(r.Context(), pipeID)
 	if err != nil {
-		writeProblem(w, http.StatusNotFound, "Pipeline message not found", err.Error())
+		writeProblem(w, http.StatusNotFound, "Pipeline message not found", pipeNotFoundDetail)
+		return
+	}
+
+	// Authorization: a pipe carries a private payload between two parties. Only
+	// the sender, the addressed recipient (agent or provider), or an
+	// operator/admin may read it. Return 404 (not 403) so the endpoint does not
+	// confirm the existence of a pipe_id to an unrelated caller.
+	callerID := middleware.ContextAgentID(r.Context())
+	if !s.callerCanViewPipe(r.Context(), callerID, msg) {
+		writeProblem(w, http.StatusNotFound, "Pipeline message not found", pipeNotFoundDetail)
 		return
 	}
 

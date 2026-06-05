@@ -491,8 +491,38 @@ func (s *Server) handleGetPending(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	agentID := middleware.ContextAgentID(r.Context())
+
+	// Per-domain read ACL — parity with /v1/memory/list and the query/hybrid
+	// recall path. Pending records carry full, unredacted, pre-commit CONTENT, so
+	// without this gate any registered agent could enumerate every in-flight
+	// submission across every domain (the empty-domain default below fans out to
+	// ALL domains via a LIKE '%'). When a concrete domain is requested we 403 up
+	// front; the per-record filter covers the all-domains fan-out. checkDomainAccess
+	// is the operative per-domain gate; the multi-org block below mirrors query/list
+	// for shape-parity (a no-op once checkDomainAccess approves a concrete domain).
+	domainAccessApproved := false
+	if domainTag != "" {
+		if accessErr := checkDomainAccess(r.Context(), s.agentStore, s.badgerStore, agentID, domainTag, "read"); accessErr != nil {
+			writeProblem(w, http.StatusForbidden, "Access denied", accessErr.Error())
+			return
+		}
+		domainAccessApproved = true
+	}
+	if domainTag != "" && !domainAccessApproved && s.badgerStore != nil {
+		domainOwner, domErr := s.badgerStore.GetDomainOwner(domainTag)
+		if domErr == nil && domainOwner != "" {
+			hasAccess, accessErr := s.badgerStore.HasAccessMultiOrg(domainTag, agentID, 0, time.Now(), s.isPostV8Fork())
+			if accessErr != nil || !hasAccess {
+				writeProblem(w, http.StatusForbidden, "Access denied",
+					fmt.Sprintf("No read access to domain %s", domainTag))
+				return
+			}
+		}
+	}
+
 	if domainTag == "" {
-		domainTag = "%" // match all domains
+		domainTag = "%" // match all domains; the per-record filter below compartments
 	}
 
 	records, err := s.store.GetPendingByDomain(r.Context(), domainTag, limit)
@@ -500,6 +530,39 @@ func (s *Server) handleGetPending(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error().Err(err).Msg("failed to get pending memories")
 		writeProblem(w, http.StatusInternalServerError, "Query error", "Failed to query pending memories.")
 		return
+	}
+
+	// Per-record gate — drop pending records whose domain the caller cannot read
+	// (covers the all-domains fan-out) and records classified above the caller's
+	// clearance. The submitter always sees its own pending submissions.
+	if s.badgerStore != nil {
+		now := time.Now()
+		kept := records[:0]
+		for _, rec := range records {
+			if rec.SubmittingAgent != agentID {
+				// Domain-read filter — only needed when no single domain was pre-gated.
+				if !domainAccessApproved && rec.DomainTag != "" {
+					if accessErr := checkDomainAccess(r.Context(), s.agentStore, s.badgerStore, agentID, rec.DomainTag, "read"); accessErr != nil {
+						continue
+					}
+				}
+				// Classification filter.
+				if rec.DomainTag != "" {
+					memClass, _ := s.badgerStore.GetMemoryClassification(rec.MemoryID)
+					if memClass > 0 {
+						domainOwner, domErr := s.badgerStore.GetDomainOwner(rec.DomainTag)
+						if domErr == nil && domainOwner != "" {
+							hasAccess, _ := s.badgerStore.HasAccessMultiOrg(rec.DomainTag, agentID, memClass, now, s.isPostV8Fork())
+							if !hasAccess {
+								continue
+							}
+						}
+					}
+				}
+			}
+			kept = append(kept, rec)
+		}
+		records = kept
 	}
 
 	results := make([]*MemoryResult, 0, len(records))

@@ -15,13 +15,18 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/l33tdawg/sage/api/rest/middleware"
 	"github.com/l33tdawg/sage/internal/store"
 )
 
-// newTokenServer wires a real SQLite store + Server for HTTP-level tests.
-// We bypass the ed25519 admin auth in these tests by mounting the handlers
-// directly on a chi router — the auth wrapping is exercised separately
-// (handlers_test.go already covers Ed25519AuthMiddleware end-to-end).
+// tokenOperatorID is the node operator identity injected by newTokenServer's
+// default router, so the token-mechanics tests run as a privileged caller.
+const tokenOperatorID = "0000000000000000000000000000000000000000000000000000000000000001"
+
+// newTokenServer wires a real SQLite store + Server for HTTP-level tests. The
+// returned handler injects the node operator as the authenticated caller (the
+// real ed25519 auth is exercised separately in handlers_test.go); the token
+// authZ gate itself is covered by tokenRouterAs with non-operator callers.
 func newTokenServer(t *testing.T) (*Server, http.Handler) {
 	t.Helper()
 	dir := t.TempDir()
@@ -31,15 +36,27 @@ func newTokenServer(t *testing.T) (*Server, http.Handler) {
 	t.Cleanup(func() { _ = memStore.Close() })
 
 	s := &Server{
-		store:  memStore,
-		logger: zerolog.Nop(),
+		store:          memStore,
+		agentStore:     memStore,
+		logger:         zerolog.Nop(),
+		nodeOperatorID: tokenOperatorID,
 	}
+	return s, tokenRouterAs(s, tokenOperatorID)
+}
 
+// tokenRouterAs mounts the token routes with callerID injected as the
+// authenticated agent identity, so tests can act as the operator or any agent.
+func tokenRouterAs(s *Server, callerID string) http.Handler {
 	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			next.ServeHTTP(w, req.WithContext(middleware.WithAgentID(req.Context(), callerID)))
+		})
+	})
 	r.Post("/v1/mcp/tokens", s.handleMCPTokenIssue)
 	r.Get("/v1/mcp/tokens", s.handleMCPTokenList)
 	r.Delete("/v1/mcp/tokens/{id}", s.handleMCPTokenRevoke)
-	return s, r
+	return r
 }
 
 func TestMCPTokenIssue_Success(t *testing.T) {
@@ -147,4 +164,81 @@ func TestMCPTokenRevoke_NotFound(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodDelete, "/v1/mcp/tokens/no-such-id", nil))
 	assert.Equal(t, http.StatusNotFound, rr.Code)
+}
+
+// --- AuthZ gate (v10.1.1) ---------------------------------------------------
+
+// TestMCPToken_SelfMintAllowed: a non-operator agent may mint a token for its
+// OWN agent_id.
+func TestMCPToken_SelfMintAllowed(t *testing.T) {
+	s, _ := newTokenServer(t)
+	self := strings.Repeat("d", 64)
+	h := tokenRouterAs(s, self)
+
+	body := []byte(`{"agent_id":"` + self + `","name":"mine"}`)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/mcp/tokens", bytes.NewReader(body)))
+	assert.Equal(t, http.StatusCreated, rr.Code, "self-mint must be allowed; body=%s", rr.Body.String())
+}
+
+// TestMCPToken_MintForOtherDenied: a non-operator agent may NOT mint a token
+// impersonating a different agent_id.
+func TestMCPToken_MintForOtherDenied(t *testing.T) {
+	s, _ := newTokenServer(t)
+	caller := strings.Repeat("d", 64)
+	other := strings.Repeat("e", 64)
+	h := tokenRouterAs(s, caller)
+
+	body := []byte(`{"agent_id":"` + other + `","name":"impersonation"}`)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/mcp/tokens", bytes.NewReader(body)))
+	assert.Equal(t, http.StatusForbidden, rr.Code, "minting for another agent_id must be denied")
+}
+
+// TestMCPToken_ListScopedToCaller: a non-operator agent sees only its own
+// tokens, not every agent's.
+func TestMCPToken_ListScopedToCaller(t *testing.T) {
+	s, opH := newTokenServer(t)
+	agentA := strings.Repeat("a", 64)
+	agentB := strings.Repeat("b", 64)
+
+	// Operator mints one token for each agent.
+	for _, id := range []string{agentA, agentB} {
+		rr := httptest.NewRecorder()
+		opH.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/mcp/tokens",
+			bytes.NewReader([]byte(`{"agent_id":"`+id+`","name":"t"}`))))
+		require.Equal(t, http.StatusCreated, rr.Code)
+	}
+
+	// agentA lists — must see only its own token.
+	rr := httptest.NewRecorder()
+	tokenRouterAs(s, agentA).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1/mcp/tokens", nil))
+	require.Equal(t, http.StatusOK, rr.Code)
+	var resp struct {
+		Tokens []MCPTokenSummary `json:"tokens"`
+	}
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp))
+	require.Len(t, resp.Tokens, 1, "non-operator must see only its own tokens")
+	assert.Equal(t, agentA, resp.Tokens[0].AgentID)
+}
+
+// TestMCPToken_RevokeOtherDenied: a non-operator agent cannot revoke a token it
+// does not own.
+func TestMCPToken_RevokeOtherDenied(t *testing.T) {
+	s, opH := newTokenServer(t)
+	agentA := strings.Repeat("a", 64)
+	agentB := strings.Repeat("b", 64)
+
+	// Operator mints a token for agentA.
+	issueRR := httptest.NewRecorder()
+	opH.ServeHTTP(issueRR, httptest.NewRequest(http.MethodPost, "/v1/mcp/tokens",
+		bytes.NewReader([]byte(`{"agent_id":"`+agentA+`","name":"t"}`))))
+	require.Equal(t, http.StatusCreated, issueRR.Code)
+	var issued MCPTokenIssueResponse
+	require.NoError(t, json.NewDecoder(issueRR.Body).Decode(&issued))
+
+	// agentB tries to revoke agentA's token.
+	rr := httptest.NewRecorder()
+	tokenRouterAs(s, agentB).ServeHTTP(rr, httptest.NewRequest(http.MethodDelete, "/v1/mcp/tokens/"+issued.ID, nil))
+	assert.Equal(t, http.StatusForbidden, rr.Code, "revoking another agent's token must be denied")
 }

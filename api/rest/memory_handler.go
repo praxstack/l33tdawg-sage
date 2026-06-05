@@ -620,6 +620,16 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 	results := make([]*MemoryResult, 0, len(records))
 	hiddenByClassification := 0
 	for _, rec := range records {
+		// Per-record domain-read filter — parity with list/tasks/pending. On the
+		// no-domain path the store returns candidates across ALL domains; a seeAll
+		// caller (visible_agents "*", TopSecret, operator) must not receive content
+		// from a domain it has no read grant on. Skipped for own records and when a
+		// concrete domain was already gated up front.
+		if rec.SubmittingAgent != queryAgentID && req.DomainTag == "" && rec.DomainTag != "" {
+			if accessErr := checkDomainAccess(r.Context(), s.agentStore, s.badgerStore, queryAgentID, rec.DomainTag, "read"); accessErr != nil {
+				continue
+			}
+		}
 		// Classification gate: check agent clearance >= memory classification
 		// Only enforce when domain has a registered owner (backward compat for pre-RBAC setups)
 		var memClass uint8
@@ -836,6 +846,15 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 	results := make([]*MemoryResult, 0, len(records))
 	hiddenByClassification := 0
 	for _, rec := range records {
+		// Per-record domain-read filter — parity with list/tasks/pending (see
+		// handleQueryMemory). Drops cross-domain content the caller has no read
+		// grant on, on the no-domain path; skips own records and concrete-domain
+		// requests already gated up front.
+		if rec.SubmittingAgent != queryAgentID && req.DomainTag == "" && rec.DomainTag != "" {
+			if accessErr := checkDomainAccess(r.Context(), s.agentStore, s.badgerStore, queryAgentID, rec.DomainTag, "read"); accessErr != nil {
+				continue
+			}
+		}
 		var memClass uint8
 		if s.badgerStore != nil {
 			memClass, _ = s.badgerStore.GetMemoryClassification(rec.MemoryID)
@@ -1038,6 +1057,15 @@ func (s *Server) handleHybridSearchMemory(w http.ResponseWriter, r *http.Request
 	results := make([]*MemoryResult, 0, len(records))
 	hiddenByClassification := 0
 	for _, rec := range records {
+		// Per-record domain-read filter — parity with list/tasks/pending (see
+		// handleQueryMemory). Drops cross-domain content the caller has no read
+		// grant on, on the no-domain path; skips own records and concrete-domain
+		// requests already gated up front.
+		if rec.SubmittingAgent != queryAgentID && req.DomainTag == "" && rec.DomainTag != "" {
+			if accessErr := checkDomainAccess(r.Context(), s.agentStore, s.badgerStore, queryAgentID, rec.DomainTag, "read"); accessErr != nil {
+				continue
+			}
+		}
 		var memClass uint8
 		if s.badgerStore != nil {
 			memClass, _ = s.badgerStore.GetMemoryClassification(rec.MemoryID)
@@ -1150,12 +1178,20 @@ func (s *Server) handleGetMemory(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Access control gate: multi-org + classification enforcement.
+	// Access control gate: DomainAccess allowlist + multi-org classification.
 	// Submitting agent always has access to their own memory.
-	// Domain-level access is only enforced when the domain has a registered owner.
-	if rec.DomainTag != "" && s.badgerStore != nil {
-		if agentID != rec.SubmittingAgent {
-			// Only enforce access if the domain has a registered owner (org structure exists)
+	if rec.DomainTag != "" && agentID != rec.SubmittingAgent {
+		// Per-agent DomainAccess allowlist gate — parity with query/search/hybrid/
+		// list. Without it, an agent explicitly denied read on this domain could
+		// still fetch the record one-by-one by id. Runs regardless of badgerStore
+		// (checkDomainAccess falls back to the SQLite agentStore), matching the
+		// sibling handlers. The submitter always retains access to its own memory.
+		if accessErr := checkDomainAccess(r.Context(), s.agentStore, s.badgerStore, agentID, rec.DomainTag, "read"); accessErr != nil {
+			writeProblem(w, http.StatusForbidden, "Access denied", accessErr.Error())
+			return
+		}
+		// Per-record classification — only when the domain has a registered owner.
+		if s.badgerStore != nil {
 			domainOwner, domainErr := s.badgerStore.GetDomainOwner(rec.DomainTag)
 			if domainErr == nil && domainOwner != "" {
 				classification, _ := s.badgerStore.GetMemoryClassification(memoryID)
@@ -1433,10 +1469,75 @@ func (s *Server) handleGetOpenTasks(w http.ResponseWriter, r *http.Request) {
 	domain := r.URL.Query().Get("domain")
 	provider := r.URL.Query().Get("provider")
 
+	agentID := middleware.ContextAgentID(r.Context())
+
+	// Per-domain read ACL — parity with /v1/memory/list and the query/hybrid
+	// recall path. This handler returns full task CONTENT, so without the gate an
+	// agent could enumerate the content of every open task in a domain it has no
+	// read grant on — and, because `domain` is optional, across ALL domains at
+	// once. When a specific domain is requested we 403 up front; the per-record
+	// filter below covers the cross-domain (no-domain) case. checkDomainAccess is
+	// the operative per-domain gate; the multi-org block below mirrors query/list
+	// for shape-parity (a no-op once checkDomainAccess approves a concrete domain).
+	domainAccessApproved := false
+	if domain != "" {
+		if accessErr := checkDomainAccess(r.Context(), s.agentStore, s.badgerStore, agentID, domain, "read"); accessErr != nil {
+			writeProblem(w, http.StatusForbidden, "Access denied", accessErr.Error())
+			return
+		}
+		domainAccessApproved = true
+	}
+	if domain != "" && !domainAccessApproved && s.badgerStore != nil {
+		domainOwner, domErr := s.badgerStore.GetDomainOwner(domain)
+		if domErr == nil && domainOwner != "" {
+			hasAccess, accessErr := s.badgerStore.HasAccessMultiOrg(domain, agentID, 0, time.Now(), s.isPostV8Fork())
+			if accessErr != nil || !hasAccess {
+				writeProblem(w, http.StatusForbidden, "Access denied",
+					fmt.Sprintf("No read access to domain %s", domain))
+				return
+			}
+		}
+	}
+
 	tasks, err := s.store.GetOpenTasks(r.Context(), domain, provider)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Failed to get tasks", err.Error())
 		return
+	}
+
+	// Per-record gate — parity with handleListMemoriesAuth. Drops tasks whose
+	// domain the caller cannot read (covers the no-domain cross-domain board) and
+	// tasks classified above the caller's clearance. The submitter always sees its
+	// own tasks. Agent-isolation is intentionally NOT applied here: within a
+	// domain the caller can read, an open-task board is meant to be cross-agent.
+	if s.badgerStore != nil {
+		now := time.Now()
+		kept := tasks[:0]
+		for _, rec := range tasks {
+			if rec.SubmittingAgent != agentID {
+				// Domain-read filter — only needed when no single domain was pre-gated.
+				if domain == "" && rec.DomainTag != "" {
+					if accessErr := checkDomainAccess(r.Context(), s.agentStore, s.badgerStore, agentID, rec.DomainTag, "read"); accessErr != nil {
+						continue
+					}
+				}
+				// Classification filter.
+				if rec.DomainTag != "" {
+					memClass, _ := s.badgerStore.GetMemoryClassification(rec.MemoryID)
+					if memClass > 0 {
+						domainOwner, domErr := s.badgerStore.GetDomainOwner(rec.DomainTag)
+						if domErr == nil && domainOwner != "" {
+							hasAccess, _ := s.badgerStore.HasAccessMultiOrg(rec.DomainTag, agentID, memClass, now, s.isPostV8Fork())
+							if !hasAccess {
+								continue
+							}
+						}
+					}
+				}
+			}
+			kept = append(kept, rec)
+		}
+		tasks = kept
 	}
 
 	type taskResult struct {
@@ -1495,9 +1596,38 @@ func (s *Server) handleListMemoriesAuth(w http.ResponseWriter, r *http.Request) 
 	offset, _ := strconv.Atoi(q.Get("offset"))
 
 	agentID := middleware.ContextAgentID(r.Context())
-	allowedAgents, seeAll := s.resolveVisibleAgents(agentID)
-
 	domainFilter := q.Get("domain")
+
+	// Per-domain read ACL — parity with /v1/memory/query, /search and /hybrid.
+	// Until this gate was added, list skipped checkDomainAccess entirely, so an
+	// agent with no read grant on a domain could enumerate that domain's record
+	// CONTENT via list even though hybrid/query correctly 403 — a §5
+	// compartmentation hole reported against a multi-node deployment on v10.1.0.
+	// Gating here, before the store query, closes it for EVERY status (not just
+	// committed). Mirrors handleQueryMemory's two-step domain gate.
+	domainAccessApproved := false
+	if domainFilter != "" {
+		if accessErr := checkDomainAccess(r.Context(), s.agentStore, s.badgerStore, agentID, domainFilter, "read"); accessErr != nil {
+			writeProblem(w, http.StatusForbidden, "Access denied", accessErr.Error())
+			return
+		}
+		domainAccessApproved = true
+	}
+	// Multi-org access control gate — only enforce when the domain has a
+	// registered owner AND the agent wasn't already approved above.
+	if domainFilter != "" && !domainAccessApproved && s.badgerStore != nil {
+		domainOwner, domainErr := s.badgerStore.GetDomainOwner(domainFilter)
+		if domainErr == nil && domainOwner != "" {
+			hasAccess, accessErr := s.badgerStore.HasAccessMultiOrg(domainFilter, agentID, 0, time.Now(), s.isPostV8Fork())
+			if accessErr != nil || !hasAccess {
+				writeProblem(w, http.StatusForbidden, "Access denied",
+					fmt.Sprintf("No read access to domain %s", domainFilter))
+				return
+			}
+		}
+	}
+
+	allowedAgents, seeAll := s.resolveVisibleAgents(agentID)
 
 	// Grant-aware override: if listing a specific domain, skip agent isolation when:
 	// (a) the agent has a direct grant on the domain, or
@@ -1544,6 +1674,44 @@ func (s *Server) handleListMemoriesAuth(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Per-record gate — parity with the query/hybrid recall path. The up-front
+	// domain gate only runs when a domain filter is supplied; on the no-domain
+	// path the store returns records across ALL domains, so we additionally drop
+	// records whose domain the caller cannot read (a seeAll caller — visible_agents
+	// "*", TopSecret, operator — otherwise gets PUBLIC content from domains it has
+	// no grant on). The classification gate then drops records classified above the
+	// caller's clearance even within a readable domain. The submitter always sees
+	// its own records.
+	hiddenByClassification := 0
+	if s.badgerStore != nil {
+		now := time.Now()
+		kept := records[:0]
+		for _, rec := range records {
+			if rec.SubmittingAgent != agentID {
+				// Domain-read filter — only needed when no single domain was pre-gated.
+				if domainFilter == "" && rec.DomainTag != "" {
+					if accessErr := checkDomainAccess(r.Context(), s.agentStore, s.badgerStore, agentID, rec.DomainTag, "read"); accessErr != nil {
+						continue
+					}
+				}
+				// Classification filter.
+				memClass, _ := s.badgerStore.GetMemoryClassification(rec.MemoryID)
+				if memClass > 0 {
+					domainOwner, domErr := s.badgerStore.GetDomainOwner(rec.DomainTag)
+					if domErr == nil && domainOwner != "" {
+						hasAccess, _ := s.badgerStore.HasAccessMultiOrg(rec.DomainTag, agentID, memClass, now, s.isPostV8Fork())
+						if !hasAccess {
+							hiddenByClassification++
+							continue
+						}
+					}
+				}
+			}
+			kept = append(kept, rec)
+		}
+		records = kept
+	}
+
 	body := map[string]any{
 		"memories": records,
 		"total":    total,
@@ -1551,22 +1719,32 @@ func (s *Server) handleListMemoriesAuth(w http.ResponseWriter, r *http.Request) 
 		"offset":   offset,
 	}
 
-	if filterApplied {
-		// Second count-only query without the SubmittingAgents filter so the
-		// caller can distinguish empty-domain from rbac-hidden. Limit:1 keeps
-		// row materialization bounded; store.ListMemories computes total anyway.
-		unfilteredOpts := opts
-		unfilteredOpts.SubmittingAgents = nil
-		unfilteredOpts.Limit = 1
-		unfilteredOpts.Offset = 0
-		_, totalBefore, countErr := s.store.ListMemories(r.Context(), unfilteredOpts)
-		w.Header().Set(filterHeader, filterBySubmittingAgts)
-		info := &FilterInfo{By: []string{filterBySubmittingAgts}}
-		visible := total
-		info.Visible = &visible
-		if countErr == nil {
-			info.TotalBeforeFilter = &totalBefore
+	if filterApplied || hiddenByClassification > 0 {
+		applied := make([]string, 0, 2)
+		info := &FilterInfo{}
+		if filterApplied {
+			// Second count-only query without the SubmittingAgents filter so the
+			// caller can distinguish empty-domain from rbac-hidden. Limit:1 keeps
+			// row materialization bounded; store.ListMemories computes total anyway.
+			unfilteredOpts := opts
+			unfilteredOpts.SubmittingAgents = nil
+			unfilteredOpts.Limit = 1
+			unfilteredOpts.Offset = 0
+			_, totalBefore, countErr := s.store.ListMemories(r.Context(), unfilteredOpts)
+			applied = append(applied, filterBySubmittingAgts)
+			visible := total
+			info.Visible = &visible
+			if countErr == nil {
+				info.TotalBeforeFilter = &totalBefore
+			}
 		}
+		if hiddenByClassification > 0 {
+			applied = append(applied, filterByClassification)
+			hc := hiddenByClassification
+			info.HiddenCount = &hc
+		}
+		info.By = applied
+		w.Header().Set(filterHeader, strings.Join(applied, ","))
 		body["filtered"] = info
 	}
 
@@ -1582,6 +1760,33 @@ func (s *Server) handleTimelineAuth(w http.ResponseWriter, r *http.Request) {
 	bucket := q.Get("bucket")
 	if bucket == "" {
 		bucket = "hour"
+	}
+
+	// Per-domain read ACL — parity with the other domain-keyed reads. The buckets
+	// are aggregate counts (no content), but submission volume over time for a
+	// domain is still a metadata signal the caller should hold a read grant for.
+	// Global (no-domain) counts stay ungated. checkDomainAccess is the operative
+	// per-domain gate; the multi-org block below mirrors query/list for shape-parity
+	// (a no-op once checkDomainAccess approves a concrete domain).
+	agentID := middleware.ContextAgentID(r.Context())
+	domainAccessApproved := false
+	if domain != "" {
+		if accessErr := checkDomainAccess(r.Context(), s.agentStore, s.badgerStore, agentID, domain, "read"); accessErr != nil {
+			writeProblem(w, http.StatusForbidden, "Access denied", accessErr.Error())
+			return
+		}
+		domainAccessApproved = true
+	}
+	if domain != "" && !domainAccessApproved && s.badgerStore != nil {
+		domainOwner, domErr := s.badgerStore.GetDomainOwner(domain)
+		if domErr == nil && domainOwner != "" {
+			hasAccess, accessErr := s.badgerStore.HasAccessMultiOrg(domain, agentID, 0, time.Now(), s.isPostV8Fork())
+			if accessErr != nil || !hasAccess {
+				writeProblem(w, http.StatusForbidden, "Access denied",
+					fmt.Sprintf("No read access to domain %s", domain))
+				return
+			}
+		}
 	}
 
 	from := time.Now().Add(-24 * time.Hour)

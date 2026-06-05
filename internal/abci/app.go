@@ -898,6 +898,23 @@ func (app *SageApp) SetContentValidators(r *contentvalidator.ContentValidatorReg
 	app.contentValidators = r
 }
 
+// armContentValidatorsFromProvider installs the Layer-2 content-validation gate
+// from a deployment-registered provider (contentvalidator.SetProvider) when one
+// is present and an explicit registry was not already wired via
+// SetContentValidators. SAGE registers no provider, so a stock build leaves the
+// gate inert and every submission passes through. This is the release-stable
+// arming seam that replaces per-release patches to the cmd entrypoints; see
+// internal/contentvalidator/provider.go. Boot-only, called from the constructors.
+func (app *SageApp) armContentValidatorsFromProvider() {
+	if app.contentValidators != nil {
+		return
+	}
+	if reg := contentvalidator.BuildFromProvider(); reg != nil {
+		app.contentValidators = reg
+		app.logger.Info().Msg("Layer-2 content-validation gate armed from registered provider")
+	}
+}
+
 // ContentValidationEnforcementWarning returns a non-empty operator warning when
 // this node will NOT enforce the Layer-2 content-validation gate on a chain that
 // has already activated it — i.e. the app-v7 fork is live (appV7AppliedHeight > 0)
@@ -1155,6 +1172,8 @@ func NewSageApp(badgerPath string, postgresURL string, logger zerolog.Logger) (*
 	}
 	app.refreshPoEWeights()
 
+	app.armContentValidatorsFromProvider()
+
 	return app, nil
 }
 
@@ -1204,6 +1223,8 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 		logger.Info().Int("validators", app.validators.Size()).Msg("validators restored from state")
 	}
 	app.refreshPoEWeights()
+
+	app.armContentValidatorsFromProvider()
 
 	return app, nil
 }

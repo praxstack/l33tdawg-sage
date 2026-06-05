@@ -31,6 +31,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/l33tdawg/sage/api/rest/middleware"
 	"github.com/l33tdawg/sage/internal/store"
 )
 
@@ -99,6 +100,16 @@ func (s *Server) handleMCPTokenIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// AuthZ: a bearer token grants the holder the target agent's identity on the
+	// MCP transport, so a caller may only mint a token for ITS OWN agent_id —
+	// unless it is the node operator or an admin. Without this gate any
+	// registered agent could mint a token impersonating any other agent.
+	callerID := middleware.ContextAgentID(r.Context())
+	if req.AgentID != callerID && !s.callerIsOperatorOrAdmin(r.Context(), callerID) {
+		writeJSONError(w, http.StatusForbidden, "may only mint a token for your own agent_id unless operator/admin")
+		return
+	}
+
 	// Generate 32 random bytes → base64url-encoded token.
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
@@ -144,8 +155,16 @@ func (s *Server) handleMCPTokenList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Scope to the caller's own tokens unless operator/admin — a regular agent
+	// must not enumerate every agent's token metadata.
+	callerID := middleware.ContextAgentID(r.Context())
+	privileged := s.callerIsOperatorOrAdmin(r.Context(), callerID)
+
 	out := make([]MCPTokenSummary, 0, len(rows))
 	for _, t := range rows {
+		if !privileged && t.AgentID != callerID {
+			continue
+		}
 		out = append(out, MCPTokenSummary{
 			ID:         t.ID,
 			Name:       t.Name,
@@ -172,6 +191,27 @@ func (s *Server) handleMCPTokenRevoke(w http.ResponseWriter, r *http.Request) {
 	if id == "" {
 		writeJSONError(w, http.StatusBadRequest, "token id is required")
 		return
+	}
+
+	// AuthZ: only the token's owning agent or an operator/admin may revoke it.
+	callerID := middleware.ContextAgentID(r.Context())
+	if !s.callerIsOperatorOrAdmin(r.Context(), callerID) {
+		rows, listErr := ts.ListMCPTokens(r.Context())
+		if listErr != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to verify token ownership")
+			return
+		}
+		owned := false
+		for _, t := range rows {
+			if t.ID == id && t.AgentID == callerID {
+				owned = true
+				break
+			}
+		}
+		if !owned {
+			writeJSONError(w, http.StatusForbidden, "may only revoke your own tokens unless operator/admin")
+			return
+		}
 	}
 
 	if err := ts.RevokeMCPToken(r.Context(), id); err != nil {

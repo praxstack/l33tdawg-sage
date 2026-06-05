@@ -6,6 +6,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GENESIS_DIR="${SCRIPT_DIR}/genesis"
 NUM_VALIDATORS=4
 
+# The amid/ABCI container (deploy/Dockerfile.abci) runs as the unprivileged
+# system user 'sage' (uid/gid 100/101 on Alpine). cometbft writes
+# priv_validator_key.json as 0600 owned by the generating user, so that in-
+# container user cannot read its own signing key and the per-node memory
+# auto-voter silently disables itself ("permission denied"). Normalize the key
+# to 0640 owned by the amid uid/gid so amid can read it; the cometbft container
+# runs as root (deploy/Dockerfile.node has no USER) and reads it regardless.
+# Override these if your image runs amid as a different uid/gid.
+AMID_UID="${AMID_UID:-100}"
+AMID_GID="${AMID_GID:-101}"
+
 echo "==> Generating ${NUM_VALIDATORS}-node testnet configuration..."
 
 # Clean existing configs
@@ -28,6 +39,13 @@ if ! command -v cometbft &> /dev/null; then
             --hostname-prefix cometbft \
             --populate-persistent-peers
         chown -R '"${HOST_UID}:${HOST_GID}"' /genesis
+        # Make each node validator signing key readable by the in-container amid
+        # user (0640, owned by the amid uid/gid). Done AFTER the recursive chown
+        # above so it is not overwritten. Root here can chown to any id.
+        for d in /genesis/node*/config; do
+            chmod 0640 "$d/priv_validator_key.json" 2>/dev/null || true
+            chown '"${AMID_UID}:${AMID_GID}"' "$d/priv_validator_key.json" 2>/dev/null || true
+        done
     '
 else
     cometbft testnet \
@@ -35,6 +53,21 @@ else
         --o "${GENESIS_DIR}" \
         --hostname-prefix cometbft \
         --populate-persistent-peers
+    # cometbft ran as the host user; normalize the signing keys so the amid
+    # container (uid/gid ${AMID_UID}/${AMID_GID}) can read them. chown needs
+    # privilege the host user may lack — fall back to a precise instruction.
+    for i in $(seq 0 $((NUM_VALIDATORS - 1))); do
+        KEY="${GENESIS_DIR}/node${i}/config/priv_validator_key.json"
+        [ -f "$KEY" ] || continue
+        chmod 0640 "$KEY"
+        if ! chown "${AMID_UID}:${AMID_GID}" "$KEY" 2>/dev/null; then
+            echo "==> NOTE: could not chown ${KEY} to ${AMID_UID}:${AMID_GID} (needs root)."
+            echo "    The amid container runs as that uid/gid and must read its signing key."
+            echo "    If the auto-voter logs 'permission denied', run:"
+            echo "      sudo chown ${AMID_UID}:${AMID_GID} ${GENESIS_DIR}/node*/config/priv_validator_key.json"
+            echo "      sudo chmod 0640 ${GENESIS_DIR}/node*/config/priv_validator_key.json"
+        fi
+    done
 fi
 
 # Patch config.toml for each node

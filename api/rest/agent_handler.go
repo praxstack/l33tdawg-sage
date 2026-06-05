@@ -413,6 +413,58 @@ func (s *Server) callerCanSetPermission(ctx context.Context, callerID, targetID 
 	return false
 }
 
+// callerIsOperatorOrAdmin reports whether callerID is the node operator or an
+// admin (on-chain or SQL) — the trust level allowed to see another agent's
+// ACL-topology fields or manage MCP tokens for other agents. Empty caller is
+// never privileged.
+func (s *Server) callerIsOperatorOrAdmin(ctx context.Context, callerID string) bool {
+	if callerID == "" {
+		return false
+	}
+	if s.nodeOperatorID != "" && callerID == s.nodeOperatorID {
+		return true
+	}
+	if s.badgerStore != nil {
+		if a, err := s.badgerStore.GetRegisteredAgent(callerID); err == nil && a != nil && a.Role == "admin" {
+			return true
+		}
+	}
+	if s.agentStore != nil {
+		if a, err := s.agentStore.GetAgent(ctx, callerID); err == nil && a != nil && a.Role == "admin" {
+			return true
+		}
+	}
+	return false
+}
+
+// sanitizeAgentForRead returns a copy of a safe to serialize on the agent read
+// endpoints. claim_token / claim_expires_at are a one-time CLI-install
+// credential that handleClaimAgent exchanges for the agent's private key seed
+// (web/network_handler.go); they must NEVER be exposed via these read paths —
+// the pairing flow delivers the token through the authenticated dashboard
+// create-agent response instead. Unless the caller is the agent itself or an
+// operator/admin, the per-agent ACL topology (domain_access, visible_agents) is
+// stripped too.
+func sanitizeAgentForRead(a *store.AgentEntry, privileged bool) *store.AgentEntry {
+	if a == nil {
+		return nil
+	}
+	out := *a
+	out.ClaimToken = ""
+	out.ClaimExpiresAt = nil
+	// BundlePath is an absolute server-side path to the agent's key-bundle dir
+	// (the directory that also holds the Ed25519 seed); it is never useful to an
+	// API consumer and discloses the operator's home/dir layout, so strip it
+	// unconditionally. The dashboard bundle download reads it from the stored
+	// entry, not from this response.
+	out.BundlePath = ""
+	if !privileged {
+		out.DomainAccess = ""
+		out.VisibleAgents = ""
+	}
+	return &out
+}
+
 // handleGetRegisteredAgent handles GET /v1/agent/{id}.
 // Reads from offchain store (no tx broadcast needed).
 func (s *Server) handleGetRegisteredAgent(w http.ResponseWriter, r *http.Request) {
@@ -433,7 +485,9 @@ func (s *Server) handleGetRegisteredAgent(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	writeJSON(w, http.StatusOK, agent)
+	callerID := middleware.ContextAgentID(r.Context())
+	privileged := callerID == id || s.callerIsOperatorOrAdmin(r.Context(), callerID)
+	writeJSON(w, http.StatusOK, sanitizeAgentForRead(agent, privileged))
 }
 
 // handleListRegisteredAgents handles GET /v1/agents.
@@ -453,8 +507,15 @@ func (s *Server) handleListRegisteredAgents(w http.ResponseWriter, r *http.Reque
 		agents = make([]*store.AgentEntry, 0)
 	}
 
+	// /v1/agents is unauthenticated — never expose claim_token (a one-time
+	// credential exchangeable for the agent key seed) or per-agent ACL topology.
+	sanitized := make([]*store.AgentEntry, 0, len(agents))
+	for _, a := range agents {
+		sanitized = append(sanitized, sanitizeAgentForRead(a, false))
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"agents": agents,
-		"total":  len(agents),
+		"agents": sanitized,
+		"total":  len(sanitized),
 	})
 }

@@ -220,6 +220,14 @@ func ContextAgentID(ctx context.Context) string {
 	return v
 }
 
+// WithAgentID returns a copy of ctx carrying agentID as the authenticated agent
+// identity, the same value Ed25519AuthMiddleware/bearer auth install. Exposed
+// for internal wiring and tests that exercise handlers without the full auth
+// middleware in front; production auth still flows through the middleware.
+func WithAgentID(ctx context.Context, agentID string) context.Context {
+	return context.WithValue(ctx, agentIDKey, agentID)
+}
+
 // ContextAgentAuth extracts the raw agent auth proof from the request context.
 // Returns nil if not present.
 func ContextAgentAuth(ctx context.Context) *AgentAuthProof {
