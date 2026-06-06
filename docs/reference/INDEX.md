@@ -24,7 +24,7 @@ or `api/openapi.yaml`, **trust this reference** — those two have known drift (
 | [`concepts/clearance-classification.md`](concepts/clearance-classification.md) | Per-record classification (0–4), the REST-vs-wire default gotcha, and the per-record query gate. |
 | [`concepts/rbac-orgs-federation.md`](concepts/rbac-orgs-federation.md) | Orgs, departments, agent clearance, cross-org federation, and the five-gate query pipeline. |
 | [`concepts/consensus-confidence-decay.md`](concepts/consensus-confidence-decay.md) | CometBFT BFT path, "CometBFT-committed" vs "SAGE-committed", quorum, PoE weights, epochs. |
-| [`concepts/content-validation-gate.md`](concepts/content-validation-gate.md) | The optional Layer-2 content-validation gate (`outcome_class`-keyed reject hook) and the deployment **arming seam** (`contentvalidator.SetProvider`) — enabling it without patching the cmd entrypoints. |
+| [`concepts/content-validation-gate.md`](concepts/content-validation-gate.md) | The optional Layer-2 content-validation gate (`outcome_class`-keyed reject hook) and the deployment **arming seam** — both the stateless `contentvalidator.SetProvider` and the context-aware `SetProviderWithContext` (exposes the on-chain `RoleResolver` for signer-authority checks) — enabling it without patching the cmd entrypoints. |
 
 ---
 

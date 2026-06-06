@@ -1,8 +1,8 @@
-<!-- Verified against code at SAGE v10.1.1 (registry.go:67/84/109, app.go:897/932/1890/2123/2134). -->
+<!-- Verified against code at SAGE v10.3.0 (registry.go:67/84/109, app.go:897/917/932/939/987/1890/2123/2134, provider.go:98/107/132/139/147). -->
 
 # Layer-2 content-validation gate (and how a deployment arms it)
 
-Verified against code at SAGE v10.1.1.
+Verified against code at SAGE v10.3.0.
 
 SAGE ships an optional, deployment-agnostic **content-validation gate**: a
 consensus-path hook that can REJECT a memory submission based on the *shape of
@@ -110,6 +110,70 @@ contract; the surrounding entrypoint code is free to move.
 > package's `init()` and add a single blank import (`import _ ".../yourpkg"`) to
 > a compiled package so the `init()` runs. Dropping the arming file directly into
 > an already-compiled package avoids even that one import.
+
+### Stateful validators (context-aware arming)
+
+The no-arg `Provider` above is perfect for **stateless** validators (shape checks
+on the record body alone). Some validators need live, read-only chain state at
+arm time — most commonly a **signer-authority** check: a record's self-asserted
+`agent_role` is forgeable, so it may only be trusted if the *on-chain signer*
+actually holds that role. That decision needs a lookup over chain state, which a
+no-arg provider can't reach — forcing a deployment back onto per-release `cmd`
+patches (`app.SetContentValidators(reg)` wired with `app.RoleResolver()`).
+
+The **context-aware** variant closes that gap. It is purely additive and opt-in;
+the no-arg `Provider` is unchanged and stock builds still register nothing.
+
+```go
+type ArmContext interface {
+    RoleResolver() func(agentID string) string // "" = unknown/unregistered signer
+}
+
+type ProviderWithContext func(ArmContext) *ContentValidatorRegistry
+
+func SetProviderWithContext(p ProviderWithContext)        // register (boot-only; nil clears)
+func HasProviderWithContext() bool                        // is one registered?
+func BuildFromProviderWithContext(c ArmContext) *ContentValidatorRegistry
+```
+
+(`provider.go:98/107/132/139/147`.) The constructor passes an `ArmContext` backed
+by the app, so the whole arming collapses to one additive `init()` — no `cmd`
+edits, signer authority preserved:
+
+```go
+func init() {
+    contentvalidator.SetProviderWithContext(func(c contentvalidator.ArmContext) *contentvalidator.ContentValidatorRegistry {
+        reg := contentvalidator.NewContentValidatorRegistry()
+        resolve := c.RoleResolver() // capture ONCE at arm time
+        reg.RegisterContentValidator("red", "detect", func(rec *memory.MemoryRecord) error {
+            if resolve(rec.SubmittingAgent) != "red-agent" {
+                return fmt.Errorf("signer %s lacks red-agent authority", rec.SubmittingAgent)
+            }
+            return nil // ...plus the shape checks
+        })
+        return reg
+    })
+}
+```
+
+What `ArmContext` exposes — and why it stays deterministic:
+
+- `RoleResolver()` returns **the same per-call, read-only on-chain role lookup the
+  gate already consumes inside `FinalizeBlock`** (`app.RoleResolver()`,
+  `app.go:987`). Given an agent ID it returns the RAW on-chain role, or `""` when
+  the signer is unknown or the read errors — so an authority check fails closed on
+  an unknown signer. Capture it once at arm time; call it per record. Nothing the
+  enforcement path doesn't already read is exposed, so the seam adds **no new
+  nondeterminism surface** (no time, no network, no writes, no goroutines).
+- The `ArmContext` handed to a provider is a **narrow adapter, not the `*SageApp`**
+  (`app.go:939/943`). A provider therefore cannot downcast back into mutable app
+  internals — the seam is a real decoupling boundary, not an ergonomic alias.
+
+**Precedence.** If BOTH a context-aware and a no-arg provider are registered, the
+context-aware one wins (it is the richer registration, consulted first at
+`app.go:917`) and the constructor logs a warning so the no-arg registration is
+never *silently* dropped. An explicit `SetContentValidators` still beats both —
+the early-return guard at `app.go:909` leaves a pre-wired registry untouched.
 
 ### Contract / gotchas
 

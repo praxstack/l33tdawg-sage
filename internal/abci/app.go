@@ -909,11 +909,38 @@ func (app *SageApp) armContentValidatorsFromProvider() {
 	if app.contentValidators != nil {
 		return
 	}
+	// A context-aware provider takes precedence: it asked for live arm-time
+	// chain state (the role resolver), so it is the richer registration. We hand
+	// it a narrow armContext rather than the *SageApp directly, so a provider
+	// cannot downcast back into mutable app internals — keeping this seam a real
+	// decoupling boundary, not just an ergonomic alias.
+	if reg := contentvalidator.BuildFromProviderWithContext(armContext{app: app}); reg != nil {
+		app.contentValidators = reg
+		if contentvalidator.HasProvider() {
+			app.logger.Warn().Msg("both a context-aware and a no-arg content-validator provider are registered; using the context-aware one")
+		}
+		app.logger.Info().Msg("Layer-2 content-validation gate armed from registered context provider")
+		return
+	}
 	if reg := contentvalidator.BuildFromProvider(); reg != nil {
 		app.contentValidators = reg
 		app.logger.Info().Msg("Layer-2 content-validation gate armed from registered provider")
 	}
 }
+
+// armContext is the minimal, read-only view of app state handed to a
+// context-aware content-validator provider (contentvalidator.ProviderWithContext)
+// at arm time. It deliberately wraps *SageApp behind a narrow interface so a
+// provider can capture arm-time chain state WITHOUT being able to reach back
+// into mutable app internals (no downcast to *SageApp). The only state it
+// exposes — the per-call read-only on-chain role lookup — is exactly what the
+// gate already consumes inside FinalizeBlock, so it adds no new nondeterminism
+// surface.
+type armContext struct{ app *SageApp }
+
+// RoleResolver satisfies contentvalidator.ArmContext by forwarding the app's
+// existing deterministic, read-only role lookup.
+func (c armContext) RoleResolver() func(agentID string) string { return c.app.RoleResolver() }
 
 // ContentValidationEnforcementWarning returns a non-empty operator warning when
 // this node will NOT enforce the Layer-2 content-validation gate on a chain that
