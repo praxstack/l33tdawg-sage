@@ -1404,6 +1404,14 @@ func (s *PostgresStore) FindByContentHash(_ context.Context, _ string) (bool, er
 	return false, nil // TODO: implement for postgres
 }
 
+// RepairSelfDupRejected is a no-op for postgres: the dedup self-match bug it
+// repairs never fired here (FindByContentHash is an always-false stub on this
+// backend), and the repair is gated single-node anyway — postgres backs
+// multi-node production daemons.
+func (s *PostgresStore) RepairSelfDupRejected(_ context.Context, _ string, _ func(memoryID string) error) (int, error) {
+	return 0, nil
+}
+
 func (s *PostgresStore) Close() error {
 	if s.pool != nil {
 		s.pool.Close()

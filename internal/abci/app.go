@@ -1536,6 +1536,52 @@ func (app *SageApp) ReconcileSelfValidator(selfID string, archetypeIDs []string,
 	return true, nil
 }
 
+// RepairSelfDupRejectedMemories is a SINGLE-NODE-ONLY local repair for memories
+// wrongly deprecated by the voter dedup self-match bug (v10.1.0 collapsed the
+// archetype checks into one all-must-pass verdict, and dedupCheck's
+// FindByContentHash matched the proposed memory's own row — so the node's single
+// validator rejected every memory as a "duplicate" of itself, and the
+// all-voted-no-quorum branch deprecated it on arrival).
+//
+// The off-chain store owns the candidate fingerprint (deprecated + exactly one
+// vote: selfID reject "duplicate content%" + never challenged — see
+// RepairSelfDupRejected); this side flips the matching chain state per candidate:
+// memstatus back to proposed (content hash preserved) and the bogus vote:* key
+// dropped, so the fixed voter re-votes each memory through a real block and
+// quorum recommits it within a few ticks.
+//
+// Like ReconcileSelfValidator, this is a local, non-consensus write to state
+// folded into ComputeAppHash — safe ONLY with no peers to diverge from. The guard
+// therefore refuses unless singleNode is asserted by the caller AND the live
+// validator set is exactly {selfID} (run it AFTER ReconcileSelfValidator so a
+// just-collapsed legacy set qualifies). The chain flip is idempotent
+// (already-proposed candidates are left as-is), so a crash between the chain and
+// mirror writes is healed by the next startup's pass.
+func (app *SageApp) RepairSelfDupRejectedMemories(ctx context.Context, selfID string, singleNode bool) (int, error) {
+	if !singleNode || selfID == "" || app.offchainStore == nil {
+		return 0, nil
+	}
+	if vals := app.validators.GetAll(); len(vals) != 1 || vals[0].ID != selfID {
+		return 0, nil
+	}
+	return app.offchainStore.RepairSelfDupRejected(ctx, selfID, func(memoryID string) error {
+		hash, status, err := app.badgerStore.GetMemoryHash(memoryID)
+		if err != nil {
+			return err
+		}
+		// Idempotent re-entry: a prior pass already flipped the chain side.
+		if status != string(memory.StatusDeprecated) && status != string(memory.StatusProposed) {
+			return fmt.Errorf("memory %s has chain status %q — not repairing", memoryID, status)
+		}
+		if status == string(memory.StatusDeprecated) {
+			if err := app.badgerStore.SetMemoryHash(memoryID, hash, string(memory.StatusProposed)); err != nil {
+				return err
+			}
+		}
+		return app.badgerStore.DeleteState(fmt.Sprintf("vote:%s:%s", memoryID, selfID))
+	})
+}
+
 // CheckTx validates a transaction before it enters the mempool.
 func (app *SageApp) CheckTx(_ context.Context, req *abcitypes.RequestCheckTx) (*abcitypes.ResponseCheckTx, error) {
 	parsedTx, err := tx.DecodeTx(req.Tx)

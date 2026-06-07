@@ -1,10 +1,16 @@
 package abci
 
 import (
+	"context"
+	"crypto/sha256"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/l33tdawg/sage/internal/memory"
+	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/validator"
 )
 
@@ -138,4 +144,93 @@ func TestReconcileSelfValidator_RefusesNonArchetypeSet(t *testing.T) {
 	changed2, err := app2.ReconcileSelfValidator("self", testArchetypes, true)
 	require.NoError(t, err)
 	require.False(t, changed2)
+}
+
+// ---------------------------------------------------------------------------
+// RepairSelfDupRejectedMemories — the memory-side companion repair
+// ---------------------------------------------------------------------------
+
+// seedDupRejectVictim plants the full bug fingerprint across both stores: a
+// deprecated memory whose only vote is selfID rejecting it as a "duplicate" of
+// its own proposed row (chain status + vote:* key + mirror row + vote row).
+func seedDupRejectVictim(t *testing.T, app *SageApp, id, selfID string) []byte {
+	t.Helper()
+	ctx := context.Background()
+	content := "victim memory " + id
+	hash := sha256.Sum256([]byte(content))
+
+	require.NoError(t, app.GetOffchainStore().InsertMemory(ctx, &memory.MemoryRecord{
+		MemoryID: id, SubmittingAgent: "agent1", Content: content, ContentHash: hash[:],
+		MemoryType: memory.TypeObservation, DomainTag: "general", ConfidenceScore: 0.85,
+		Status: memory.StatusProposed, CreatedAt: time.Now().UTC(),
+	}))
+	require.NoError(t, app.GetOffchainStore().UpdateStatus(ctx, id, memory.StatusDeprecated, time.Now().UTC()))
+	require.NoError(t, app.GetOffchainStore().InsertVote(ctx, &store.ValidationVote{
+		MemoryID: id, ValidatorID: selfID, Decision: "reject",
+		Rationale: "duplicate content (hash: deadbeef)", CreatedAt: time.Now().UTC(),
+	}))
+	require.NoError(t, app.badgerStore.SetMemoryHash(id, hash[:], string(memory.StatusDeprecated)))
+	require.NoError(t, app.badgerStore.SetState(fmt.Sprintf("vote:%s:%s", id, selfID), []byte("reject")))
+	return hash[:]
+}
+
+// End-to-end repair on a healthy single-validator node: chain status flips back
+// to proposed (content hash preserved), the bogus vote:* key drops, and the
+// mirror row + vote row follow — leaving the memory exactly where the fixed
+// voter's GetPendingByDomain scan picks it up for a fresh vote.
+func TestRepairSelfDupRejectedMemories_RepairsVictim(t *testing.T) {
+	app := setupTestApp(t)
+	const self = "self-node-consensus-id"
+	addValidators(t, app, self)
+	wantHash := seedDupRejectVictim(t, app, "victim", self)
+
+	repaired, err := app.RepairSelfDupRejectedMemories(context.Background(), self, true)
+	require.NoError(t, err)
+	require.Equal(t, 1, repaired)
+
+	gotHash, status, err := app.badgerStore.GetMemoryHash("victim")
+	require.NoError(t, err)
+	require.Equal(t, string(memory.StatusProposed), status)
+	require.Equal(t, wantHash, gotHash, "the on-chain content hash must survive the flip")
+
+	voteVal, err := app.badgerStore.GetState(fmt.Sprintf("vote:%s:%s", "victim", self))
+	require.NoError(t, err)
+	require.Nil(t, voteVal, "the bogus vote key must be dropped so the re-vote is fresh")
+
+	rec, err := app.GetOffchainStore().GetMemory(context.Background(), "victim")
+	require.NoError(t, err)
+	require.Equal(t, memory.StatusProposed, rec.Status)
+	votes, err := app.GetOffchainStore().GetVotes(context.Background(), "victim")
+	require.NoError(t, err)
+	require.Empty(t, votes)
+
+	// Idempotent: nothing left to repair.
+	repaired2, err := app.RepairSelfDupRejectedMemories(context.Background(), self, true)
+	require.NoError(t, err)
+	require.Zero(t, repaired2)
+}
+
+// The repair mutates state folded into ComputeAppHash, so it must refuse unless
+// the caller asserts single-node AND the live set is exactly {selfID}.
+func TestRepairSelfDupRejectedMemories_Guards(t *testing.T) {
+	// Quorum node: refused outright.
+	app := setupTestApp(t)
+	const self = "self-node-consensus-id"
+	addValidators(t, app, self)
+	seedDupRejectVictim(t, app, "victim", self)
+	repaired, err := app.RepairSelfDupRejectedMemories(context.Background(), self, false)
+	require.NoError(t, err)
+	require.Zero(t, repaired, "must never fire on a quorum node")
+
+	// Multi-validator set: refused even with singleNode asserted.
+	app2 := setupTestApp(t)
+	addValidators(t, app2, self, "other-validator")
+	seedDupRejectVictim(t, app2, "victim", self)
+	repaired2, err := app2.RepairSelfDupRejectedMemories(context.Background(), self, true)
+	require.NoError(t, err)
+	require.Zero(t, repaired2, "must refuse when the set is not exactly {selfID}")
+
+	_, status, err := app2.badgerStore.GetMemoryHash("victim")
+	require.NoError(t, err)
+	require.Equal(t, string(memory.StatusDeprecated), status, "refused repair must leave chain state untouched")
 }

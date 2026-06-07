@@ -707,6 +707,16 @@ func runServe() (rerr error) {
 		} else if changed {
 			logger.Warn().Str("self", selfID[:16]).Msg("legacy app-validators replaced by node consensus key (single-node repair)")
 		}
+		// Backward-compat: resurrect memories the pre-v10.4.2 voter wrongly
+		// deprecated as "duplicates" of their own proposed row (dedup self-match).
+		// Runs AFTER ReconcileSelfValidator so a just-collapsed legacy set passes
+		// the repair's set-is-exactly-{selfID} guard; the voter below then
+		// re-votes the resurrected memories into committed within a few ticks.
+		if repaired, rErr := app.RepairSelfDupRejectedMemories(ctx, selfID, !cfg.Quorum.Enabled); rErr != nil {
+			logger.Warn().Err(rErr).Msg("self-dup-reject memory repair incomplete — will retry next startup")
+		} else if repaired > 0 {
+			logger.Warn().Int("memories", repaired).Msg("memories wrongly deprecated by the dedup self-match bug restored to proposed (single-node repair)")
+		}
 		go voter.Run(ctx, app, sqliteStore, voter.Config{Key: selfKey, CometRPC: cometRPC, PollInterval: 2 * time.Second}, logger)
 	} else {
 		logger.Warn().Msg("no consensus key — memory auto-voter disabled")

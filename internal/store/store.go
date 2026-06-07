@@ -145,6 +145,12 @@ type MemoryStore interface {
 	ListMemoriesByTag(ctx context.Context, tag string, limit, offset int) ([]*memory.MemoryRecord, int, error)
 	// FindByContentHash checks if a committed memory with this content hash exists.
 	FindByContentHash(ctx context.Context, contentHash string) (bool, error)
+	// RepairSelfDupRejected resurrects memories wrongly deprecated by the voter
+	// dedup self-match bug: deprecated memories whose only recorded vote is selfID
+	// rejecting as "duplicate content" flip back to proposed (after flipChain
+	// succeeds for the matching chain-state write) so the fixed voter can re-vote
+	// them. Single-node repair — multi-node backends may no-op.
+	RepairSelfDupRejected(ctx context.Context, selfID string, flipChain func(memoryID string) error) (int, error)
 	Close() error
 }
 

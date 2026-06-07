@@ -2927,6 +2927,14 @@ func (s *SQLiteStore) UpdateRedeployLog(ctx context.Context, id int64, status, e
 
 // FindByContentHash checks if a committed memory with this content hash exists.
 // The contentHash parameter is the hex-encoded SHA-256 hash of the content.
+//
+// The predicate MUST be committed-only. The voter's dedupCheck runs while the
+// candidate memory is itself sitting in this table with status='proposed', so the
+// previous predicate (status != 'deprecated') matched the candidate's OWN row —
+// every per-node vote became a self-inflicted "duplicate content" reject. On a
+// single-validator chain that reject was unanimous, so every memory was
+// deprecated on arrival (and on legacy multi-validator sets it wedged memories at
+// proposed). See RepairSelfDupRejected for the recovery path.
 func (s *SQLiteStore) FindByContentHash(ctx context.Context, contentHash string) (bool, error) {
 	hashBytes, err := hex.DecodeString(contentHash)
 	if err != nil {
@@ -2934,12 +2942,80 @@ func (s *SQLiteStore) FindByContentHash(ctx context.Context, contentHash string)
 	}
 	var count int
 	err = s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM memories WHERE content_hash = ? AND status != 'deprecated'`,
+		`SELECT COUNT(*) FROM memories WHERE content_hash = ? AND status = 'committed'`,
 		hashBytes).Scan(&count)
 	if err != nil {
 		return false, err
 	}
 	return count > 0, nil
+}
+
+// RepairSelfDupRejected resurrects memories wrongly deprecated by the dedup
+// self-match bug (see FindByContentHash): the per-node voter rejected every
+// memory as a "duplicate" of its own proposed row, and on a single-validator
+// chain that unanimous reject deprecated it on arrival.
+//
+// A memory qualifies ONLY when its recorded vote history is exactly one vote —
+// selfID rejecting with the dedupCheck rationale — and it was never challenged.
+// That fingerprint cannot match legitimately deprecated memories: quorum
+// rejections on real multi-validator sets carry multiple votes, challenge
+// deprecations carry a challenges row, and the legacy 4-archetype era always
+// recorded 4 votes per memory.
+//
+// For each candidate, flipChain (the caller's chain-state flip, e.g. badger
+// status + vote-key cleanup) runs FIRST; only on its success does the mirror row
+// flip back to proposed and the bogus vote row drop. A failure between the two
+// leaves the candidate matched again on the next startup, so the repair is
+// re-entrant — flipChain must therefore be idempotent. Returns the number of
+// repaired memories.
+func (s *SQLiteStore) RepairSelfDupRejected(ctx context.Context, selfID string, flipChain func(memoryID string) error) (int, error) {
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT m.memory_id FROM memories m
+		WHERE m.status = 'deprecated'
+		  AND EXISTS (SELECT 1 FROM validation_votes v
+		              WHERE v.memory_id = m.memory_id AND v.validator_id = ?
+		                AND v.decision = 'reject' AND v.rationale LIKE 'duplicate content%')
+		  AND NOT EXISTS (SELECT 1 FROM validation_votes v2
+		              WHERE v2.memory_id = m.memory_id AND NOT (v2.validator_id = ?
+		                AND v2.decision = 'reject' AND v2.rationale LIKE 'duplicate content%'))
+		  AND NOT EXISTS (SELECT 1 FROM challenges c WHERE c.memory_id = m.memory_id)`,
+		selfID, selfID)
+	if err != nil {
+		return 0, fmt.Errorf("repair self-dup-rejected: scan candidates: %w", err)
+	}
+	candidates := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if scanErr := rows.Scan(&id); scanErr != nil {
+			_ = rows.Close()
+			return 0, fmt.Errorf("repair self-dup-rejected: scan id: %w", scanErr)
+		}
+		candidates = append(candidates, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, fmt.Errorf("repair self-dup-rejected: iterate: %w", err)
+	}
+	_ = rows.Close()
+
+	repaired := 0
+	for _, id := range candidates {
+		if flipChain != nil {
+			if err := flipChain(id); err != nil {
+				return repaired, fmt.Errorf("repair self-dup-rejected: chain flip %s: %w", id, err)
+			}
+		}
+		if _, err := s.writeExecContext(ctx,
+			`UPDATE memories SET status = 'proposed', deprecated_at = NULL WHERE memory_id = ?`, id); err != nil {
+			return repaired, fmt.Errorf("repair self-dup-rejected: repropose %s: %w", id, err)
+		}
+		if _, err := s.writeExecContext(ctx,
+			`DELETE FROM validation_votes WHERE memory_id = ? AND validator_id = ?`, id, selfID); err != nil {
+			return repaired, fmt.Errorf("repair self-dup-rejected: drop vote %s: %w", id, err)
+		}
+		repaired++
+	}
+	return repaired, nil
 }
 
 // --- Close & Ping ---
