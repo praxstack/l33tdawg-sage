@@ -33,7 +33,8 @@ def test_memory_record_parses_linked_memories(sample_memory):
     # response and link_memories() lets a caller write links. The model must
     # read them back so a caller who creates links can also see them.
     from sage_sdk.models import MemoryRecord
-    links = [{"memory_id": "mem-2", "relation": "supports"}]
+    # Real MemoryLink wire shape the detail endpoint emits (internal/memory/model.go).
+    links = [{"source_id": "mem-1", "target_id": "mem-2", "link_type": "supports"}]
     record = MemoryRecord(**{**sample_memory, "linked_memories": links})
     assert record.linked_memories == links
 
