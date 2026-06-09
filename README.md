@@ -57,16 +57,22 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What's New in v10.4.3
+## What's New in v10.4.4
 
-**`sage-gui export` / `import` work on a stock install again.** v10.4.3 is a non-fork patch release: it touches only the client-side operator CLI — no consensus rule, transaction handler, or AppHash surface — so a mixed v10.4.x cluster computes identical state.
+**The Python SDK reads back the memory links the node already emits.** v10.4.4 is a non-fork patch release: it changes only the Python SDK client model — no consensus rule, transaction handler, or AppHash surface — so a mixed v10.4.x cluster computes identical state.
 
-- **The bug:** with `SAGE_API_URL` unset (the default), `sage-gui export` and `sage-gui import` built the node URL by concatenating `"http://localhost" + cfg.RESTAddr`. On the shipped default `RESTAddr` (`127.0.0.1:8080`) that produced `http://localhost127.0.0.1:8080` — an unconnectable host — so both commands failed with a misleading "is sage-gui serve running?" error even when the node was up.
-- **The fix:** both call sites now derive the URL through the existing `restBaseURL` helper, which prepends `localhost` only for the bare `:port` form and otherwise keeps the host as-is — matching the sibling `seed` and `mcp-token` commands, which already handled the unset-`SAGE_API_URL` fallback correctly (`vault.go` was the lone holdout). A new `TestRestBaseURL` pins the behaviour so the concat bug can't regress.
+- **The gap:** `GET /v1/memory/{id}` returns a `linked_memories` array (documented in the OpenAPI `MemoryRecord` schema), and `link_memories()` already let a caller *write* links — but the SDK `MemoryRecord` model had no `linked_memories` field, so it silently dropped them on read. Links could be created and never read back: the same write-but-not-read asymmetry fixed for `provider` in #30.
+- **The fix:** one additive Optional field, `linked_memories`, shared by the sync and async clients so both round-trip it. Older servers and list responses omit it (`omitempty`) → it defaults to `None`, forward/back compatible. Typed as an untyped list to match the sibling `votes` / `corroborations` fields and to round-trip both shapes the server emits (the detail endpoint's `MemoryLink` objects and the summary struct's bare ID strings).
 
-Thanks to @ihubanov for the fix (#38). SDK 10.4.3.
+Thanks to @ihubanov for the fix (#39). SDK 10.4.4.
 
 ## Older releases
+
+<details>
+<summary>v10.4.3 — sage-gui export/import work on a stock install</summary>
+
+**`sage-gui export` / `import` work on a stock install again.** With `SAGE_API_URL` unset (the default), both commands built the node URL by concatenating `"http://localhost" + cfg.RESTAddr` → `http://localhost127.0.0.1:8080`, an unconnectable host, so both failed with a misleading "is sage-gui serve running?" error even when the node was up. Both call sites now derive the URL through the existing `restBaseURL` helper (`vault.go` was the lone holdout), and a new `TestRestBaseURL` pins the behaviour. Client-side operator CLI only — no consensus surface changes. Thanks @ihubanov (#38). SDK 10.4.3.
+</details>
 
 <details>
 <summary>v10.4.2 — memories commit again on fresh installs</summary>
