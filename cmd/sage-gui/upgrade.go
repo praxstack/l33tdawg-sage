@@ -68,9 +68,16 @@ func runUpgrade(args []string) error {
 }
 
 func printUpgradeUsage() {
-	fmt.Println(`Usage: sage-gui upgrade <subcommand>
+	// Derive the ladder's top rung from the binary instead of hardcoding it —
+	// the help text drifted stale once before (it still said app-v10 after the
+	// v11+ forks shipped).
+	maxV := sageabci.MaxSupportedAppVersion()
+	fmt.Printf(`Usage: sage-gui upgrade <subcommand>
 
-Activate the governance-gated app-version consensus forks (app-v7…app-v10).
+Activate the governance-gated app-version consensus forks (app-v7…app-v%d).
+Forks activate strictly ONE AT A TIME — each propose must target the chain's
+current version + 1, so an existing chain walks the ladder with repeated
+status/propose rounds until status reports app-v%d.
 The voting/processing already exists; this submits the plan an operator needs.
 
 Subcommands:
@@ -100,7 +107,8 @@ hold Role==admin in the on-chain registry. On a standard node that is usually yo
 operator agent.key — once it has been used for any admin op, which is what materializes
 the role on chain; on some deployments it is the genesis validator key (pass it with
 --agent-key). If BOTH keys are rejected with code 47, the admin role isn't materialized
-on chain yet: run any admin op (e.g. a set-permission) with that key first, then retry.`)
+on chain yet: run any admin op (e.g. a set-permission) with that key first, then retry.
+`, maxV, maxV)
 }
 
 // runUpgradeStatus prints the chain's current app version and the next fork an
@@ -230,8 +238,31 @@ func runUpgradePropose(args []string) error {
 	bcastCtx, cancelBcast := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancelBcast()
 	res, err := broadcastTxCommit(bcastCtx, *rpc, encoded)
+	landedDespiteError := false
 	if err != nil {
-		return fmt.Errorf("broadcast: %w\n(if the commit timed out the proposal may still land — re-check with: sage-gui upgrade status)", err)
+		// A broadcast-side failure (HTTP 500, RPC error, dropped connection) is
+		// NOT proof the proposal failed: /broadcast_tx_commit blocks across
+		// CheckTx → consensus → FinalizeBlock, so the tx is often already
+		// committed when the RPC plumbing errors out — hit live: a 500 whose
+		// proposal had landed, leaving the operator to retry into "already
+		// pending". Disambiguate by re-broadcasting the identical tx once after
+		// a short pause; retryProposeAfterBroadcastError explains the three
+		// outcomes. Inconclusive → surface the ORIGINAL error unchanged.
+		logger.Warn().Err(err).Msg("broadcast errored — probing whether the proposal landed anyway")
+		retryRes, landed := retryProposeAfterBroadcastError(*rpc, encoded)
+		if retryRes == nil && !landed {
+			return fmt.Errorf("broadcast: %w\n(if the commit timed out the proposal may still land — re-check with: sage-gui upgrade status)", err)
+		}
+		res, landedDespiteError = retryRes, landed
+	}
+	if landedDespiteError {
+		// The original broadcast committed the plan (the retry's "already
+		// pending" is the at-most-one-pending invariant tripping on it), so
+		// there's no fresh height/hash to print — go straight to the standard
+		// accepted guidance.
+		fmt.Printf("✓ Proposed %s (target app version %d) — the plan is pending (the first broadcast landed despite the RPC error).\n", canonical, *target)
+		printProposeAcceptedGuidance(*target)
+		return nil
 	}
 	if res.CheckTxCode != 0 {
 		return fmt.Errorf("rejected at CheckTx (code %d): %s", res.CheckTxCode, res.CheckTxLog)
@@ -263,23 +294,69 @@ func runUpgradePropose(args []string) error {
 
 	fmt.Printf("✓ Proposed %s (target app version %d) — accepted at height %d.\n", canonical, *target, res.Height)
 	fmt.Printf("  tx hash: %s\n", res.Hash)
+	printProposeAcceptedGuidance(*target)
+	return nil
+}
+
+// printProposeAcceptedGuidance prints the post-acceptance operator guidance
+// shared by the clean-commit path and the landed-despite-broadcast-error path:
+// how to track activation, and the next rung of the fork ladder.
+func printProposeAcceptedGuidance(target uint64) {
 	fmt.Println("  Routed to the governance quorum — validators will auto-vote ACCEPT. Track activation with:")
 	fmt.Println("    sage-gui upgrade status")
-	if *target < sageabci.MaxSupportedAppVersion() {
-		fmt.Printf("  After it activates, propose the next fork: sage-gui upgrade propose --target %d\n", *target+1)
+	if target < sageabci.MaxSupportedAppVersion() {
+		fmt.Printf("  After it activates, propose the next fork: sage-gui upgrade propose --target %d\n", target+1)
 		// Once this target activates the chain reports app-v<target>, so the
-		// follow-up propose is admin-gated whenever *target >= 8 (it runs from an
+		// follow-up propose is admin-gated whenever target >= 8 (it runs from an
 		// app-v8+ chain). Carry the same chain-admin caveat the status next-step
 		// prints, so the success path doesn't re-strand the operator (issue #34).
-		// Threshold is *target >= 8, NOT *target+1 >= 8: a just-proposed target 7
+		// Threshold is target >= 8, NOT target+1 >= 8: a just-proposed target 7
 		// leaves the chain at app-v7, where the target-8 follow-up still takes the
 		// legacy self-activating path and needs no admin.
-		if *target >= 8 {
+		if target >= 8 {
 			fmt.Println("  (the chain will then be at app-v8+, so that propose must be signed by a chain-admin agent —")
 			fmt.Println("   pass --agent-key for the admin identity if it isn't your default agent.key)")
 		}
 	}
-	return nil
+}
+
+// proposeBroadcastRetryDelay is how long the propose path waits before the
+// single landed-anyway probe re-broadcast. Long enough for the node's RPC
+// layer to settle after a 500; a var so tests can shrink it.
+var proposeBroadcastRetryDelay = 3 * time.Second
+
+// retryProposeAfterBroadcastError disambiguates a broadcast-side error by
+// re-broadcasting the identical signed propose tx once, after a short pause.
+// Three outcomes:
+//
+//   - the retry commits clean (both codes 0): the first broadcast never made
+//     it on chain but this one did → (res, false): treat as a normal success;
+//   - the retry is rejected "already pending" at block execution: the FIRST
+//     broadcast DID land — the at-most-one-pending invariant only trips on a
+//     live plan, and we verified pre-broadcast that none was pending →
+//     (nil, true): report success without a fresh height/hash;
+//   - anything else (another error, another rejection code): inconclusive →
+//     (nil, false): the caller surfaces the ORIGINAL broadcast error.
+//
+// Sliver of ambiguity: another proposer could land a plan inside the retry
+// window, making "already pending" theirs not ours — acceptable, since the
+// operator's intent (a plan for the next sequential fork is pending) holds
+// either way and `upgrade status` shows the truth.
+func retryProposeAfterBroadcastError(rpc string, encoded []byte) (res *broadcastCommitResp, landedAlreadyPending bool) {
+	time.Sleep(proposeBroadcastRetryDelay)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	r, err := broadcastTxCommit(ctx, rpc, encoded)
+	if err != nil {
+		return nil, false
+	}
+	if r.CheckTxCode == 0 && r.TxResultCode == 0 {
+		return r, false
+	}
+	if r.TxResultCode != 0 && strings.Contains(r.TxResultLog, "already pending") {
+		return nil, true
+	}
+	return nil, false
 }
 
 // resolveProposeSigningKey selects the key the propose tx is signed with and

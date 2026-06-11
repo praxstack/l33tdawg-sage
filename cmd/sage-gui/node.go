@@ -49,6 +49,24 @@ import (
 	"github.com/l33tdawg/sage/web"
 )
 
+// resolveRetainBlocks maps the retain_blocks config knob to the effective
+// retention window: 0 = mode default (personal 100k, quorum disabled),
+// negative = explicitly keep everything, positive = operator's window.
+// Factored out of runServe so the mode-default policy is unit-testable.
+func resolveRetainBlocks(configured int64, quorumEnabled bool) int64 {
+	switch {
+	case configured < 0:
+		return 0
+	case configured == 0:
+		if quorumEnabled {
+			return 0
+		}
+		return 100_000
+	default:
+		return configured
+	}
+}
+
 func runServe() (rerr error) {
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -211,11 +229,7 @@ func runServe() (rerr error) {
 	// (single validator, no peers ever sync from them) prune by default;
 	// quorum nodes keep everything unless the operator opts in, because a
 	// fresh peer block-syncs history from the existing validators.
-	retainBlocks := cfg.RetainBlocks
-	if retainBlocks == 0 && !cfg.Quorum.Enabled {
-		retainBlocks = 100_000
-	}
-	if retainBlocks > 0 {
+	if retainBlocks := resolveRetainBlocks(cfg.RetainBlocks, cfg.Quorum.Enabled); retainBlocks > 0 {
 		app.SetRetainBlocks(retainBlocks)
 		logger.Info().Int64("retain_blocks", retainBlocks).Msg("block retention armed — CometBFT will prune blocks older than the window")
 	}
@@ -434,6 +448,12 @@ func runServe() (rerr error) {
 		AgentKey:      loadOperatorAgentKey(logger),
 		CometRPC:      cometRPC,
 		Logger:        logger,
+		// v10.5.1 auto-advance: personal nodes walk the fork ladder to the
+		// binary ceiling automatically (issue #40 follow-up — updating the
+		// binary now brings the chain up to date too). Quorum clusters keep
+		// the legacy target-6 watchdog; disable_auto_upgrade opts out.
+		PersonalMode: !cfg.Quorum.Enabled,
+		AutoAdvance:  !cfg.DisableAutoUpgrade,
 	})
 
 	// Create REST server

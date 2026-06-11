@@ -590,7 +590,7 @@ Access to a memory requires passing three checks, evaluated in order:
 
 ## Upgrade Machinery (v7.5)
 
-SAGE v7.5 ships the substrate for hands-off in-place chain upgrades. Existing chains can move forward across consensus-rule changes without a chain reset, without operator-typed commands, and without losing accumulated memory. The substrate has four moving parts:
+SAGE v7.5 ships the substrate for in-place chain upgrades: existing chains move forward across consensus-rule changes without a chain reset and without losing accumulated memory. How much of it is hands-off depends on the fork: the upgrade watchdog auto-proposes only up to its frozen deployment-safe default (app-v6), while every later fork (app-v7 onward) is governance-activated by an operator running `sage-gui upgrade propose --target <next>` one fork at a time (post-app-v8, signed by a chain-admin agent). An auto-advance mode for personal (single-validator) nodes — restoring the no-typed-commands experience for the later forks — lands in v10.5.1. The substrate has four moving parts:
 
 ### 1. Scheduled snapshots
 
