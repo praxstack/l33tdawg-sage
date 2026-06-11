@@ -57,16 +57,22 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What's New in v10.4.4
+## What's New in v10.5.0
 
-**The Python SDK reads back the memory links the node already emits.** v10.4.4 is a non-fork patch release: it changes only the Python SDK client model — no consensus rule, transaction handler, or AppHash surface — so a mixed v10.4.x cluster computes identical state.
+**An idle node no longer mints empty blocks forever, and old blocks get pruned.** An idle personal node produced an empty block every second and the chain grew ~200 MB/day at rest (#40). `create_empty_blocks=false` was always set — but CometBFT's `needProofBlock` overrides it whenever the AppHash moved in the previous block, and SAGE's AppHash moved *every* block because Commit rewrites the volatile `state:` bookkeeping keys (height, last app hash, epoch) that the hash itself included. The hash could never reach a fixed point, so the chain could never go quiet.
 
-- **The gap:** `GET /v1/memory/{id}` returns a `linked_memories` array (documented in the OpenAPI `MemoryRecord` schema), and `link_memories()` already let a caller *write* links — but the SDK `MemoryRecord` model had no `linked_memories` field, so it silently dropped them on read. Links could be created and never read back: the same write-but-not-read asymmetry fixed for `provider` in #30.
-- **The fix:** one additive Optional field, `linked_memories`, shared by the sync and async clients so both round-trip it. Older servers and list responses omit it (`omitempty`) → it defaults to `None`, forward/back compatible. Typed as an untyped list to match the sibling `votes` / `corroborations` fields and to round-trip both shapes the server emits (the detail endpoint's `MemoryLink` objects and the summary struct's bare ID strings).
+- **app-v12 fork (the cure):** post-fork, the AppHash excludes the `state:` namespace, so an idle chain's hash reaches a fixed point and empty-block production stops — height only advances on real transactions. Pre-fork blocks replay byte-identically; activation is governance-gated like app-v7…v11: `sage-gui upgrade propose` one fork at a time until `upgrade status` reports app-v12.
+- **Block retention (effective immediately, no fork needed):** Commit now reports a CometBFT `RetainHeight`, pruning blocks older than the most recent `retain_blocks` (new config knob; personal-mode default 100000, quorum opt-in, `-1` keeps everything). Memory content lives in BadgerDB/SQLite, not in old blocks, so pruning consensus history is safe — existing chains with millions of idle blocks shrink back to the window.
 
-Thanks to @ihubanov for the fix (#39). SDK 10.4.4.
+Thanks to @ic0ns for the report and the idle-growth measurements (#40). SDK 10.5.0.
 
 ## Older releases
+
+<details>
+<summary>v10.4.4 — Python SDK reads back memory links</summary>
+
+**The Python SDK reads back the memory links the node already emits.** v10.4.4 is a non-fork patch release: it changes only the Python SDK client model — no consensus rule, transaction handler, or AppHash surface — so a mixed v10.4.x cluster computes identical state. `GET /v1/memory/{id}` returns a `linked_memories` array and `link_memories()` already let a caller *write* links — but the SDK `MemoryRecord` model silently dropped them on read (the same write-but-not-read asymmetry fixed for `provider` in #30). One additive Optional `linked_memories` field, shared by the sync and async clients; older servers omit it → defaults to `None`, forward/back compatible. Thanks to @ihubanov for the fix (#39). SDK 10.4.4.
+</details>
 
 <details>
 <summary>v10.4.3 — sage-gui export/import work on a stock install</summary>
