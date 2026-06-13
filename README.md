@@ -57,7 +57,19 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What's New in v10.5.2
+## What's New in v10.5.3
+
+**Two contributor fixes — a clearance-escalation bug on the add-member endpoints, and a Python SDK timestamp readback.** REST/SDK-layer only: no consensus change, no fork, replay is byte-identical.
+
+- **Add-member endpoints honor an explicit `clearance: 0` (PUBLIC).** The org and dept add-member REST handlers used a bare `int` for clearance, so they couldn't tell an explicit `clearance: 0` — PUBLIC, a real level that gates reads — from an omitted field, and silently escalated the member to INTERNAL (`1`). Because the SDK defaults the field to `1`, sending `0` was the only way to *ask* for PUBLIC, which the server then bumped back — leaving PUBLIC members unreachable end to end. The field is now a pointer: an explicit `0` is carried verbatim into the broadcast tx; an omitted field still defaults to the safe INTERNAL. Same bug class and fix as the v6.8.4 agent-permission hotfix. (#43)
+- **Python SDK `GovProposal` reads back `created_at`.** The server always stamps a proposal's creation time and emits it on both the governance list and detail endpoints, but the SDK model dropped it on read, so a caller could never see when a proposal was raised. Now an additive optional field — older servers that omit it default to `None`. (#42)
+
+Thanks to @ihubanov for both fixes. SDK 10.5.3 carries the `created_at` change.
+
+## Older releases
+
+<details>
+<summary>v10.5.2 — always-on pending-plan pump un-freezes quiescent chains</summary>
 
 **A pending upgrade plan can no longer freeze a quiet chain.** At app-v12+ an idle chain mints no blocks (the #40 fix working as designed) — so a pending upgrade plan's activation height, ~200 blocks out, never arrived on its own. v10.5.1's heartbeat handled that only inside the auto-advance ladder, which stops at the chain-admin gate on established chains whose admin isn't the operator `agent.key`; a manual `upgrade propose` there pinned the chain at the propose block, looking exactly like a consensus hang (#41 — it isn't one; nothing is wedged or corrupted).
 
@@ -66,8 +78,7 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 - **`upgrade propose --wait`** stays attached and heartbeats the chain to activation interactively; without it, the success output at app-v12+ now carries the quiescence caveat.
 
 Thanks to @ihubanov for the exceptional report (#41). SDK 10.5.2 (lockstep, no SDK changes).
-
-## Older releases
+</details>
 
 <details>
 <summary>v10.5.1 — app-v13 corrected AppHash rule + upgrade auto-advance</summary>
