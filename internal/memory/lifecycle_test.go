@@ -18,15 +18,17 @@ func TestValidTransitions(t *testing.T) {
 		{StatusProposed, StatusDeprecated, true},
 		{StatusValidated, StatusCommitted, true},
 		{StatusValidated, StatusDeprecated, true},
-		{StatusCommitted, StatusChallenged, true},
 		{StatusCommitted, StatusDeprecated, true},
-		{StatusChallenged, StatusCommitted, true},
-		{StatusChallenged, StatusDeprecated, true},
 		// Invalid
 		{StatusProposed, StatusCommitted, false},
 		{StatusCommitted, StatusProposed, false},
 		{StatusDeprecated, StatusProposed, false},
 		{StatusCommitted, StatusValidated, false},
+		// Challenge is decisive (committed→deprecated in one step); the
+		// `challenged` state is unreachable and carries no edges.
+		{StatusCommitted, StatusChallenged, false},
+		{StatusChallenged, StatusCommitted, false},
+		{StatusChallenged, StatusDeprecated, false},
 	}
 
 	for _, tt := range tests {

@@ -6,11 +6,18 @@ import (
 )
 
 // validTransitions defines the allowed state transitions.
+//
+// Challenge is decisive: since v4.5.0 a challenge that passes BFT consensus
+// deprecates the memory in one step (committed→deprecated) — see
+// processMemoryChallenge in internal/abci/app.go. There is no reachable
+// `challenged` state, so it carries no transition edges here. The StatusChallenged
+// enum is retained (model.go) only for legacy on-disk rows from <v4.5.0, which the
+// ResolveChallengedMemories boot migration (internal/store/sqlite.go) sweeps to
+// deprecated. `deprecated` is terminal.
 var validTransitions = map[MemoryStatus][]MemoryStatus{
-	StatusProposed:   {StatusValidated, StatusDeprecated},
-	StatusValidated:  {StatusCommitted, StatusDeprecated},
-	StatusCommitted:  {StatusChallenged, StatusDeprecated},
-	StatusChallenged: {StatusCommitted, StatusDeprecated},
+	StatusProposed:  {StatusValidated, StatusDeprecated},
+	StatusValidated: {StatusCommitted, StatusDeprecated},
+	StatusCommitted: {StatusDeprecated},
 }
 
 // ValidTransition checks if a state transition is allowed.
