@@ -57,7 +57,18 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What's New in v10.5.3
+## What's New in v10.5.4
+
+**Dead-code cleanup: the memory lifecycle now states what the chain actually does.** Internal-only — no consensus rule, transaction handler, or AppHash surface changes; replay is byte-identical and the SDK is a lockstep bump.
+
+- **Dropped the unreachable `challenged` lifecycle transitions.** The `validTransitions` table advertised a `committed→challenged→committed` review/overturn path, but since v4.5.0 a challenge that passes BFT consensus is *decisive* — it deprecates the memory in one step (`committed→deprecated`), and nothing ever sets `challenged`. That table is descriptive (not on the consensus path), so it now reflects the real lifecycle instead of dangling a capability the chain doesn't provide. The `challenged` enum is retained for legacy pre-v4.5.0 on-disk rows, which the boot migration still sweeps to `deprecated`. (#44)
+
+Thanks to @ihubanov for the clean dead-code spot (#44). Challenge stays decisive by design. SDK 10.5.4 (lockstep, no SDK changes).
+
+## Older releases
+
+<details>
+<summary>v10.5.3 — clearance:0 honored on add-member endpoints + SDK GovProposal created_at</summary>
 
 **Two contributor fixes — a clearance-escalation bug on the add-member endpoints, and a Python SDK timestamp readback.** REST/SDK-layer only: no consensus change, no fork, replay is byte-identical.
 
@@ -65,8 +76,7 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 - **Python SDK `GovProposal` reads back `created_at`.** The server always stamps a proposal's creation time and emits it on both the governance list and detail endpoints, but the SDK model dropped it on read, so a caller could never see when a proposal was raised. Now an additive optional field — older servers that omit it default to `None`. (#42)
 
 Thanks to @ihubanov for both fixes. SDK 10.5.3 carries the `created_at` change.
-
-## Older releases
+</details>
 
 <details>
 <summary>v10.5.2 — always-on pending-plan pump un-freezes quiescent chains</summary>
