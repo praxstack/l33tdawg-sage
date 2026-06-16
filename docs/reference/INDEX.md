@@ -20,6 +20,7 @@ or `api/openapi.yaml`, **trust this reference** — those two have known drift (
 | [`rest-api.md`](rest-api.md) | Every HTTP endpoint (62): method, path, request/response fields, auth, clearance, curl examples. |
 | [`python-sdk.md`](python-sdk.md) | Every `SageClient` / `AsyncSageClient` method, signatures, and the REST endpoint each maps to. Package: `sage-agent-sdk`. |
 | [`mcp-tools.md`](mcp-tools.md) | Every `sage_*` MCP tool, parameters, and *when* to call it. Start here if you are an LLM agent with SAGE wired in. |
+| [`environment-variables.md`](environment-variables.md) | Every env var SAGE reads (`SAGE_HOME`, embeddings, hybrid recall, TLS, snapshots, …), with defaults and the `file:line` that consumes each. |
 | [`concepts/memory-lifecycle.md`](concepts/memory-lifecycle.md) | submit → proposed → committed/deprecated; node-local vs on-chain data; confidence decay; corroboration. |
 | [`concepts/clearance-classification.md`](concepts/clearance-classification.md) | Per-record classification (0–4), the REST-vs-wire default gotcha, and the per-record query gate. |
 | [`concepts/rbac-orgs-federation.md`](concepts/rbac-orgs-federation.md) | Orgs, departments, agent clearance, cross-org federation, and the five-gate query pipeline. |
@@ -38,6 +39,7 @@ or `api/openapi.yaml`, **trust this reference** — those two have known drift (
 | Sign a request correctly | **Request signing** below |
 | Know what "committed" actually means | [`concepts/consensus-confidence-decay.md`](concepts/consensus-confidence-decay.md) |
 | Know if a memory will decay | [`concepts/memory-lifecycle.md`](concepts/memory-lifecycle.md) |
+| Configure SAGE via environment variables | [`environment-variables.md`](environment-variables.md) |
 
 ---
 

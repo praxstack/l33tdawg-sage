@@ -114,6 +114,10 @@ sage-gui setup
 }
 ```
 
+> `SAGE_HOME` sets SAGE's data directory (default `~/.sage`). For the full list of
+> environment variables — embeddings, hybrid recall, TLS, snapshots, and more —
+> see [`reference/environment-variables.md`](reference/environment-variables.md).
+
 ### 2. Add to Claude Desktop
 
 1. Open **Claude Desktop** > **Settings** > **Developer**

@@ -57,7 +57,19 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What's New in v10.6.0
+## What's New in v10.6.1
+
+**A complete, code-verified environment-variable reference — and `sage-gui` help now points to it.** v10.6.1 is a docs-and-help patch release: no consensus rule, transaction handler, or AppHash surface changes, replay is byte-identical, and the SDK is a lockstep bump.
+
+- **New `docs/reference/environment-variables.md`.** SAGE reads ~30 environment variables, but only four were documented (and only buried in the CLI help). There is no `SAGE_ROOT_DIR` — a common guess — the data directory is set by `SAGE_HOME`. The new reference lists every variable SAGE actually reads — paths/identity, server/networking, vault, embeddings, hybrid recall & reranking, snapshots, TLS, the `amid` indexer — each with its default and the `file:line` that consumes it, with test-only and OS-provided variables called out as out-of-scope. Linked from `docs/reference/INDEX.md` and `docs/GETTING_STARTED.md`.
+- **`sage-gui` help expanded.** The `Environment:` block now covers the common variables (adds `SAGE_IDENTITY_PATH`, `SAGE_PASSPHRASE`, `REST_ADDR`, and the `SAGE_EMBEDDING_*` family) and points to the full reference.
+
+Documentation and help-text only — no runtime behavior changes. SDK 10.6.1 (lockstep, no SDK changes).
+
+## Older releases
+
+<details>
+<summary>v10.6.0 — corroboration_count on recall + sage_link MCP tool</summary>
 
 **Two read-side surfacings that let agents reason over their own memory graph — a corroboration signal on recall, and typed memory links from MCP.** v10.6.0 is a non-fork minor release: it adds no consensus rule, transaction handler, or AppHash surface, so a mixed v10.5.x / v10.6.0 cluster computes identical state. Both changes expose capability the node already held but never surfaced on read.
 
@@ -65,8 +77,7 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 - **New `sage_link` MCP tool — typed memory relationships.** The `/v1/memory/link` endpoint always accepted a free-form `link_type`, but the only MCP path that created links (`sage_task`) hardcoded `related`, so agents could build a flat related-only mesh but never record that one memory *supports*, *contradicts*, *causes*, *precedes*, or *refines* another. `sage_link` is the MCP surface over that existing endpoint: a directional `source → target` edge with a caller-chosen `link_type` passed verbatim (defaulting to `related`). Agents can now build a typed knowledge graph over memory. (#46)
 
 Both are additive read-side/MCP-surface changes — no consensus-path code touched, replay is byte-identical, and the SDK is a lockstep bump. Thanks to @ihubanov for both (#45, #46). SDK 10.6.0.
-
-## Older releases
+</details>
 
 <details>
 <summary>v10.5.4 — challenged-state dead-code cleanup</summary>

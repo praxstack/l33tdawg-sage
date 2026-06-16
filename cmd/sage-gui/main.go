@@ -102,11 +102,15 @@ Commands:
   status    Show node status
   version   Print version
 
-Environment:
-  SAGE_HOME       Data directory (default: ~/.sage)
-  SAGE_API_URL    REST API base URL (default: http://localhost:8080)
-  SAGE_AGENT_KEY  Explicit agent key path (overrides per-project derivation)
+Environment (common — full list: docs/reference/environment-variables.md):
+  SAGE_HOME           Data directory (default: ~/.sage)
+  SAGE_API_URL        REST API base URL (default: http://localhost:8080)
+  SAGE_AGENT_KEY      Explicit agent key path (overrides per-project derivation)
+  SAGE_IDENTITY_PATH  Identity key path (takes precedence over SAGE_AGENT_KEY)
+  SAGE_PASSPHRASE     Vault passphrase (else prompted on a TTY)
+  REST_ADDR           REST listen address (default: 127.0.0.1:8080)
   SAGE_SNAPSHOT_KEEP  Snapshots to retain (newest N + per-version anchors; default 5)
+  SAGE_EMBEDDING_*    Embedding provider/model/dimension (see reference)
 
 MCP Subcommands:
   mcp             Run as MCP server (stdio)
