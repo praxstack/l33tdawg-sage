@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -69,6 +70,13 @@ type DashboardHandler struct {
 	embedder    Embedder
 	SSE         *SSEBroadcaster
 	Version     string
+
+	// graphCache memoises the expensive /memory/graph response with a
+	// stale-while-revalidate policy: the first load computes synchronously, every
+	// repeat load is served instantly from cache while a background refresh keeps
+	// it warm. Keyed by query params + RBAC scope so it never leaks across agents.
+	graphCacheMu sync.Mutex
+	graphCache   map[string]*graphCacheEntry
 	ExecPath    string // path to sage-gui binary, used by /v1/mcp-config
 	Encrypted   atomic.Bool
 	VaultLocked atomic.Bool // true when encryption is enabled but vault hasn't been unlocked yet
@@ -892,7 +900,22 @@ type graphEdge struct {
 	Type   string `json:"type"` // "domain", "parent", "triple"
 }
 
-// handleGraph returns all memories with edges for force-directed layout.
+type graphCacheEntry struct {
+	body       []byte
+	at         time.Time
+	refreshing bool
+}
+
+const (
+	graphCacheFresh = 25 * time.Second // serve from cache without refreshing if younger than this
+	graphCacheTTL   = 10 * time.Minute // hard cap — older than this, recompute synchronously
+)
+
+// handleGraph returns all memories with edges for force-directed layout. The
+// graph is expensive to compute on large brains (per-domain sampling + stats),
+// so it is memoised stale-while-revalidate: the first load computes
+// synchronously, repeat loads are served instantly while a background refresh
+// keeps the entry warm. The actual build lives in computeGraphJSON.
 func (h *DashboardHandler) handleGraph(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	// Node cap: default 500 (bounded client load). Operators can raise it for
@@ -905,11 +928,89 @@ func (h *DashboardHandler) handleGraph(w http.ResponseWriter, r *http.Request) {
 	if limit <= 0 || limit > maxNodes {
 		limit = maxNodes
 	}
+	statusParam := q.Get("status")
+	drillDomain := q.Get("domain")
+	// On-chain RBAC: if the request comes from an MCP agent, enforce agent isolation.
+	allowedAgents, seeAll := h.resolveAgentRBAC(r)
 
+	// Cache key: every input that changes the output, incl. the RBAC scope so a
+	// restricted agent is never served an operator (or another agent's) graph.
+	scope := append([]string(nil), allowedAgents...)
+	sort.Strings(scope)
+	cacheKey := fmt.Sprintf("%v|%s|%s|%d|%s", seeAll, statusParam, drillDomain, limit, strings.Join(scope, ","))
+
+	if body := h.serveGraphFromCache(cacheKey, statusParam, drillDomain, limit, seeAll, allowedAgents); body != nil {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+		return
+	}
+	body, err := h.computeGraphJSON(r.Context(), statusParam, drillDomain, limit, seeAll, allowedAgents)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	h.putGraphCache(cacheKey, body)
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(body)
+}
+
+// serveGraphFromCache returns a cached graph body when one is fresh enough to
+// use, triggering a single background refresh once an entry is past its fresh
+// window. Returns nil on a miss (the caller then computes synchronously).
+func (h *DashboardHandler) serveGraphFromCache(key, statusParam, drillDomain string, limit int, seeAll bool, allowedAgents []string) []byte {
+	now := time.Now()
+	h.graphCacheMu.Lock()
+	defer h.graphCacheMu.Unlock()
+	ent := h.graphCache[key]
+	if ent == nil || now.Sub(ent.at) >= graphCacheTTL {
+		return nil
+	}
+	if now.Sub(ent.at) >= graphCacheFresh && !ent.refreshing {
+		ent.refreshing = true
+		go h.refreshGraphCache(key, statusParam, drillDomain, limit, seeAll, allowedAgents)
+	}
+	return ent.body
+}
+
+// putGraphCache stores a freshly-computed body, resetting the map if it has
+// grown unbounded (e.g. from many drill-down domains).
+func (h *DashboardHandler) putGraphCache(key string, body []byte) {
+	h.graphCacheMu.Lock()
+	defer h.graphCacheMu.Unlock()
+	if h.graphCache == nil || len(h.graphCache) > 128 {
+		h.graphCache = make(map[string]*graphCacheEntry)
+	}
+	h.graphCache[key] = &graphCacheEntry{body: body, at: time.Now()}
+}
+
+// refreshGraphCache recomputes a cache entry off the request path (the
+// "revalidate" half of stale-while-revalidate).
+func (h *DashboardHandler) refreshGraphCache(key, statusParam, drillDomain string, limit int, seeAll bool, allowedAgents []string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	body, err := h.computeGraphJSON(ctx, statusParam, drillDomain, limit, seeAll, allowedAgents)
+	h.graphCacheMu.Lock()
+	defer h.graphCacheMu.Unlock()
+	ent := h.graphCache[key]
+	if ent == nil {
+		ent = &graphCacheEntry{}
+		h.graphCache[key] = ent
+	}
+	ent.refreshing = false
+	if err == nil {
+		ent.body = body
+		ent.at = time.Now()
+	}
+}
+
+// computeGraphJSON performs the (expensive) graph build and returns the
+// serialized JSON response. It is a pure function of its inputs, so it is safe
+// to call both on the request path and from the background refresh goroutine.
+func (h *DashboardHandler) computeGraphJSON(ctx context.Context, statusParam, drillDomain string, limit int, seeAll bool, allowedAgents []string) ([]byte, error) {
 	opts := store.ListOptions{
 		Limit:  limit,
 		Sort:   "newest",
-		Status: q.Get("status"), // Allow frontend to filter by status
+		Status: statusParam,
 	}
 	// Default: exclude deprecated memories from graph view
 	if opts.Status == "" {
@@ -920,13 +1021,10 @@ func (h *DashboardHandler) handleGraph(w http.ResponseWriter, r *http.Request) {
 	if opts.Status == "all" {
 		opts.Status = ""
 	}
-	// On-chain RBAC: if request comes from an MCP agent, enforce agent isolation.
-	allowedAgents, seeAll := h.resolveAgentRBAC(r)
 	if !seeAll {
 		opts.SubmittingAgents = allowedAgents
 	}
 	// Drill-down: ?domain=X loads just that lobe's memories.
-	drillDomain := q.Get("domain")
 	if drillDomain != "" {
 		opts.DomainTag = drillDomain
 	}
@@ -935,7 +1033,7 @@ func (h *DashboardHandler) handleGraph(w http.ResponseWriter, r *http.Request) {
 	var grandTotal int
 	var domainCounts map[string]int
 	if seeAll {
-		if stats, sErr := h.store.GetStats(r.Context()); sErr == nil && stats != nil {
+		if stats, sErr := h.store.GetStats(ctx); sErr == nil && stats != nil {
 			grandTotal = stats.TotalMemories
 			domainCounts = stats.ByDomain
 		}
@@ -953,15 +1051,14 @@ func (h *DashboardHandler) handleGraph(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case drillDomain != "":
 		opts.Sort = "confidence"
-		records, _, err = h.store.ListMemories(r.Context(), opts)
+		records, _, err = h.store.ListMemories(ctx, opts)
 	case seeAll && grandTotal > limit && len(domainCounts) > 1:
-		records = h.stratifiedSample(r.Context(), opts, domainCounts, grandTotal, limit)
+		records = h.stratifiedSample(ctx, opts, domainCounts, grandTotal, limit)
 	default:
-		records, _, err = h.store.ListMemories(r.Context(), opts)
+		records, _, err = h.store.ListMemories(ctx, opts)
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
+		return nil, err
 	}
 
 	nodes := make([]graphNode, 0, len(records))
@@ -972,11 +1069,11 @@ func (h *DashboardHandler) handleGraph(w http.ResponseWriter, r *http.Request) {
 	for i, rec := range records {
 		memIDs[i] = rec.MemoryID
 	}
-	tagMap, _ := h.store.GetTagsBatch(r.Context(), memIDs)
+	tagMap, _ := h.store.GetTagsBatch(ctx, memIDs)
 	// Batched corroboration counts for all rendered nodes — one query instead of
 	// one GetCorroborations per node (the per-node form was an N+1 that made the
 	// graph endpoint slow on large brains).
-	corrCounts, _ := h.store.GetCorroborationCounts(r.Context(), memIDs)
+	corrCounts, _ := h.store.GetCorroborationCounts(ctx, memIDs)
 
 	// Build domain groups for edge generation
 	domainMemories := make(map[string][]string)
@@ -1019,7 +1116,7 @@ func (h *DashboardHandler) handleGraph(w http.ResponseWriter, r *http.Request) {
 	// in memIDs (the RBAC-visible set), so the connectome never surfaces a link to
 	// a memory the caller cannot see — and it is a single query, not one per node.
 	seenLink := make(map[string]bool)
-	if typed, lErr := h.store.GetLinksAmong(r.Context(), memIDs); lErr == nil {
+	if typed, lErr := h.store.GetLinksAmong(ctx, memIDs); lErr == nil {
 		for _, l := range typed {
 			key := l.SourceID + "\x00" + l.TargetID + "\x00" + l.LinkType
 			if seenLink[key] {
@@ -1046,7 +1143,7 @@ func (h *DashboardHandler) handleGraph(w http.ResponseWriter, r *http.Request) {
 		resp["total"] = grandTotal
 		resp["domain_counts"] = domainCounts
 	}
-	writeJSONResp(w, http.StatusOK, resp)
+	return json.Marshal(resp)
 }
 
 // stratifiedSample draws a representative, importance-ranked sample for the

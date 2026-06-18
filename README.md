@@ -57,7 +57,18 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What's New in v10.8.1
+## What's New in v10.8.2
+
+**Memory-graph caching — instant repeat loads.** Server-side only; no consensus, AppHash, transaction, or key-encoding change; replay is byte-identical; SDK is a lockstep bump.
+
+- **Stale-while-revalidate cache for `/v1/dashboard/memory/graph`.** Even after the v10.8.1 N+1 fix, computing the graph on a large brain (per-domain importance sampling + stats over thousands of memories) is genuinely expensive, and nothing cached it — so every time you navigated back to the brain it recomputed from scratch. The endpoint now memoises its result: the first load computes, and every repeat load is served **instantly** from cache while a background refresh keeps the entry warm (so the data stays fresh without ever blocking the view). The cache is keyed by query params **and** RBAC scope, so it never leaks across agents, and it bounds its own size.
+
+Server-side performance only. SDK 10.8.2 (lockstep, no SDK changes).
+
+## Older releases
+
+<details>
+<summary>v10.8.1 — faster memory-graph endpoint (N+1 fix) + 2D loading hint + collapsible domain filter</summary>
 
 **Performance + UX patch for the new brain views.** Server-side and dashboard only — no consensus rule, AppHash surface, transaction handler, or key-encoding change; replay is byte-identical and the SDK is a lockstep bump.
 
@@ -66,8 +77,7 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 - **Collapsible domain filter.** With hundreds of domains the filter strip could grow to fill the view; it now collapses by default (still surfacing any active filters), expands on click, and is height-capped + scrollable when expanded so it never crowds out the graph.
 
 Dashboard and performance only. SDK 10.8.1 (lockstep, no SDK changes).
-
-## Older releases
+</details>
 
 <details>
 <summary>v10.8.0 — 3D MRI memory-brain (opt-in) + SSE streaming fix + sage_link allowlist</summary>
