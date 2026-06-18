@@ -57,13 +57,13 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What's New in v10.8.2
+## What's New in v10.8.3
 
 **Memory-graph caching — instant repeat loads.** Server-side only; no consensus, AppHash, transaction, or key-encoding change; replay is byte-identical; SDK is a lockstep bump.
 
 - **Stale-while-revalidate cache for `/v1/dashboard/memory/graph`.** Even after the v10.8.1 N+1 fix, computing the graph on a large brain (per-domain importance sampling + stats over thousands of memories) is genuinely expensive, and nothing cached it — so every time you navigated back to the brain it recomputed from scratch. The endpoint now memoises its result: the first load computes, and every repeat load is served **instantly** from cache while a background refresh keeps the entry warm (so the data stays fresh without ever blocking the view). The cache is keyed by query params **and** RBAC scope, so it never leaks across agents, and it bounds its own size.
 
-Server-side performance only. SDK 10.8.2 (lockstep, no SDK changes).
+Server-side performance only. SDK 10.8.3 (lockstep, no SDK changes).
 
 ## Older releases
 
