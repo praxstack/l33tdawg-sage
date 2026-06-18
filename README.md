@@ -57,15 +57,26 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What's New in v10.8.4
+## What's New in v10.8.5
+
+**A real anatomical 3D brain, plus a dependency security patch.** No consensus, AppHash, transaction, or key-encoding change; replay is byte-identical and the SDK is a lockstep bump.
+
+- **Bundled anatomical brain mesh (CC BY 4.0).** The MRI view now renders the memory cloud inside an actual anatomical brain mesh (cerebrum + brainstem) — *"Human brain, Cerebrum & Brainstem"* by FrankJohansson, extracted to a geometry-only OBJ (textures stripped, ~1.5 MB) and rendered as an additive-blended wireframe that glows under the bloom pass — the look the procedural hull could only approximate. The procedurally-generated hull from v10.8.4 remains the automatic fallback when no mesh is present. The mesh is a **separately-licensed third-party asset** ([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), attribution-only — not Apache-2.0); see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The SAGE source stays Apache-2.0.
+- **Security: `go-chi/chi` → v5.2.4.** Clears [CVE-2025-69725](https://github.com/advisories/GHSA-mqqf-5wvp-8fh8) (an open-redirect in chi's `RedirectSlashes` middleware). SAGE never wired up that middleware, so it was not exposed — the bump just keeps the dependency tree clean.
+
+SDK 10.8.5 (lockstep, no SDK changes).
+
+## Older releases
+
+<details>
+<summary>v10.8.4 — richer procedural brain hull for the MRI view</summary>
 
 **A better-looking 3D brain.** Dashboard visuals only; no consensus, AppHash, transaction, or key-encoding change; SDK is a lockstep bump.
 
-- **Richer procedural brain hull.** The MRI view's default (no-asset) brain is now a much denser, more anatomical wireframe — finer multi-octave cortical folding (gyri/sulci), a deep sagittal fissure between the hemispheres, a cerebellum bulge, and additive-blended lines that glow under the bloom pass for a luminous "neural tangle," instead of the previous smooth low-poly blob. Still 100% generated — no external mesh, so the repo stays cleanly Apache-2.0. To use a real anatomical mesh instead, drop a **CC0 / public-domain** `brain.obj` into `web/static/assets/`; the loader validates it and prefers it over the procedural hull.
+- **Richer procedural brain hull.** The MRI view's default (no-asset) brain is now a much denser, more anatomical wireframe — finer multi-octave cortical folding (gyri/sulci), a deep sagittal fissure between the hemispheres, a cerebellum bulge, and additive-blended lines that glow under the bloom pass for a luminous "neural tangle," instead of the previous smooth low-poly blob. Still 100% generated — no external mesh. To use a real anatomical mesh instead, drop a `brain.obj` into `web/static/assets/`; the loader validates it and prefers it over the procedural hull.
 
 Dashboard visuals only. SDK 10.8.4 (lockstep, no SDK changes).
-
-## Older releases
+</details>
 
 <details>
 <summary>v10.8.3 — stale-while-revalidate cache for the memory-graph endpoint</summary>
@@ -570,7 +581,7 @@ Go / CometBFT v0.38 / chi / SQLite / Ed25519 + AES-256-GCM + Argon2id / MCP
 
 ## License
 
-Code: [Apache 2.0](LICENSE) | Papers: [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
+Unless otherwise stated, SAGE source code is licensed under [Apache 2.0](LICENSE). Papers: [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Some bundled visual assets are third-party works under their own licenses (e.g. the 3D MRI brain mesh, CC BY 4.0) — see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Author
 

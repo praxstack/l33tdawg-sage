@@ -342,7 +342,7 @@ export function mountMriBrain(container, opts = {}) {
         const pos=g.getAttribute('position');
         if(!pos || pos.count<3 || !g.index || !g.index.count){ g.dispose(); return; } // not a real mesh (e.g. SPA 200 fallback) — keep procedural
         const s=255/((g.boundingSphere&&g.boundingSphere.radius)||1); // enclose the node cloud
-        brainMat=new THREE.MeshBasicMaterial({color:0x6cc0ff,wireframe:true,transparent:true,opacity:curOpacity,depthWrite:false});
+        brainMat=new THREE.MeshBasicMaterial({color:0x6cc0ff,wireframe:true,transparent:true,opacity:curOpacity,depthWrite:false,blending:THREE.AdditiveBlending}); // additive → the dense anatomical wireframe glows under the bloom pass
         const wf=new THREE.Mesh(g,brainMat); wf.scale.setScalar(s); sc.add(wf);
         surfMat=new THREE.MeshBasicMaterial({color:0x14304e,transparent:true,opacity:curOpacity*0.5,side:THREE.BackSide,depthWrite:false});
         const surf=new THREE.Mesh(g,surfMat); surf.scale.setScalar(s); sc.add(surf);

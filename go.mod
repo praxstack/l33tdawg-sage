@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	github.com/cometbft/cometbft v0.38.23
 	github.com/dgraph-io/badger/v4 v4.5.0
-	github.com/go-chi/chi/v5 v5.2.2
+	github.com/go-chi/chi/v5 v5.2.4
 	github.com/go-chi/cors v1.2.1
 	github.com/go-chi/httprate v0.14.1
 	github.com/google/uuid v1.6.0
