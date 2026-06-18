@@ -57,15 +57,25 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What's New in v10.8.3
+## What's New in v10.8.4
+
+**A better-looking 3D brain.** Dashboard visuals only; no consensus, AppHash, transaction, or key-encoding change; SDK is a lockstep bump.
+
+- **Richer procedural brain hull.** The MRI view's default (no-asset) brain is now a much denser, more anatomical wireframe — finer multi-octave cortical folding (gyri/sulci), a deep sagittal fissure between the hemispheres, a cerebellum bulge, and additive-blended lines that glow under the bloom pass for a luminous "neural tangle," instead of the previous smooth low-poly blob. Still 100% generated — no external mesh, so the repo stays cleanly Apache-2.0. To use a real anatomical mesh instead, drop a **CC0 / public-domain** `brain.obj` into `web/static/assets/`; the loader validates it and prefers it over the procedural hull.
+
+Dashboard visuals only. SDK 10.8.4 (lockstep, no SDK changes).
+
+## Older releases
+
+<details>
+<summary>v10.8.3 — stale-while-revalidate cache for the memory-graph endpoint</summary>
 
 **Memory-graph caching — instant repeat loads.** Server-side only; no consensus, AppHash, transaction, or key-encoding change; replay is byte-identical; SDK is a lockstep bump.
 
 - **Stale-while-revalidate cache for `/v1/dashboard/memory/graph`.** Even after the v10.8.1 N+1 fix, computing the graph on a large brain (per-domain importance sampling + stats over thousands of memories) is genuinely expensive, and nothing cached it — so every time you navigated back to the brain it recomputed from scratch. The endpoint now memoises its result: the first load computes, and every repeat load is served **instantly** from cache while a background refresh keeps the entry warm (so the data stays fresh without ever blocking the view). The cache is keyed by query params **and** RBAC scope, so it never leaks across agents, and it bounds its own size.
 
 Server-side performance only. SDK 10.8.3 (lockstep, no SDK changes).
-
-## Older releases
+</details>
 
 <details>
 <summary>v10.8.1 — faster memory-graph endpoint (N+1 fix) + 2D loading hint + collapsible domain filter</summary>

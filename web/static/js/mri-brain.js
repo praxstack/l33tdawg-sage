@@ -51,24 +51,35 @@ function parseOBJ(text) {
   return g;
 }
 
-// Procedural brain-shaped wireframe hull: a subdivided sphere displaced into
-// two hemispheres (a sagittal longitudinal fissure) with gyri/sulci folds and
-// brain proportions. License-free (generated), lightweight, and reads as a
-// brain — unlike a plain globe. Overridden by /ui/assets/brain.obj if present.
+// Procedural brain-shaped wireframe hull: a densely-subdivided sphere displaced
+// into two hemispheres (a sagittal longitudinal fissure) with multi-octave
+// gyri/sulci folding, a cerebellum bulge, and brain proportions. License-free
+// (generated), and reads convincingly as a brain. Overridden by an anatomical
+// /ui/assets/brain.obj if one is present.
 function makeBrainGeometry() {
-  const g = new THREE.IcosahedronGeometry(1, 5);
+  // detail 6 (~82k tris) — a much finer, more filament-like wireframe than the
+  // old detail-5; still a one-time, zero-per-frame cost.
+  const g = new THREE.IcosahedronGeometry(1, 6);
   const p = g.attributes.position, v = new THREE.Vector3();
   for (let i = 0; i < p.count; i++) {
     v.fromBufferAttribute(p, i).normalize();
     const x = v.x, y = v.y, z = v.z;
+    // Cortical folding — six octaves of gyri/sulci, increasingly fine, so the
+    // surface reads as convoluted cortex rather than a lumpy ball.
     let r = 1
-      + 0.055 * Math.sin(9 * z + 3 * y)
-      + 0.050 * Math.sin(10 * y + 4 * x)
-      + 0.045 * Math.sin(11 * x + 6 * z)
-      + 0.030 * Math.sin(16 * z) * Math.cos(14 * y);
-    r -= Math.exp(-(x * x) * 55) * 0.16 * Math.max(0, y); // longitudinal fissure
+      + 0.052 * Math.sin(8 * z + 3 * y)
+      + 0.044 * Math.sin(10 * y + 4 * x)
+      + 0.040 * Math.sin(12 * x + 6 * z)
+      + 0.028 * Math.sin(17 * z) * Math.cos(15 * y)
+      + 0.020 * Math.sin(23 * y + 14 * x)
+      + 0.014 * Math.sin(29 * x + 19 * z);
+    // Deep sagittal fissure splitting the two hemispheres along the midline.
+    r -= Math.exp(-(x * x) * 60) * 0.20 * Math.max(0, y);
+    // Cerebellum: a tightly-folded bulge tucked under the posterior-inferior.
+    const cb = Math.exp(-((z + 0.8) * (z + 0.8) * 5 + (y + 0.5) * (y + 0.5) * 6 + x * x * 3));
+    r += cb * (0.035 + 0.045 * Math.abs(Math.sin(38 * z + 22 * x)));
     v.multiplyScalar(r);
-    v.x *= 0.90; v.y *= 0.80; v.z *= 1.18;                // brain proportions
+    v.x *= 0.86; v.y *= 0.80; v.z *= 1.20;                // brain proportions (long front-back, narrow across)
     if (v.y < -0.3) v.y = -0.3 + (v.y + 0.3) * 0.5;       // flatten the underside
     p.setXYZ(i, v.x, v.y, v.z);
   }
@@ -169,7 +180,7 @@ export function mountMriBrain(container, opts = {}) {
       <div><div class="n nc">0</div><div class="l">consolidated</div></div>
       <div class="btn b-rot">⏸ pause</div>
       <div class="btn b-flow">⚡ flow: on</div>
-      <label class="sld">skull <input class="b-op" type="range" min="0" max="60" value="5"></label>
+      <label class="sld">skull <input class="b-op" type="range" min="0" max="60" value="8"></label>
     </div>
     <div class="tip"></div>
     <div class="flag"></div>`;
@@ -219,7 +230,7 @@ export function mountMriBrain(container, opts = {}) {
   }
 
   let Graph = null, controls = null, disposed = false, flow = true, scanning = true;
-  let hullMat = null, brainMat = null, surfMat = null, curOpacity = 0.05;
+  let hullMat = null, brainMat = null, surfMat = null, curOpacity = 0.08;
   let currentDomain = null;                 // drill-down lobe (null = overview)
   const baseUrl = fetchUrl;
   const urlFor = () => baseUrl + (currentDomain ? '&domain=' + encodeURIComponent(currentDomain) : '');
@@ -313,8 +324,11 @@ export function mountMriBrain(container, opts = {}) {
 
     try { const sc=Graph.scene();
       // Procedural brain-shaped wireframe hull (default — no external asset).
+      // Additive blending makes overlapping wireframe lines accumulate into a
+      // glow (amplified by the bloom pass), so the dense fold structure reads as
+      // a luminous neural tangle rather than a flat mesh.
       const hull=new THREE.Mesh(makeBrainGeometry(),
-        new THREE.MeshBasicMaterial({color:0x4aa3ff,wireframe:true,transparent:true,opacity:curOpacity,depthWrite:false}));
+        new THREE.MeshBasicMaterial({color:0x4aa3ff,wireframe:true,transparent:true,opacity:curOpacity,depthWrite:false,blending:THREE.AdditiveBlending}));
       hull.scale.setScalar(185); sc.add(hull); hullMat=hull.material;
       // Optional real anatomical mesh override at /ui/assets/brain.obj. No mesh
       // ships with SAGE, so this normally 404s and we keep the procedural hull.
