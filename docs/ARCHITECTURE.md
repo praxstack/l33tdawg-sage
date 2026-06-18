@@ -30,7 +30,7 @@ This document covers the full multi-node BFT deployment, Python SDK, REST API, m
 
 ![SAGE Architecture — Self-Governed, Byzantine Fault Tolerant Memory Infrastructure for AI Agents](sage_architecture-17062026.png)
 
-*Editable Mermaid source lives at `docs/sage_architecture-17062026.mmd` (kept locally, not tracked). Regenerate this PNG after editing it with: `mmdc -i docs/sage_architecture-17062026.mmd -o docs/sage_architecture-17062026.png -s 2`. Verified against [`docs/reference/`](reference/INDEX.md) at v10.6.1.*
+*Editable vector source: `docs/sage_architecture-17062026.svg` (kept locally). Regenerate this PNG with: `rsvg-convert -w 2400 docs/sage_architecture-17062026.svg -o docs/sage_architecture-17062026.png`. Verified against [`docs/reference/`](reference/INDEX.md) at v10.6.1.*
 
 ### How it works
 
