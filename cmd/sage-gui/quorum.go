@@ -130,9 +130,18 @@ func runQuorumInit() error {
 	pubKeyB64 := base64.StdEncoding.EncodeToString(pv.Key.PubKey.Bytes())
 	genesisTime := cmttime.Now()
 
+	// Mint a globally-unique chain_id for this quorum, bound to the initiator's
+	// validator key + genesis time + entropy. Every joiner inherits this exact id
+	// via the manifest (quorum-join adopts peerManifest.ChainID), so the whole
+	// quorum shares one unique network id distinct from any other SAGE quorum.
+	chainID, err := mintChainID("sage-quorum", [][]byte{pv.Key.PubKey.Bytes()}, genesisTime)
+	if err != nil {
+		return fmt.Errorf("mint chain_id: %w", err)
+	}
+
 	// Generate TLS CA and node certificate for encrypted quorum communication.
 	certsDir := filepath.Join(home, "certs")
-	caCert, caKey, err := tlsca.LoadOrGenerateCA(certsDir, "sage-quorum")
+	caCert, caKey, err := tlsca.LoadOrGenerateCA(certsDir, chainID)
 	if err != nil {
 		return fmt.Errorf("generate TLS CA: %w", err)
 	}
@@ -163,7 +172,7 @@ func runQuorumInit() error {
 	}
 
 	manifest := QuorumManifest{
-		ChainID:        "sage-quorum",
+		ChainID:        chainID,
 		GenesisTime:    genesisTime.Format(time.RFC3339Nano),
 		CACert:         caCertPEM,
 		CAKeyEncrypted: caKeyEncrypted,
@@ -264,6 +273,19 @@ func runQuorumJoin() error {
 	if peerManifest.LegacyCAKey != "" {
 		return fmt.Errorf("manifest contains a plaintext ca_key field — this format is no longer accepted. " +
 			"Re-run sage-gui quorum-init on the initiator to produce an encrypted manifest, then retry quorum-join")
+	}
+
+	// Same-id federation guard: refuse to adopt a peer chain_id that equals this
+	// node's own already-established chain_id. Two independently-minted unique ids
+	// colliding is astronomically unlikely (130-bit entropy), so this almost
+	// always means the operator is joining a manifest they themselves produced,
+	// which would conflate two distinct networks under one id. A fresh node with
+	// no genesis yet has no id to collide, so this only fires on an already-
+	// initialised chain. (This is the same-id refusal the v11 cross-network
+	// federation-join ceremony will generalise; quorum-join models it here.)
+	if localID, localErr := readChainIDFromGenesis(cometHome); localErr == nil && localID != "" && localID == peerManifest.ChainID {
+		return fmt.Errorf("refusing to join: peer chain_id %q equals this node's own chain_id — "+
+			"a network cannot federate with itself (are you joining your own manifest?)", peerManifest.ChainID)
 	}
 
 	// Decrypt the CA private key with the operator passphrase, but only if
@@ -429,6 +451,7 @@ func runQuorumJoin() error {
 	}
 	cfg.Quorum.Enabled = true
 	cfg.Quorum.Peers = peers
+	cfg.ChainID = peerManifest.ChainID // record the adopted federated chain_id
 	if err := SaveConfig(cfg); err != nil {
 		return fmt.Errorf("save config: %w", err)
 	}

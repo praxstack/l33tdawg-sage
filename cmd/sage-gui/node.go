@@ -114,6 +114,23 @@ func runServe() (rerr error) {
 		return initErr
 	}
 
+	// Reconcile the persisted chain_id from the authoritative genesis into
+	// config.yaml so it is surfaced read-only and available before CometBFT is
+	// up (the federation identity + same-id collision guard depend on it). This
+	// grandfathers existing chains: their genesis id — including legacy
+	// "sage-personal"/"sage-quorum" — flows into config on next boot with no
+	// destructive re-genesis. New chains minted a unique id in ensureGenesisSeed
+	// above. One-shot: after the first reconcile cfg.ChainID matches and no
+	// further write occurs.
+	if genChainID, cidErr := readChainIDFromGenesis(cometHome); cidErr == nil && genChainID != "" && genChainID != cfg.ChainID {
+		cfg.ChainID = genChainID
+		if saveErr := SaveConfig(cfg); saveErr != nil {
+			logger.Warn().Err(saveErr).Msg("failed to persist reconciled chain_id to config.yaml")
+		} else {
+			logger.Info().Str("chain_id", genChainID).Msg("reconciled chain_id from genesis")
+		}
+	}
+
 	// Create SQLite store. ctx is cancelled on shutdown (below) so the long-lived
 	// goroutines that take it — the memory auto-voter, pipeline TTL cleanup — stop
 	// cleanly instead of leaking until process exit.
@@ -659,10 +676,15 @@ func runServe() (rerr error) {
 	var tlsServer *http.Server
 	certsDir := filepath.Join(SageHome(), "certs")
 	if !tlsca.CertsExist(certsDir) {
-		// Auto-generate self-signed certs for HTTPS.
-		chainID := "sage-personal"
-		if cfg.Quorum.Enabled {
-			chainID = "sage-quorum"
+		// Auto-generate self-signed certs for HTTPS. The CA CommonName tracks the
+		// unique chain_id (reconciled above); fall back to the legacy label only
+		// for a chain whose genesis somehow predates chain_id reconciliation.
+		chainID := cfg.ChainID
+		if chainID == "" {
+			chainID = "sage-personal"
+			if cfg.Quorum.Enabled {
+				chainID = "sage-quorum"
+			}
 		}
 		caCert, caKey, caErr := tlsca.LoadOrGenerateCA(certsDir, chainID)
 		if caErr != nil {
@@ -1029,10 +1051,19 @@ func initCometBFTConfig(home string) error {
 		return fmt.Errorf("generate node key: %w", err)
 	}
 
-	// Create genesis with single validator
+	// Create genesis with single validator. Mint a globally-unique chain_id so no
+	// two independently-created SAGE networks collide — the federation identity,
+	// co-commit cross-anchors, and cross-chain replay defence all assume chain_id
+	// is unique (every personal node was previously born as the identical
+	// "sage-personal"). Bound to this node's validator key + genesis time + entropy.
+	genesisTime := cmttime.Now()
+	chainID, mintErr := mintChainID("sage-personal", [][]byte{pv.Key.PubKey.Bytes()}, genesisTime)
+	if mintErr != nil {
+		return fmt.Errorf("mint chain_id: %w", mintErr)
+	}
 	genDoc := cmttypes.GenesisDoc{
-		ChainID:         "sage-personal",
-		GenesisTime:     cmttime.Now(),
+		ChainID:         chainID,
+		GenesisTime:     genesisTime,
 		ConsensusParams: cmttypes.DefaultConsensusParams(),
 		Validators: []cmttypes.GenesisValidator{
 			{

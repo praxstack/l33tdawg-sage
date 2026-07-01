@@ -31,6 +31,13 @@ type Config struct {
 	AgentKey   string           `yaml:"agent_key_file"`
 	BlockTime  string           `yaml:"block_time"` // e.g. "1s", "3s"
 
+	// ChainID is a read-only mirror of the network's globally-unique chain_id,
+	// reconciled from the authoritative CometBFT genesis on every serve (see
+	// readChainIDFromGenesis). It is NOT user-editable and has no env override —
+	// genesis is the source of truth; this cache just makes the id available
+	// before CometBFT is up and for the federation identity/collision guard.
+	ChainID string `yaml:"chain_id,omitempty"`
+
 	// RetainBlocks is the CometBFT block-retention window: Commit reports
 	// RetainHeight = height - RetainBlocks, and CometBFT prunes blocks BELOW
 	// that height — the retain height itself survives, so the blockstore keeps
