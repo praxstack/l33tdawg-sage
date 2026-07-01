@@ -123,8 +123,11 @@ func runServe() (rerr error) {
 	// above. One-shot: after the first reconcile cfg.ChainID matches and no
 	// further write occurs.
 	if genChainID, cidErr := readChainIDFromGenesis(cometHome); cidErr == nil && genChainID != "" && genChainID != cfg.ChainID {
-		cfg.ChainID = genChainID
-		if saveErr := SaveConfig(cfg); saveErr != nil {
+		cfg.ChainID = genChainID // in-memory, for this running process
+		// persistChainID writes ONLY the chain_id delta, preserving the raw
+		// (un-expanded) paths in config.yaml — SaveConfig(cfg) here would bake the
+		// LoadConfig-expanded absolute DataDir/AgentKey into the file.
+		if saveErr := persistChainID(genChainID); saveErr != nil {
 			logger.Warn().Err(saveErr).Msg("failed to persist reconciled chain_id to config.yaml")
 		} else {
 			logger.Info().Str("chain_id", genChainID).Msg("reconciled chain_id from genesis")

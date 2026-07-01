@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,19 +54,25 @@ func TestMintChainID_UniquePerCall(t *testing.T) {
 	}
 }
 
-func TestMintChainID_ValidatorOrderIndependent(t *testing.T) {
+func TestSortedPubkeyBytes_OrderIndependent(t *testing.T) {
 	a := []byte("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	b := []byte("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-	gt := time.Unix(1_700_000_000, 0)
-	// Same set in different order should hash identically (before the salt), but
-	// the salt makes ids differ — so instead assert both are well-formed. The
-	// order-independence guarantee is exercised via the digest, not the final id;
-	// here we just guard against a panic/format regression on multi-validator input.
-	if _, err := mintChainID("sage-quorum", [][]byte{a, b}, gt); err != nil {
-		t.Fatalf("order [a,b]: %v", err)
+	c := []byte("cccccccccccccccccccccccccccccccc")
+
+	// The order-independent digest material MUST be byte-identical regardless of
+	// input order — this is what makes two founders derive the same chain_id from
+	// the same validator set. (The final mintChainID id mixes in random salt, so
+	// it can't be compared across orderings; this helper can.) Mutation guard:
+	// deleting the sort.Slice in sortedPubkeyBytes makes this fail.
+	abc := sortedPubkeyBytes([][]byte{a, b, c})
+	cba := sortedPubkeyBytes([][]byte{c, b, a})
+	bca := sortedPubkeyBytes([][]byte{b, c, a})
+	if !bytes.Equal(abc, cba) || !bytes.Equal(abc, bca) {
+		t.Fatalf("sorted pubkey material must be order-independent:\n abc=%x\n cba=%x\n bca=%x", abc, cba, bca)
 	}
-	if _, err := mintChainID("sage-quorum", [][]byte{b, a}, gt); err != nil {
-		t.Fatalf("order [b,a]: %v", err)
+	// And it must actually contain all the material (len = sum of inputs).
+	if len(abc) != len(a)+len(b)+len(c) {
+		t.Fatalf("sorted material length %d, want %d", len(abc), len(a)+len(b)+len(c))
 	}
 }
 

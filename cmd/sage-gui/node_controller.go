@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -156,15 +155,15 @@ func (c *SageNodeController) StartChain() error {
 func (c *SageNodeController) RegenerateGenesis(validators []orchestrator.ValidatorInfo) error {
 	genesisPath := filepath.Join(c.cometCfg.RootDir, "config", "genesis.json")
 
-	// Read existing genesis to preserve ChainID and ConsensusParams
-	genData, err := os.ReadFile(genesisPath)
+	// Read existing genesis to preserve ChainID and ConsensusParams. Use
+	// GenesisDocFromFile (cmtjson), NOT a stdlib json.Unmarshal: genesis.json is
+	// written by GenesisDoc.SaveAs which string-encodes int64 fields (e.g.
+	// "initial_height":"1") and encodes pub_key as a registered interface type, so
+	// encoding/json fails ("cannot unmarshal string into ... initial_height of
+	// type int64") and the whole redeploy would abort here.
+	existingGen, err := cmttypes.GenesisDocFromFile(genesisPath)
 	if err != nil {
 		return fmt.Errorf("read genesis: %w", err)
-	}
-
-	var existingGen cmttypes.GenesisDoc
-	if err := json.Unmarshal(genData, &existingGen); err != nil {
-		return fmt.Errorf("parse genesis: %w", err)
 	}
 
 	c.logger.Info().

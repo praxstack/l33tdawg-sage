@@ -275,18 +275,17 @@ func runQuorumJoin() error {
 			"Re-run sage-gui quorum-init on the initiator to produce an encrypted manifest, then retry quorum-join")
 	}
 
-	// Same-id federation guard: refuse to adopt a peer chain_id that equals this
-	// node's own already-established chain_id. Two independently-minted unique ids
-	// colliding is astronomically unlikely (130-bit entropy), so this almost
-	// always means the operator is joining a manifest they themselves produced,
-	// which would conflate two distinct networks under one id. A fresh node with
-	// no genesis yet has no id to collide, so this only fires on an already-
-	// initialised chain. (This is the same-id refusal the v11 cross-network
-	// federation-join ceremony will generalise; quorum-join models it here.)
-	if localID, localErr := readChainIDFromGenesis(cometHome); localErr == nil && localID != "" && localID == peerManifest.ChainID {
-		return fmt.Errorf("refusing to join: peer chain_id %q equals this node's own chain_id — "+
-			"a network cannot federate with itself (are you joining your own manifest?)", peerManifest.ChainID)
-	}
+	// NOTE: quorum-join intentionally does NOT refuse a peer chain_id that equals
+	// this node's own. quorum-join's semantics are "adopt the peer's chain and
+	// re-sync" — so an equal id means we are (re-)joining the SAME quorum we
+	// already belong to, which is the legitimate recovery/re-sync path (it wipes
+	// and rebuilds local state from the shared genesis + peers; and repair-chain
+	// refuses quorum nodes, so this is the ONLY local rebuild mechanism for a
+	// quorum member). The same-id REFUSAL belongs to the v11 CROSS-NETWORK
+	// federation-join ceremony (two independent chains that must stay distinct),
+	// not here — placing it in quorum-join would brick recovery while never
+	// catching the "joining your own personal manifest" case (a personal id never
+	// equals a freshly-minted quorum id).
 
 	// Decrypt the CA private key with the operator passphrase, but only if
 	// the manifest actually carries one (the initiator's own follow-up call

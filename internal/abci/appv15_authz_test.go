@@ -194,6 +194,52 @@ func TestAppV15_GrantLevel3(t *testing.T) {
 	assert.Equal(t, uint32(35), four.Code, "post-fork: level 4 still rejected (cap is 3)")
 }
 
+// makeAccessRequestTx builds a signed-proof AccessRequest tx (clone of
+// makeAccessGrantTx).
+func makeAccessRequestTx(t *testing.T, requester agentKey, targetDomain string, level uint8) *tx.ParsedTx {
+	t.Helper()
+	body := []byte(targetDomain)
+	pubKey, sig, bodyHash, ts := signAgentProof(t, requester, body)
+	return &tx.ParsedTx{
+		Type: tx.TxTypeAccessRequest,
+		AccessRequest: &tx.AccessRequest{
+			RequesterID:    requester.id,
+			TargetDomain:   targetDomain,
+			RequestedLevel: level,
+		},
+		AgentPubKey:    pubKey,
+		AgentSig:       sig,
+		AgentBodyHash:  bodyHash,
+		AgentTimestamp: ts,
+	}
+}
+
+// TestAppV15_RequestLevel3 mirrors TestAppV15_GrantLevel3 for the access-REQUEST
+// path (Code 31): the verb-ladder cap raise (2->3) is a consensus-affecting
+// branch (accept => request record written) and must be pinned so a regression
+// can't sail through green tests.
+func TestAppV15_RequestLevel3(t *testing.T) {
+	const domain = "hr.payroll"
+
+	// Pre-fork: level 3 is not requestable (cap 1-2), Code 31.
+	pre := setupTestApp(t)
+	r := newAgentKey(t)
+	preRes := pre.processAccessRequest(makeAccessRequestTx(t, r, domain, 3), 10, time.Now())
+	assert.Equal(t, uint32(31), preRes.Code, "pre-fork: level-3 request rejected")
+	// Pre-fork replay parity: levels 1 and 2 still accepted.
+	assert.Equal(t, uint32(0), pre.processAccessRequest(makeAccessRequestTx(t, r, domain, 1), 11, time.Now()).Code, "pre-fork: level-1 request accepted")
+	assert.Equal(t, uint32(0), pre.processAccessRequest(makeAccessRequestTx(t, r, domain, 2), 12, time.Now()).Code, "pre-fork: level-2 request accepted")
+
+	// Post-fork: level 3 requestable; level 4 still rejected.
+	post := setupTestApp(t)
+	post.appV15AppliedHeight = 5
+	r2 := newAgentKey(t)
+	l3 := post.processAccessRequest(makeAccessRequestTx(t, r2, domain, 3), 20, time.Now())
+	assert.Equal(t, uint32(0), l3.Code, "post-fork: level-3 request accepted: %s", l3.Log)
+	l4 := post.processAccessRequest(makeAccessRequestTx(t, r2, domain, 4), 21, time.Now())
+	assert.Equal(t, uint32(31), l4.Code, "post-fork: level 4 still rejected (cap is 3)")
+}
+
 // TestAppV15_PostRulesTracksFork guards the helper coupling.
 func TestAppV15_PostRulesTracksFork(t *testing.T) {
 	app := setupTestApp(t)

@@ -202,6 +202,49 @@ func expandHome(path string) string {
 	return filepath.Join(userHome, path[2:])
 }
 
+// persistChainID writes ONLY the chain_id into config.yaml, preserving every
+// other field in its on-disk (raw, un-expanded) form. This exists because
+// LoadConfig expands DataDir/AgentKey in place (tilde/relative -> absolute), so
+// SaveConfig(cfg) after a load would bake those into absolute paths and silently
+// drop any tilde/relative form the operator wrote — which then breaks if the
+// config is ever synced to a different home/user/SAGE_HOME. The chain_id
+// reconcile-on-boot fires for every existing node's first v11 boot, so it must
+// not rewrite paths. Re-reads the raw file and rewrites only the delta.
+func persistChainID(chainID string) error {
+	home := SageHome()
+	if err := os.MkdirAll(home, 0700); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	configPath := filepath.Join(home, "config.yaml")
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// No config yet (fresh node): a new file with absolute default paths
+			// is fine — there is no operator-authored tilde/relative form to lose.
+			cfg := DefaultConfig(home)
+			cfg.ChainID = chainID
+			return SaveConfig(cfg)
+		}
+		return fmt.Errorf("read config: %w", err)
+	}
+
+	// Unmarshal into a RAW Config (no path expansion) so paths round-trip verbatim.
+	var raw Config
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+	if raw.ChainID == chainID {
+		return nil // no drift
+	}
+	raw.ChainID = chainID
+	out, err := yaml.Marshal(&raw)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	return os.WriteFile(configPath, out, 0600)
+}
+
 // SaveConfig writes the configuration to ~/.sage/config.yaml.
 func SaveConfig(cfg *Config) error {
 	home := SageHome()

@@ -44,16 +44,27 @@ const maxChainIDLen = 50
 // and the prefix hyphen) is a strict subset of what the legacy "sage-personal"
 // id already used, so it passes every CometBFT genesis/p2p validation the old
 // literal did — only length was ever the risk, and that is bounded here.
+// sortedPubkeyBytes returns the validator pubkeys concatenated in byte-wise
+// sorted order — the order-independent material folded into the chain_id digest.
+// Extracted so the ordering invariant is directly testable: the final chain_id
+// also mixes in random salt, so it can't be compared across input orderings, but
+// this deterministic material can.
+func sortedPubkeyBytes(valPubkeys [][]byte) []byte {
+	sorted := make([][]byte, len(valPubkeys))
+	copy(sorted, valPubkeys)
+	sort.Slice(sorted, func(i, j int) bool { return bytes.Compare(sorted[i], sorted[j]) < 0 })
+	var out []byte
+	for _, pk := range sorted {
+		out = append(out, pk...)
+	}
+	return out
+}
+
 func mintChainID(prefix string, valPubkeys [][]byte, genesisTime time.Time) (string, error) {
 	h := sha256.New()
 
 	// 1. validator pubkeys, sorted for order-independence across founders.
-	sorted := make([][]byte, len(valPubkeys))
-	copy(sorted, valPubkeys)
-	sort.Slice(sorted, func(i, j int) bool { return bytes.Compare(sorted[i], sorted[j]) < 0 })
-	for _, pk := range sorted {
-		h.Write(pk)
-	}
+	h.Write(sortedPubkeyBytes(valPubkeys))
 
 	// 2. genesis time as big-endian UnixNano.
 	var t [8]byte
