@@ -131,6 +131,93 @@ func TestCrossFed_Authz(t *testing.T) {
 	assert.Equal(t, uint32(106), r4.Code, "wildcard treaty requires chain-admin")
 }
 
+// TestCrossFed_UpsertHijackRejected: the confused-deputy fix — a principal who
+// owns only a throwaway domain cannot overwrite (hijack) an existing agreement
+// (e.g. a chain-admin wildcard treaty) by re-scoping the slot to their domain.
+func TestCrossFed_UpsertHijackRejected(t *testing.T) {
+	app := setupTestApp(t)
+	app.appV15AppliedHeight = 5
+
+	// Chain-admin establishes the real trust anchor for "bank" (wildcard treaty).
+	admin := newAgentKey(t)
+	registerAgent(t, app, admin, "admin", "admin")
+	real := termsFor("bank", []string{"*"})
+	real.Endpoint = "https://bank.real:8443"
+	real.PeerPubKey = bytes.Repeat([]byte{1}, 32)
+	require.Equal(t, uint32(0), app.processCrossFedSet(crossFedSetTx(t, admin, real), 10, time.Now()).Code)
+
+	// Attacker owns a throwaway domain and tries to overwrite cross_fed:bank.
+	attacker := newAgentKey(t)
+	registerAgent(t, app, attacker, "attacker", "member")
+	require.NoError(t, app.badgerStore.RegisterDomain("alice", attacker.id, "", 1))
+	evil := termsFor("bank", []string{"alice"})
+	evil.Endpoint = "https://attacker:8443"
+	evil.PeerPubKey = bytes.Repeat([]byte{0xEE}, 32)
+	res := app.processCrossFedSet(crossFedSetTx(t, attacker, evil), 11, time.Now())
+	assert.Equal(t, uint32(106), res.Code, "attacker cannot hijack an existing agreement via a throwaway domain")
+
+	// The real trust anchor is intact (endpoint + pinned key unchanged).
+	ep, pk, _, _, _, _, _, err := app.badgerStore.GetCrossFed("bank")
+	require.NoError(t, err)
+	assert.Equal(t, "https://bank.real:8443", ep, "endpoint not clobbered")
+	assert.Equal(t, bytes.Repeat([]byte{1}, 32), pk, "pinned peer key not clobbered")
+}
+
+// TestCrossFed_OwnerCanUpdateOwnAgreement: the fix must not break a legitimate
+// update by the same authorized party.
+func TestCrossFed_OwnerCanUpdateOwnAgreement(t *testing.T) {
+	app := setupTestApp(t)
+	app.appV15AppliedHeight = 5
+	owner := newAgentKey(t)
+	registerAgent(t, app, owner, "owner", "member")
+	require.NoError(t, app.badgerStore.RegisterDomain("hr", owner.id, "", 1))
+
+	t1 := termsFor("sage-c", []string{"hr"})
+	t1.Endpoint = "https://old:8443"
+	require.Equal(t, uint32(0), app.processCrossFedSet(crossFedSetTx(t, owner, t1), 10, time.Now()).Code)
+	t2 := termsFor("sage-c", []string{"hr"})
+	t2.Endpoint = "https://new:8443"
+	require.Equal(t, uint32(0), app.processCrossFedSet(crossFedSetTx(t, owner, t2), 11, time.Now()).Code, "owner may update their own agreement")
+	ep, _, _, _, _, _, _, _ := app.badgerStore.GetCrossFed("sage-c")
+	assert.Equal(t, "https://new:8443", ep, "the owner's update is applied")
+}
+
+// TestCrossFed_RevokeLifecycle: unknown-revoke rejects, revoke flips status,
+// re-revoke of a revoked agreement rejects, and an authorized re-set reactivates.
+func TestCrossFed_RevokeLifecycle(t *testing.T) {
+	app := setupTestApp(t)
+	app.appV15AppliedHeight = 5
+	admin := newAgentKey(t)
+	registerAgent(t, app, admin, "admin", "admin")
+
+	unk := app.processCrossFedRevoke(crossFedRevokeTx(t, admin, "never-set", "x"), 10, time.Now())
+	assert.Equal(t, uint32(108), unk.Code, "revoke of an unknown agreement rejected")
+
+	require.Equal(t, uint32(0), app.processCrossFedSet(crossFedSetTx(t, admin, termsFor("sage-b", []string{"*"})), 11, time.Now()).Code)
+	require.Equal(t, uint32(0), app.processCrossFedRevoke(crossFedRevokeTx(t, admin, "sage-b", "rotate"), 12, time.Now()).Code)
+	again := app.processCrossFedRevoke(crossFedRevokeTx(t, admin, "sage-b", "again"), 13, time.Now())
+	assert.Equal(t, uint32(108), again.Code, "revoke of an already-revoked agreement rejected")
+
+	require.Equal(t, uint32(0), app.processCrossFedSet(crossFedSetTx(t, admin, termsFor("sage-b", []string{"*"})), 14, time.Now()).Code)
+	_, _, _, _, _, _, st, err := app.badgerStore.GetCrossFed("sage-b")
+	require.NoError(t, err)
+	assert.Equal(t, "active", st, "an authorized re-set reactivates a revoked agreement")
+}
+
+// TestCrossFed_StoreBlobDeterministic: identical cross_fed writes hash identically
+// (the blob is a pure function of its inputs → AppHash-deterministic across replicas).
+func TestCrossFed_StoreBlobDeterministic(t *testing.T) {
+	mk := func() []byte {
+		bs := setupTestBadger(t)
+		require.NoError(t, bs.SetCrossFed("sage-b", "https://p:8443", bytes.Repeat([]byte{9}, 32),
+			2, 1_700_000_000, []string{"hr", "*"}, []string{"finance"}, "active"))
+		h, err := ComputeAppHash(bs)
+		require.NoError(t, err)
+		return h
+	}
+	assert.Equal(t, mk(), mk(), "identical cross_fed writes produce identical AppHash")
+}
+
 // TestCrossFed_CheckTxDualGate (load-bearing mixed-binary guard).
 func TestCrossFed_CheckTxDualGate(t *testing.T) {
 	app := setupTestApp(t)

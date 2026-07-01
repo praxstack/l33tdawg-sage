@@ -3212,8 +3212,23 @@ func (app *SageApp) processCrossFedSet(parsedTx *tx.ParsedTx, height int64, bloc
 	// standalone ABCI-server mode has no genesis file to read, and persisting
 	// req.ChainId would shift the height-1 AppHash), so a handler-side check would
 	// risk validators diverging. A self-referential terms record is inert on-chain.
+	// AUTHZ over the NEW payload scope: the setter must be entitled to the scope
+	// they declare (chain-admin, or owner of every listed domain).
 	if !app.crossFedAuthorized(senderID, t.AllowedDomains) {
 		return &abcitypes.ExecTxResult{Code: 106, Log: fmt.Sprintf("cross_fed: agent %s not authorized to set terms", senderID[:16])}
+	}
+	// AUTHZ over the EXISTING record on an UPSERT: this is a per-remote-chain
+	// singleton keyed only on remote_chain_id, so without this check any principal
+	// who owns ANY domain could hijack another party's (or the chain-admin's
+	// wildcard) agreement by re-scoping the slot to a throwaway domain they own —
+	// substituting attacker PeerPubKey/Endpoint (a confused-deputy that poisons the
+	// exact trust anchor the transport phase pins to) and locking the real owner out
+	// of revoke. Mirror the revoke path (which authorizes against the STORED scope):
+	// modifying an existing record requires authority over its CURRENT scope too.
+	if _, _, _, _, existingDomains, _, _, gErr := app.badgerStore.GetCrossFed(t.RemoteChainID); gErr == nil {
+		if !app.crossFedAuthorized(senderID, existingDomains) {
+			return &abcitypes.ExecTxResult{Code: 106, Log: fmt.Sprintf("cross_fed: agent %s not authorized to modify the existing terms for %s", senderID[:16], t.RemoteChainID)}
+		}
 	}
 	if setErr := app.badgerStore.SetCrossFed(t.RemoteChainID, t.Endpoint, t.PeerPubKey,
 		uint8(t.MaxClearance), t.ExpiresAt, t.AllowedDomains, t.AllowedDepts, "active"); setErr != nil {
