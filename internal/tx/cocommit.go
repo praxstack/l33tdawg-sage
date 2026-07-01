@@ -74,6 +74,17 @@ func EncodeCoauthorsCanonical(cs []CoCommitCoauthor) []byte {
 	return appendCoauthors(nil, SortCoauthorsByPubKey(cs))
 }
 
+// DecodeCoauthorsCanonical parses an EncodeCoauthorsCanonical blob (as stored
+// under cocommit:coauthors:<SharedID>) back into the coauthor set — used by the
+// attest peer-identity bind and the co-commit self-corroboration guard.
+func DecodeCoauthorsCanonical(blob []byte) ([]CoCommitCoauthor, error) {
+	cs, _, err := readCoauthors(blob, 0)
+	if err != nil {
+		return nil, err
+	}
+	return cs, nil
+}
+
 // EncodeCommitReceipt returns the deterministic canonical bytes of a
 // CommitReceipt SANS ValSig — the bytes the emitting chain's validator signs and
 // the exact bytes a peer wraps verbatim into a CoCommitAttest (footgun T: the

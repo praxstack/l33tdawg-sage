@@ -2820,6 +2820,12 @@ func (app *SageApp) processCoCommitSubmit(parsedTx *tx.ParsedTx, height int64, b
 	if len(env.ContentHash) == 0 {
 		return &abcitypes.ExecTxResult{Code: 95, Log: "co-commit: envelope has no content hash"}
 	}
+	// P2: only schema version 1 exists in the v11.0 MVP. Reject unknown versions now
+	// — before any version-gated interpretation ships — rather than persisting an
+	// uninterpretable envelope into the AppHash.
+	if env.SchemaVersion != 1 {
+		return &abcitypes.ExecTxResult{Code: 95, Log: fmt.Sprintf("co-commit: unsupported schema version %d", env.SchemaVersion)}
+	}
 
 	// Verify EVERY coauthor's standalone ed25519 signature over CanonicalCoreBytes.
 	// No registration lookup — foreign coauthor authority was established once on
@@ -2832,6 +2838,21 @@ func (app *SageApp) processCoCommitSubmit(parsedTx *tx.ParsedTx, height int64, b
 		if !auth.Verify(ed25519.PublicKey(c.PubKey), core, c.Sig) {
 			return &abcitypes.ExecTxResult{Code: 95, Log: "co-commit: coauthor signature invalid"}
 		}
+	}
+
+	// P1: the LOCAL submitter must itself be one of the coauthors — you commit what
+	// you co-signed. Binds the relay to a participant so a non-party cannot replay a
+	// jointly-signed envelope onto an unrelated chain. (localID = hex(AgentPubKey);
+	// the full cross-network freshness/federation-status bind is deferred footgun E.)
+	localIsCoauthor := false
+	for _, c := range env.Coauthors {
+		if hex.EncodeToString(c.PubKey) == localID {
+			localIsCoauthor = true
+			break
+		}
+	}
+	if !localIsCoauthor {
+		return &abcitypes.ExecTxResult{Code: 95, Log: "co-commit: submitter is not one of the coauthors"}
 	}
 
 	// Bind the id to the SIGNED core: recompute the content-derived SharedID and
@@ -2852,9 +2873,41 @@ func (app *SageApp) processCoCommitSubmit(parsedTx *tx.ParsedTx, height int64, b
 			if accessErr != nil || !hasAccess {
 				return &abcitypes.ExecTxResult{Code: 97, Log: fmt.Sprintf("co-commit: agent %s has no write access to domain %s", localID[:16], env.Domain)}
 			}
-		} else if regErr := app.badgerStore.RegisterDomain(env.Domain, localID, "", height); regErr != nil {
-			if !errors.Is(regErr, store.ErrDomainAlreadyRegistered) {
-				app.logger.Error().Err(regErr).Str("domain", env.Domain).Msg("co-commit: auto-register domain")
+		} else {
+			// Domain not registered — auto-register with the local submitter as owner.
+			// M1: mirror processMemorySubmit — ALSO create the owner's level-2
+			// self-grant and mirror both writes off-chain, or an org-less owner is
+			// locked out of their own domain on every subsequent write (HasAccessMultiOrg
+			// has no owner shortcut).
+			if regErr := app.badgerStore.RegisterDomain(env.Domain, localID, "", height); regErr != nil {
+				if !errors.Is(regErr, store.ErrDomainAlreadyRegistered) {
+					app.logger.Error().Err(regErr).Str("domain", env.Domain).Msg("co-commit: auto-register domain")
+				}
+			} else {
+				app.pendingWrites = append(app.pendingWrites, pendingWrite{
+					writeType: "domain_register",
+					data: &store.DomainEntry{
+						DomainName:    env.Domain,
+						OwnerAgentID:  localID,
+						CreatedHeight: height,
+						CreatedAt:     blockTime,
+					},
+				})
+				if grantErr := app.badgerStore.SetAccessGrant(env.Domain, localID, 2, 0, localID); grantErr != nil {
+					app.logger.Error().Err(grantErr).Str("domain", env.Domain).Msg("co-commit: auto-grant owner access")
+				} else {
+					app.pendingWrites = append(app.pendingWrites, pendingWrite{
+						writeType: "access_grant",
+						data: &store.AccessGrantEntry{
+							Domain:        env.Domain,
+							GranteeID:     localID,
+							GranterID:     localID,
+							Level:         2,
+							CreatedHeight: height,
+							CreatedAt:     blockTime,
+						},
+					})
+				}
 			}
 		}
 	}
@@ -2866,8 +2919,16 @@ func (app *SageApp) processCoCommitSubmit(parsedTx *tx.ParsedTx, height int64, b
 		return &abcitypes.ExecTxResult{Code: 98, Log: fmt.Sprintf("co-commit %s already reached terminal status %q", sharedID, st)}
 	}
 
-	// Write the native local memory keyed by SharedID.
-	if setErr := app.badgerStore.SetMemoryHash(sharedID, env.ContentHash, string(memory.StatusProposed)); setErr != nil {
+	// Write the native local memory keyed by SharedID, COMMITTED immediately. A
+	// co-commit is already ratified by every coauthor's signature (verified above),
+	// and its inclusion in this block IS BFT consensus — the same "block inclusion
+	// is decisive" logic as processMemoryChallenge. It must NOT go through the local
+	// content-quality quorum voter: the envelope carries only ContentHash (no raw
+	// content), so the voter's qualityCheck would REJECT it (content < 20 chars) and
+	// deprecate it one block later — the feature would never commit. Deterministic
+	// across replicas; the voter's GetPendingByDomain returns proposed only, so a
+	// committed co-commit is never picked up.
+	if setErr := app.badgerStore.SetMemoryHash(sharedID, env.ContentHash, string(memory.StatusCommitted)); setErr != nil {
 		return &abcitypes.ExecTxResult{Code: 99, Log: fmt.Sprintf("co-commit: badger write error: %v", setErr)}
 	}
 	if env.Domain != "" {
@@ -2908,7 +2969,7 @@ func (app *SageApp) processCoCommitSubmit(parsedTx *tx.ParsedTx, height int64, b
 		MemoryType:      memory.MemoryType(txMemoryTypeToString(env.MemoryType)),
 		DomainTag:       env.Domain,
 		ConfidenceScore: env.ConfidenceScore,
-		Status:          memory.StatusProposed,
+		Status:          memory.StatusCommitted, // committed at submit (see SetMemoryHash above)
 		CreatedAt:       blockTime,
 	}
 	if app.SuppCache != nil {
@@ -2932,14 +2993,17 @@ func (app *SageApp) processCoCommitSubmit(parsedTx *tx.ParsedTx, height int64, b
 	return &abcitypes.ExecTxResult{
 		Code: 0,
 		Data: []byte(sharedID),
-		Log:  fmt.Sprintf("co-commit %s submitted (%d coauthors)", sharedID, len(env.Coauthors)),
+		Log:  fmt.Sprintf("co-commit %s committed (%d coauthors)", sharedID, len(env.Coauthors)),
 	}
 }
 
 // processCoCommitAttest records a peer's signed CommitReceipt (tx 32) as a
-// cross-anchor for a co-committed memory. Fail-CLOSED: the receipt must be validly
-// signed by the peer AND its CoreHash must match this chain's recorded shared core
-// for the SharedID (proving the peer committed the SAME core). Determinism
+// cross-anchor for a co-committed memory. Three binds, all fail-closed: (1) the
+// receipt is validly signed by PeerPubKey; (2) PeerPubKey is a DECLARED coauthor
+// for PeerChainID in the SharedID's recorded coauthor set (so an attacker can't
+// sign over the public CoreHash with a throwaway key); (3) the receipt's CoreHash
+// matches this chain's recorded shared core. The full cross-network validator-set
+// / federation-status verification remains deferred (footgun E). Determinism
 // (footgun T): the receipt enters the chain ONLY as verbatim signed bytes;
 // CommitTime is opaque DATA, never compared to blockTime or used as a branch.
 func (app *SageApp) processCoCommitAttest(parsedTx *tx.ParsedTx, height int64, _ time.Time) *abcitypes.ExecTxResult {
@@ -2979,6 +3043,32 @@ func (app *SageApp) processCoCommitAttest(parsedTx *tx.ParsedTx, height int64, _
 	if !bytes.Equal(localCore, receipt.CoreHash) {
 		return &abcitypes.ExecTxResult{Code: 97, Log: "co-commit attest: receipt CoreHash does not match local core"}
 	}
+	// H2: bind the attesting peer key to a DECLARED coauthor for that chain. The
+	// CoreHash is public on-chain state (a pure function of the tx-31 envelope), so
+	// without this bind an attacker could sign a receipt over it with any throwaway
+	// key and forge a cross-anchor claiming a peer that never committed. Require
+	// (PeerPubKey, PeerChainID) to appear in the SharedID's recorded coauthor set.
+	// (The full cross-network validator-set / federation-status bind is deferred
+	// footgun E; this is the minimal in-scope peer-identity check.)
+	caBlob, caErr := app.badgerStore.GetCoCommitCoauthors(att.SharedID)
+	if caErr != nil {
+		return &abcitypes.ExecTxResult{Code: 99, Log: fmt.Sprintf("co-commit attest: badger read error: %v", caErr)}
+	}
+	coauthors, caDecErr := tx.DecodeCoauthorsCanonical(caBlob)
+	if caDecErr != nil {
+		return &abcitypes.ExecTxResult{Code: 96, Log: fmt.Sprintf("co-commit attest: coauthor decode error: %v", caDecErr)}
+	}
+	peerIsCoauthor := false
+	for _, c := range coauthors {
+		if c.ChainID == att.PeerChainID && bytes.Equal(c.PubKey, att.PeerPubKey) {
+			peerIsCoauthor = true
+			break
+		}
+	}
+	if !peerIsCoauthor {
+		return &abcitypes.ExecTxResult{Code: 95, Log: "co-commit attest: peer key is not a recorded coauthor for its chain"}
+	}
+
 	// Store sha256(verbatim receipt) as the cross-anchor. Idempotent, late-bindable.
 	anchor := sha256.Sum256(att.Receipt)
 	if wErr := app.badgerStore.SetCoCommitAnchor(att.SharedID, att.PeerChainID, anchor[:]); wErr != nil {
@@ -3372,6 +3462,21 @@ func (app *SageApp) processMemoryCorroborate(parsedTx *tx.ParsedTx, height int64
 		}
 		if author != "" && author == agentID {
 			return &abcitypes.ExecTxResult{Code: 17, Log: fmt.Sprintf("corroborate: agent %s cannot corroborate its own memory %s", agentID[:16], corrob.MemoryID)}
+		}
+		// M2: a co-committed memory records only the LOCAL relay submitter in
+		// memauthor; its true (co-)authors live in cocommit:coauthors. Extend the
+		// self-corroboration guard so no recorded coauthor can corroborate the
+		// jointly-authored memory. Non-co-commit memories have no cocommit:coauthors
+		// key (no-op — byte-identical replay), and co-commit memories only exist
+		// post-app-v15, so the data itself gates this without a separate fork check.
+		if caBlob, caErr := app.badgerStore.GetCoCommitCoauthors(corrob.MemoryID); caErr == nil && len(caBlob) > 0 {
+			if coauthors, decErr := tx.DecodeCoauthorsCanonical(caBlob); decErr == nil {
+				for _, c := range coauthors {
+					if hex.EncodeToString(c.PubKey) == agentID {
+						return &abcitypes.ExecTxResult{Code: 17, Log: fmt.Sprintf("corroborate: agent %s cannot corroborate its own co-authored memory %s", agentID[:16], corrob.MemoryID)}
+					}
+				}
+			}
 		}
 		already, hErr := app.badgerStore.HasCorroborated(corrob.MemoryID, agentID)
 		if hErr != nil {

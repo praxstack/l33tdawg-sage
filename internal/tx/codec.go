@@ -715,6 +715,14 @@ func readCoauthors(data []byte, off int) ([]CoCommitCoauthor, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
+	// Bound count against the remaining buffer BEFORE allocating: each coauthor
+	// needs >=12 wire bytes (three 4-byte length prefixes for PubKey/ChainID/Sig).
+	// Without this, a tiny crafted tx with count=0xFFFFFFFF triggers a ~256 GiB
+	// pre-allocation — and DecodeTx runs on the UNAUTHENTICATED path in CheckTx AND
+	// in FinalizeBlock, so that OOM is a node-crash / chain-halt vector.
+	if int64(count) > int64(len(data)-off)/12 {
+		return nil, 0, ErrInvalidTxData
+	}
 	cs := make([]CoCommitCoauthor, 0, count)
 	for i := uint32(0); i < count; i++ {
 		var pub, chain, sig []byte
@@ -1238,6 +1246,11 @@ func decodeAccessQuery(data []byte) (*AccessQuery, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Bound embLen vs remaining buffer before allocating (each float32 = 4 wire
+	// bytes) — decode-time DoS guard on the consensus path.
+	if int64(embLen) > int64(len(data)-off)/4 {
+		return nil, ErrInvalidTxData
+	}
 	a.Embedding = make([]float32, embLen)
 	for i := uint32(0); i < embLen; i++ {
 		a.Embedding[i], off, err = readFloat32(data, off)
@@ -1327,6 +1340,11 @@ func readStringSlice(data []byte, off int) ([]string, int, error) {
 	}
 	count := int(binary.BigEndian.Uint32(data[off : off+4])) // #nosec G115 -- uint32 fits in int
 	off += 4
+	// Bound count vs remaining buffer before allocating (each string >=4 wire
+	// bytes) — decode-time DoS guard on the consensus path.
+	if count > (len(data)-off)/4 {
+		return nil, 0, ErrInvalidTxData
+	}
 	ss := make([]string, count)
 	for i := 0; i < count; i++ {
 		b, newOff, err := readBytes(data, off)

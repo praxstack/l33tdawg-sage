@@ -109,6 +109,49 @@ func TestComputeSharedID_OrderIndependentAndNonceBound(t *testing.T) {
 	}
 }
 
+// TestReadCoauthors_HugeCountRejected is the H1 regression: an attacker-controlled
+// count must be bounded against the remaining buffer BEFORE allocating, so a tiny
+// crafted tx cannot trigger a ~256 GiB pre-allocation in the consensus decode path.
+func TestReadCoauthors_HugeCountRejected(t *testing.T) {
+	buf := []byte{0xFF, 0xFF, 0xFF, 0xFF} // count = 4294967295, no element bytes
+	if _, _, err := readCoauthors(buf, 0); err == nil {
+		t.Fatal("expected error for an out-of-bounds coauthor count (unbounded-alloc guard)")
+	}
+}
+
+// TestReadStringSlice_HugeCountRejected covers the same guard on the pre-existing
+// readStringSlice sibling.
+func TestReadStringSlice_HugeCountRejected(t *testing.T) {
+	buf := []byte{0xFF, 0xFF, 0xFF, 0xFF}
+	if _, _, err := readStringSlice(buf, 0); err == nil {
+		t.Fatal("expected error for an out-of-bounds string-slice count (unbounded-alloc guard)")
+	}
+}
+
+func TestDecodeCoauthorsCanonical_RoundTrip(t *testing.T) {
+	env := testEnvelope(t, []byte("n"))
+	blob := EncodeCoauthorsCanonical(env.Coauthors)
+	got, err := DecodeCoauthorsCanonical(blob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(env.Coauthors) {
+		t.Fatalf("got %d coauthors, want %d", len(got), len(env.Coauthors))
+	}
+	// Stored in sorted order; every input pubkey must be present.
+	for _, c := range env.Coauthors {
+		found := false
+		for _, g := range got {
+			if bytes.Equal(g.PubKey, c.PubKey) && g.ChainID == c.ChainID {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("coauthor %x@%s missing after round-trip", c.PubKey, c.ChainID)
+		}
+	}
+}
+
 func TestCanonicalCoreBytes_ExcludesSig(t *testing.T) {
 	env := testEnvelope(t, []byte("n"))
 	before := CanonicalCoreBytes(env)

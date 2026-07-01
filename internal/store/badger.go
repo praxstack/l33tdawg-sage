@@ -761,6 +761,29 @@ func (s *BadgerStore) SetCoCommitCoauthors(sharedID string, blob []byte) error {
 	})
 }
 
+// GetCoCommitCoauthors returns the raw coauthor blob for a SharedID, or nil if
+// none (a missing key is not an error). Decode with tx.DecodeCoauthorsCanonical.
+func (s *BadgerStore) GetCoCommitCoauthors(sharedID string) ([]byte, error) {
+	var blob []byte
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, getErr := txn.Get(cocommitCoauthorsKey(sharedID))
+		if getErr != nil {
+			return getErr
+		}
+		return item.Value(func(val []byte) error {
+			blob = append([]byte(nil), val...)
+			return nil
+		})
+	})
+	if err == badger.ErrKeyNotFound {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return blob, nil
+}
+
 // SetCoCommitAnchor records a peer's cross-attestation anchor
 // (sha256(canonical(receipt))) for a SharedID. Idempotent (re-attest overwrites
 // identical bytes) and late-bindable (a missing anchor = "unconfirmed").
