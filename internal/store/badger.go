@@ -793,6 +793,174 @@ func (s *BadgerStore) SetCoCommitAnchor(sharedID, peerChainID string, anchorHash
 	})
 }
 
+// --- CrossFed (v11 / app-v15) Mode-1 exchange TERMS ---
+//
+// Consensus-authoritative terms record keyed by remote_chain_id, one per remote
+// chain (upsert). Hand-rolled length-prefixed binary local to the store (no
+// internal/tx import — same cycle-avoidance reason the federation: blob is
+// hand-rolled). A dedicated top-level "cross_fed:" prefix (not state:-prefixed)
+// so it is hashed under every AppHash rule. PURE function of the inputs
+// (BE-fixed-width ints, verbatim PeerPubKey, ExpiresAt as DATA — no time.Now) so
+// it hashes deterministically into the AppHash, exactly like cocommit:*.
+
+func crossFedKey(remoteChainID string) []byte { return []byte("cross_fed:" + remoteChainID) }
+
+func encodeCrossFedBlob(endpoint string, peerPubKey []byte, maxClearance uint8, expiresAt int64, status string, allowedDomains, allowedDepts []string) []byte {
+	size := 1 // version
+	size += 4 + len(endpoint)
+	size += 4 + len(peerPubKey)
+	size += 1 // maxClearance
+	size += 8 // expiresAt
+	size += 4 + len(status)
+	size += 4
+	for _, d := range allowedDomains {
+		size += 4 + len(d)
+	}
+	size += 4
+	for _, d := range allowedDepts {
+		size += 4 + len(d)
+	}
+	val := make([]byte, size)
+	val[0] = 1 // version
+	offset := 1
+	offset = encodeString(val, offset, endpoint)
+	offset = encodeString(val, offset, string(peerPubKey))
+	val[offset] = maxClearance
+	offset++
+	binary.BigEndian.PutUint64(val[offset:offset+8], uint64(expiresAt)) // #nosec G115 -- expiry non-negative
+	offset += 8
+	offset = encodeString(val, offset, status)
+	binary.BigEndian.PutUint32(val[offset:offset+4], uint32(len(allowedDomains))) // #nosec G115
+	offset += 4
+	for _, d := range allowedDomains {
+		offset = encodeString(val, offset, d)
+	}
+	binary.BigEndian.PutUint32(val[offset:offset+4], uint32(len(allowedDepts))) // #nosec G115
+	offset += 4
+	for _, d := range allowedDepts {
+		offset = encodeString(val, offset, d)
+	}
+	return val
+}
+
+func decodeCrossFedBlob(val []byte) (endpoint string, peerPubKey []byte, maxClearance uint8, expiresAt int64, status string, allowedDomains, allowedDepts []string, err error) {
+	if len(val) < 1 {
+		return "", nil, 0, 0, "", nil, nil, fmt.Errorf("invalid cross_fed entry: empty")
+	}
+	offset := 1 // skip version byte
+	endpoint, offset, err = decodeString(val, offset)
+	if err != nil {
+		return
+	}
+	var pk string
+	pk, offset, err = decodeString(val, offset)
+	if err != nil {
+		return
+	}
+	peerPubKey = []byte(pk)
+	if offset >= len(val) {
+		return "", nil, 0, 0, "", nil, nil, fmt.Errorf("invalid cross_fed entry: missing clearance")
+	}
+	maxClearance = val[offset]
+	offset++
+	if offset+8 > len(val) {
+		return "", nil, 0, 0, "", nil, nil, fmt.Errorf("invalid cross_fed entry: missing expiresAt")
+	}
+	expiresAt = int64(binary.BigEndian.Uint64(val[offset : offset+8])) // #nosec G115
+	offset += 8
+	status, offset, err = decodeString(val, offset)
+	if err != nil {
+		return
+	}
+	// allowedDomains, allowedDepts — grow via append (no pre-size); decodeString
+	// fails fast if the count outruns the buffer, so no unbounded allocation.
+	allowedDomains, offset, err = decodeStringSliceBlob(val, offset)
+	if err != nil {
+		return
+	}
+	allowedDepts, _, err = decodeStringSliceBlob(val, offset)
+	return
+}
+
+// decodeStringSliceBlob reads a uint32 count then that many length-prefixed
+// strings, growing via append (never pre-sizing from the count) so a corrupt
+// count cannot pre-allocate.
+func decodeStringSliceBlob(val []byte, offset int) ([]string, int, error) {
+	if offset+4 > len(val) {
+		return nil, 0, fmt.Errorf("invalid cross_fed entry: missing slice count")
+	}
+	count := binary.BigEndian.Uint32(val[offset : offset+4])
+	offset += 4
+	out := make([]string, 0)
+	for i := uint32(0); i < count; i++ {
+		var s string
+		var err error
+		s, offset, err = decodeString(val, offset)
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, s)
+	}
+	return out, offset, nil
+}
+
+// SetCrossFed upserts a cross-network exchange terms record for remoteChainID.
+// No height/clock input — the value is a pure function of the arguments.
+func (s *BadgerStore) SetCrossFed(remoteChainID, endpoint string, peerPubKey []byte, maxClearance uint8, expiresAt int64, allowedDomains, allowedDepts []string, status string) error {
+	blob := encodeCrossFedBlob(endpoint, peerPubKey, maxClearance, expiresAt, status, allowedDomains, allowedDepts)
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(crossFedKey(remoteChainID), blob)
+	})
+}
+
+// GetCrossFed returns the terms record for remoteChainID (surfacing the transport
+// coordinates endpoint/peerPubKey, unlike GetFederation). Returns an error if the
+// agreement does not exist.
+func (s *BadgerStore) GetCrossFed(remoteChainID string) (endpoint string, peerPubKey []byte, maxClearance uint8, expiresAt int64, allowedDomains, allowedDepts []string, status string, err error) {
+	err = s.db.View(func(txn *badger.Txn) error {
+		item, getErr := txn.Get(crossFedKey(remoteChainID))
+		if getErr != nil {
+			return getErr
+		}
+		return item.Value(func(val []byte) error {
+			var decErr error
+			endpoint, peerPubKey, maxClearance, expiresAt, status, allowedDomains, allowedDepts, decErr = decodeCrossFedBlob(val)
+			return decErr
+		})
+	})
+	if err == badger.ErrKeyNotFound {
+		return "", nil, 0, 0, nil, nil, "", fmt.Errorf("cross_fed not found: %s", remoteChainID)
+	}
+	return
+}
+
+// UpdateCrossFedStatus round-trips ALL fields and rewrites only the status
+// (mirrors UpdateFederationStatus; truncating the extended fields would drop the
+// transport coordinates).
+func (s *BadgerStore) UpdateCrossFedStatus(remoteChainID, newStatus string) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		item, err := txn.Get(crossFedKey(remoteChainID))
+		if err != nil {
+			return err
+		}
+		var endpoint, status string
+		var peerPubKey []byte
+		var maxClearance uint8
+		var expiresAt int64
+		var allowedDomains, allowedDepts []string
+		if err := item.Value(func(val []byte) error {
+			var decErr error
+			endpoint, peerPubKey, maxClearance, expiresAt, status, allowedDomains, allowedDepts, decErr = decodeCrossFedBlob(val)
+			return decErr
+		}); err != nil {
+			return err
+		}
+		_ = status // replaced below
+		blob := encodeCrossFedBlob(endpoint, peerPubKey, maxClearance, expiresAt, newStatus, allowedDomains, allowedDepts)
+		return txn.Set(crossFedKey(remoteChainID), blob)
+	})
+}
+
 // SetMemoryAuthor records a memory's submitting agent (its author) on-chain.
 // Caller gates on postAppV10Fork so pre-fork blocks never write this key
 // (byte-identical replay). This is the consensus-authoritative author field, and

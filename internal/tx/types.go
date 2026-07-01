@@ -59,6 +59,16 @@ const (
 	// the whole validator set BEFORE app-v15 activates.
 	TxTypeCoCommitSubmit TxType = 31
 	TxTypeCoCommitAttest TxType = 32
+	// v11 (app-v15): Mode-1 EXCHANGE cross-network federation TERMS. A unilateral
+	// local declaration of how THIS chain treats a remote chain — the counterparty
+	// is on a foreign chain and cannot sign a local approve, so (unlike intra-chain
+	// FederationPropose/Approve) there is no on-chain second signature; mutual trust
+	// is established off-consensus at the mTLS layer via the pinned PeerPubKey. Both
+	// are dual-gated on postAppV15Fork (a new TYPE byte is not backward-compatible —
+	// old binaries decode-fail — so the codec ships to the whole validator set
+	// BEFORE app-v15 activates).
+	TxTypeCrossFedSet    TxType = 33
+	TxTypeCrossFedRevoke TxType = 34
 )
 
 // GovProposalOp identifies the governance operation being proposed.
@@ -367,6 +377,29 @@ type CoCommitAttest struct {
 	CoreHash    []byte // the shared core hash the receipt attests to (fail-closed bind)
 }
 
+// CrossFedTerms sets/updates (idempotent upsert) this chain's Mode-1 EXCHANGE
+// terms for a remote chain (tx 33). Authority = a LOCAL admin (chain-admin or
+// domain-owner) via verifyAgentIdentity — there is no in-payload signature slice
+// (single-signer, unlike co-commit). PeerPubKey is the pinned remote TLS/node key,
+// opaque DATA on-chain (bound at the mTLS layer in the transport phase). ExpiresAt
+// is DATA (checked against blockTime off-consensus, never time.Now).
+type CrossFedTerms struct {
+	RemoteChainID  string
+	Endpoint       string         // remote federation-listener URL (consumed off-consensus)
+	PeerPubKey     []byte         // pinned remote TLS/node key (opaque on-chain)
+	MaxClearance   ClearanceLevel // clearance ceiling for exchanged reads
+	AllowedDomains []string       // "*" = all
+	AllowedDepts   []string       // "*" = all
+	ExpiresAt      int64          // unix, 0 = permanent
+	Status         string         // "active" (set); revoke uses tx 34
+}
+
+// CrossFedRevoke tears down an exchange agreement with a remote chain (tx 34).
+type CrossFedRevoke struct {
+	RemoteChainID string
+	Reason        string // decoded, NOT persisted to badger (mirror FederationRevoke)
+}
+
 // GovVote records a validator's vote on a governance proposal.
 type GovVote struct {
 	ProposalID string
@@ -490,6 +523,8 @@ type ParsedTx struct {
 	DomainReassign     *DomainReassign
 	CoCommitSubmit     *CoCommitSubmit
 	CoCommitAttest     *CoCommitAttest
+	CrossFedTerms      *CrossFedTerms
+	CrossFedRevoke     *CrossFedRevoke
 	Signature          []byte // Node validator Ed25519 signature (64 bytes)
 	PublicKey          []byte // Node validator Ed25519 public key (32 bytes)
 	Nonce              uint64

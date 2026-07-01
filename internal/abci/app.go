@@ -1993,7 +1993,8 @@ func (app *SageApp) CheckTx(_ context.Context, req *abcitypes.RequestCheckTx) (*
 	// type-31/32 tx pre-activation would diverge LastResultsHash across the set.
 	// CheckTx has no block height, so gate on cached state height (single-chain, so
 	// no cross-chain key collision). Symmetric with the exec-side Code 10.
-	if (parsedTx.Type == tx.TxTypeCoCommitSubmit || parsedTx.Type == tx.TxTypeCoCommitAttest) &&
+	if (parsedTx.Type == tx.TxTypeCoCommitSubmit || parsedTx.Type == tx.TxTypeCoCommitAttest ||
+		parsedTx.Type == tx.TxTypeCrossFedSet || parsedTx.Type == tx.TxTypeCrossFedRevoke) &&
 		!app.postAppV15Fork(app.state.Height) {
 		return &abcitypes.ResponseCheckTx{Code: 10, Log: "unknown tx type"}, nil
 	}
@@ -2392,6 +2393,10 @@ func (app *SageApp) processTx(parsedTx *tx.ParsedTx, height int64, blockTime tim
 		return app.processCoCommitSubmit(parsedTx, height, blockTime)
 	case tx.TxTypeCoCommitAttest:
 		return app.processCoCommitAttest(parsedTx, height, blockTime)
+	case tx.TxTypeCrossFedSet:
+		return app.processCrossFedSet(parsedTx, height, blockTime)
+	case tx.TxTypeCrossFedRevoke:
+		return app.processCrossFedRevoke(parsedTx, height, blockTime)
 	default:
 		return &abcitypes.ExecTxResult{Code: 10, Log: "unknown tx type"}
 	}
@@ -2793,6 +2798,10 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 // N-party fan-out is the deferred star/Merkle anchoring design, not one envelope.
 const maxCoCommitCoauthors = 64
 
+// maxRemoteChainIDLen mirrors CometBFT's MaxChainIDLen — a cross_fed remote_chain_id
+// can never be longer than a real genesis ChainID.
+const maxRemoteChainIDLen = 50
+
 // isAllZeroBytes reports whether every byte is zero — used to reject an all-zero
 // ed25519 pubkey (a small-order point that can pass Verify for crafted messages),
 // mirroring the guard in VerifyAgentProof.
@@ -3138,6 +3147,112 @@ func (app *SageApp) processCoCommitAttest(parsedTx *tx.ParsedTx, height int64, _
 		return &abcitypes.ExecTxResult{Code: 99, Log: fmt.Sprintf("co-commit attest: badger write error: %v", wErr)}
 	}
 	return &abcitypes.ExecTxResult{Code: 0, Log: fmt.Sprintf("co-commit %s anchored to peer %s", att.SharedID, att.PeerChainID)}
+}
+
+// crossFedAuthorized reports whether senderID may set/revoke Mode-1 exchange terms.
+// Two tiers, BOTH reachable by solo/org-less nodes (do NOT clone isOrgAdmin, which
+// 403s a personal chain — plan §9.7): the on-chain chain-admin (global role
+// "admin", materialized on every chain incl. solo), OR the owner/ancestor-owner of
+// EVERY concrete domain the terms scope to. A wildcard/all-domains ("*") agreement
+// is a chain-level treaty → chain-admin only. Pure read-only Badger — deterministic.
+func (app *SageApp) crossFedAuthorized(senderID string, allowedDomains []string) bool {
+	if a, err := app.badgerStore.GetRegisteredAgent(senderID); err == nil && a != nil && a.Role == "admin" {
+		return true
+	}
+	if len(allowedDomains) == 0 {
+		return false
+	}
+	for _, d := range allowedDomains {
+		if d == "*" || d == "" {
+			return false // all-domains treaty requires chain-admin
+		}
+		owns, err := app.badgerStore.IsDomainOwnerOrAncestor(d, senderID)
+		if err != nil || !owns {
+			return false
+		}
+	}
+	return true
+}
+
+// processCrossFedSet sets/updates (idempotent upsert) this chain's Mode-1 exchange
+// terms for a remote chain (tx 33). Dual-gated on postAppV15Fork. The record is a
+// unilateral LOCAL declaration authorized by a local admin — the foreign
+// counterparty cannot sign a local approve; mutual trust is established
+// off-consensus at the mTLS layer via the pinned PeerPubKey (transport phase).
+// Determinism: no time.Now; ExpiresAt is stored as DATA; every reject returns
+// before the single Badger write.
+func (app *SageApp) processCrossFedSet(parsedTx *tx.ParsedTx, height int64, blockTime time.Time) *abcitypes.ExecTxResult {
+	postV15 := app.postAppV15Fork(height)
+	recordAppV15Branch(postV15)
+	if !postV15 {
+		return &abcitypes.ExecTxResult{Code: 10, Log: "unknown tx type"}
+	}
+	t := parsedTx.CrossFedTerms
+	if t == nil {
+		return &abcitypes.ExecTxResult{Code: 100, Log: "missing CrossFedTerms payload"}
+	}
+	senderID, err := verifyAgentIdentity(parsedTx)
+	if err != nil {
+		return &abcitypes.ExecTxResult{Code: 101, Log: fmt.Sprintf("cross_fed: agent identity verification failed: %v", err)}
+	}
+	if t.RemoteChainID == "" || len(t.RemoteChainID) > maxRemoteChainIDLen {
+		return &abcitypes.ExecTxResult{Code: 102, Log: "cross_fed: invalid remote_chain_id"}
+	}
+	if t.Endpoint == "" || len(t.PeerPubKey) == 0 {
+		return &abcitypes.ExecTxResult{Code: 103, Log: "cross_fed: missing endpoint or peer key"}
+	}
+	if t.Status != "active" {
+		return &abcitypes.ExecTxResult{Code: 104, Log: "cross_fed: status must be active for a set tx"}
+	}
+	// NOTE: the self-federation guard (remote_chain_id == our own chain_id) is
+	// enforced OFF-consensus — at the tx-builder (REST/CLI) and the transport-phase
+	// query proxy, where the local chain_id is freely available. It is deliberately
+	// NOT a consensus rule: the ABCI app has no reliable, deterministic source for
+	// its own chain_id after a restart across ALL deployment modes (amid's
+	// standalone ABCI-server mode has no genesis file to read, and persisting
+	// req.ChainId would shift the height-1 AppHash), so a handler-side check would
+	// risk validators diverging. A self-referential terms record is inert on-chain.
+	if !app.crossFedAuthorized(senderID, t.AllowedDomains) {
+		return &abcitypes.ExecTxResult{Code: 106, Log: fmt.Sprintf("cross_fed: agent %s not authorized to set terms", senderID[:16])}
+	}
+	if setErr := app.badgerStore.SetCrossFed(t.RemoteChainID, t.Endpoint, t.PeerPubKey,
+		uint8(t.MaxClearance), t.ExpiresAt, t.AllowedDomains, t.AllowedDepts, "active"); setErr != nil {
+		return &abcitypes.ExecTxResult{Code: 107, Log: fmt.Sprintf("cross_fed: badger write error: %v", setErr)}
+	}
+	return &abcitypes.ExecTxResult{Code: 0, Data: []byte(t.RemoteChainID), Log: fmt.Sprintf("cross_fed terms set for %s", t.RemoteChainID)}
+}
+
+// processCrossFedRevoke tears down an exchange agreement (tx 34). Same authority as
+// the set (chain-admin or owner of the agreement's scoped domains). Reason is
+// decoded but not persisted (mirror processFederationRevoke).
+func (app *SageApp) processCrossFedRevoke(parsedTx *tx.ParsedTx, height int64, _ time.Time) *abcitypes.ExecTxResult {
+	postV15 := app.postAppV15Fork(height)
+	recordAppV15Branch(postV15)
+	if !postV15 {
+		return &abcitypes.ExecTxResult{Code: 10, Log: "unknown tx type"}
+	}
+	r := parsedTx.CrossFedRevoke
+	if r == nil {
+		return &abcitypes.ExecTxResult{Code: 100, Log: "missing CrossFedRevoke payload"}
+	}
+	senderID, err := verifyAgentIdentity(parsedTx)
+	if err != nil {
+		return &abcitypes.ExecTxResult{Code: 101, Log: fmt.Sprintf("cross_fed: agent identity verification failed: %v", err)}
+	}
+	_, _, _, _, allowedDomains, _, status, gErr := app.badgerStore.GetCrossFed(r.RemoteChainID)
+	if gErr != nil {
+		return &abcitypes.ExecTxResult{Code: 108, Log: fmt.Sprintf("cross_fed: unknown agreement %s", r.RemoteChainID)}
+	}
+	if status != "active" {
+		return &abcitypes.ExecTxResult{Code: 108, Log: fmt.Sprintf("cross_fed: agreement %s is not active", r.RemoteChainID)}
+	}
+	if !app.crossFedAuthorized(senderID, allowedDomains) {
+		return &abcitypes.ExecTxResult{Code: 106, Log: fmt.Sprintf("cross_fed: agent %s not authorized to revoke terms", senderID[:16])}
+	}
+	if upErr := app.badgerStore.UpdateCrossFedStatus(r.RemoteChainID, "revoked"); upErr != nil {
+		return &abcitypes.ExecTxResult{Code: 107, Log: fmt.Sprintf("cross_fed: badger write error: %v", upErr)}
+	}
+	return &abcitypes.ExecTxResult{Code: 0, Data: []byte(r.RemoteChainID), Log: fmt.Sprintf("cross_fed terms revoked for %s", r.RemoteChainID)}
 }
 
 func (app *SageApp) processMemoryVote(parsedTx *tx.ParsedTx, height int64, blockTime time.Time) *abcitypes.ExecTxResult {

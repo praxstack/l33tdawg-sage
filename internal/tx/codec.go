@@ -371,6 +371,16 @@ func encodePayload(tx *ParsedTx) ([]byte, error) {
 			return nil, fmt.Errorf("CoCommitAttest is nil for cocommit attest tx")
 		}
 		return encodeCoCommitAttest(tx.CoCommitAttest), nil
+	case TxTypeCrossFedSet:
+		if tx.CrossFedTerms == nil {
+			return nil, fmt.Errorf("CrossFedTerms is nil for cross_fed set tx")
+		}
+		return encodeCrossFedTerms(tx.CrossFedTerms), nil
+	case TxTypeCrossFedRevoke:
+		if tx.CrossFedRevoke == nil {
+			return nil, fmt.Errorf("CrossFedRevoke is nil for cross_fed revoke tx")
+		}
+		return encodeCrossFedRevoke(tx.CrossFedRevoke), nil
 	default:
 		return nil, ErrUnknownTxType
 	}
@@ -601,6 +611,20 @@ func decodePayload(tx *ParsedTx, data []byte) error {
 			return err
 		}
 		tx.CoCommitAttest = a
+		return nil
+	case TxTypeCrossFedSet:
+		t, err := decodeCrossFedTerms(data)
+		if err != nil {
+			return err
+		}
+		tx.CrossFedTerms = t
+		return nil
+	case TxTypeCrossFedRevoke:
+		r, err := decodeCrossFedRevoke(data)
+		if err != nil {
+			return err
+		}
+		tx.CrossFedRevoke = r
 		return nil
 	default:
 		return ErrUnknownTxType
@@ -877,6 +901,101 @@ func decodeCoCommitAttest(data []byte) (*CoCommitAttest, error) {
 	}
 
 	return a, nil
+}
+
+// --- CrossFed (v11 / app-v15, Mode-1 exchange terms) ---
+
+func encodeCrossFedTerms(t *CrossFedTerms) []byte {
+	var buf []byte
+	buf = appendBytes(buf, []byte(t.RemoteChainID))
+	buf = appendBytes(buf, []byte(t.Endpoint))
+	buf = appendBytes(buf, t.PeerPubKey)
+	buf = append(buf, byte(t.MaxClearance))
+	buf = appendStringSlice(buf, t.AllowedDomains) // count-bounded reader (readStringSlice)
+	buf = appendStringSlice(buf, t.AllowedDepts)
+	buf = appendInt64(buf, t.ExpiresAt)
+	buf = appendBytes(buf, []byte(t.Status))
+	return buf
+}
+
+func decodeCrossFedTerms(data []byte) (*CrossFedTerms, error) {
+	t := &CrossFedTerms{}
+	var b []byte
+	var err error
+	off := 0
+
+	b, off, err = readBytes(data, off)
+	if err != nil {
+		return nil, err
+	}
+	t.RemoteChainID = string(b)
+
+	b, off, err = readBytes(data, off)
+	if err != nil {
+		return nil, err
+	}
+	t.Endpoint = string(b)
+
+	t.PeerPubKey, off, err = readBytes(data, off)
+	if err != nil {
+		return nil, err
+	}
+
+	if off >= len(data) {
+		return nil, ErrInvalidTxData
+	}
+	t.MaxClearance = ClearanceLevel(data[off])
+	off++
+
+	t.AllowedDomains, off, err = readStringSlice(data, off)
+	if err != nil {
+		return nil, err
+	}
+	t.AllowedDepts, off, err = readStringSlice(data, off)
+	if err != nil {
+		return nil, err
+	}
+
+	t.ExpiresAt, off, err = readInt64(data, off)
+	if err != nil {
+		return nil, err
+	}
+
+	b, _, err = readBytes(data, off)
+	if err != nil {
+		return nil, err
+	}
+	t.Status = string(b)
+
+	return t, nil
+}
+
+func encodeCrossFedRevoke(r *CrossFedRevoke) []byte {
+	var buf []byte
+	buf = appendBytes(buf, []byte(r.RemoteChainID))
+	buf = appendBytes(buf, []byte(r.Reason))
+	return buf
+}
+
+func decodeCrossFedRevoke(data []byte) (*CrossFedRevoke, error) {
+	r := &CrossFedRevoke{}
+	var b []byte
+	var err error
+	off := 0
+
+	b, off, err = readBytes(data, off)
+	if err != nil {
+		return nil, err
+	}
+	r.RemoteChainID = string(b)
+
+	b, _, err = readBytes(data, off)
+	if err != nil {
+		return nil, err
+	}
+	r.Reason = string(b)
+
+	return r, nil
 }
 
 // --- MemoryVote ---
