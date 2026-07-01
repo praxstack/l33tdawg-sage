@@ -84,7 +84,23 @@ func TestUpgradeNameConstantsAreCanonical(t *testing.T) {
 	assert.Equal(t, tx.CanonicalUpgradeName(13), appV13UpgradeName)
 	v13 := setupTestApp(t)
 	v13.appV13AppliedHeight = 90
-	assert.Equal(t, uint64(13), v13.currentAppVersion(), "app-v13 active with no lower gate still reports 13 (top case)")
+	assert.Equal(t, uint64(13), v13.currentAppVersion(), "app-v13 active with no lower gate still reports 13")
+
+	// app-v14 (content-validator gate DEACTIVATION, v10.7.0) is an INDEPENDENT
+	// gate. Same lockstep: canonical name, and a bare chain with only the app-v14
+	// gate set must report 14. (Backfilled to close the pre-existing coverage gap.)
+	assert.Equal(t, tx.CanonicalUpgradeName(14), appV14UpgradeName)
+	v14 := setupTestApp(t)
+	v14.appV14AppliedHeight = 95
+	assert.Equal(t, uint64(14), v14.currentAppVersion(), "app-v14 active with no lower gate still reports 14")
+
+	// app-v15 (empty fork-gate scaffolding, v11) is an INDEPENDENT gate and the
+	// highest version. Same lockstep: canonical name, and a bare chain with only
+	// the app-v15 gate set must report 15 (its case ranks first in currentAppVersion).
+	assert.Equal(t, tx.CanonicalUpgradeName(15), appV15UpgradeName)
+	v15 := setupTestApp(t)
+	v15.appV15AppliedHeight = 100
+	assert.Equal(t, uint64(15), v15.currentAppVersion(), "app-v15 active with no lower gate still reports 15 (top case)")
 }
 
 // TestV8Fork_DefaultZero asserts a freshly-created app reports zero fork
