@@ -2612,6 +2612,18 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 		memoryID = hex.EncodeToString(h[:16])
 	}
 
+	// #3 (reverse): a normal memory must not clobber an existing co-commit that owns
+	// this id. The processCoCommitSubmit reclaim covers a normal squat being taken
+	// over by a co-commit; this covers the opposite (a normal submit landing on an
+	// already-co-committed SharedID). Fork-gated on postAppV15Rules so pre-fork
+	// blocks replay byte-identical; also closes it on a skip-ahead chain where the
+	// v8.4 terminal-status guard below is dormant.
+	if app.postAppV15Rules(height) {
+		if existingCore, ccErr := app.badgerStore.GetCoCommitCore(memoryID); ccErr == nil && len(existingCore) > 0 {
+			return &abcitypes.ExecTxResult{Code: 11, Log: fmt.Sprintf("memory %s is a co-committed id and cannot be overwritten by a normal submit", memoryID)}
+		}
+	}
+
 	// Store hash on-chain (BadgerDB)
 	contentHash := submit.ContentHash
 	if len(contentHash) == 0 {
@@ -2774,6 +2786,13 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 	}
 }
 
+// maxCoCommitCoauthors caps the coauthor count on a single co-commit envelope.
+// Each coauthor costs one ed25519.Verify on the FinalizeBlock consensus hot path,
+// so an uncapped count is an asymmetric liveness-DoS (CheckTx does O(1) work).
+// 64 is generous for real collaboration (family/dept/org circles); org-scale
+// N-party fan-out is the deferred star/Merkle anchoring design, not one envelope.
+const maxCoCommitCoauthors = 64
+
 // isAllZeroBytes reports whether every byte is zero — used to reject an all-zero
 // ed25519 pubkey (a small-order point that can pass Verify for crafted messages),
 // mirroring the guard in VerifyAgentProof.
@@ -2819,6 +2838,29 @@ func (app *SageApp) processCoCommitSubmit(parsedTx *tx.ParsedTx, height int64, b
 	}
 	if len(env.ContentHash) == 0 {
 		return &abcitypes.ExecTxResult{Code: 95, Log: "co-commit: envelope has no content hash"}
+	}
+	// #5: cap coauthor count BEFORE the per-coauthor verify loop (one ed25519.Verify
+	// each on the FinalizeBlock hot path; CheckTx does O(1) — an uncapped count is an
+	// asymmetric liveness DoS). Independent of the codec's allocation bound.
+	if len(env.Coauthors) > maxCoCommitCoauthors {
+		return &abcitypes.ExecTxResult{Code: 95, Log: fmt.Sprintf("co-commit: too many coauthors (%d > %d)", len(env.Coauthors), maxCoCommitCoauthors)}
+	}
+	// #4: a co-commit is inherently multi-party — require >=2 DISTINCT coauthor
+	// pubkeys and reject in-envelope duplicates. Without this, a single self-coauthor
+	// envelope degenerates into a voter-skipping single-node direct-commit (P1 alone
+	// permits len==1). Combined with P1 (submitter is a coauthor), >=2 distinct
+	// guarantees >=1 genuine foreign party. Membership-only map use (no iteration) —
+	// deterministic.
+	seenPub := make(map[string]struct{}, len(env.Coauthors))
+	for _, c := range env.Coauthors {
+		k := string(c.PubKey)
+		if _, dup := seenPub[k]; dup {
+			return &abcitypes.ExecTxResult{Code: 95, Log: "co-commit: duplicate coauthor pubkey"}
+		}
+		seenPub[k] = struct{}{}
+	}
+	if len(seenPub) < 2 {
+		return &abcitypes.ExecTxResult{Code: 95, Log: "co-commit: requires at least 2 distinct coauthors"}
 	}
 	// P2: only schema version 1 exists in the v11.0 MVP. Reject unknown versions now
 	// — before any version-gated interpretation ships — rather than persisting an
@@ -2912,11 +2954,19 @@ func (app *SageApp) processCoCommitSubmit(parsedTx *tx.ParsedTx, height int64, b
 		}
 	}
 
-	// Terminal-resubmit guard (mirror processMemorySubmit): a SharedID that already
-	// reached a terminal verdict must not be re-opened.
-	if _, st, gErr := app.badgerStore.GetMemoryHash(sharedID); gErr == nil &&
-		(st == string(memory.StatusCommitted) || st == string(memory.StatusDeprecated)) {
-		return &abcitypes.ExecTxResult{Code: 98, Log: fmt.Sprintf("co-commit %s already reached terminal status %q", sharedID, st)}
+	// #3 namespace-collision defense + resubmit guard. SharedID is content-derived,
+	// height-free, and published in the CommitReceipt, so it is publicly predictable
+	// — an attacker can front-run a NORMAL memory into memory:<sharedID> to try to
+	// block or hijack the co-commit. Distinguish the two cases by cocommit:core:
+	//   - cocommit:core:<sharedID> present ⇒ THIS chain already co-committed this
+	//     SharedID ⇒ reject the (idempotent) re-submit.
+	//   - absent but memory:<sharedID> present ⇒ a front-run SQUAT. The co-commit is
+	//     the cryptographic owner of this id (sha256 preimage resistance means no
+	//     attacker can target an arbitrary existing id, only this predictable one),
+	//     so it RECLAIMS the slot below — overwriting the squat's content + author.
+	//     This defeats both the denial and the hijack variants of the collision.
+	if existingCore, ccErr := app.badgerStore.GetCoCommitCore(sharedID); ccErr == nil && len(existingCore) > 0 {
+		return &abcitypes.ExecTxResult{Code: 98, Log: fmt.Sprintf("co-commit %s already committed on this chain", sharedID)}
 	}
 
 	// Write the native local memory keyed by SharedID, COMMITTED immediately. A
@@ -2936,12 +2986,13 @@ func (app *SageApp) processCoCommitSubmit(parsedTx *tx.ParsedTx, height int64, b
 			app.logger.Error().Err(domErr).Str("memory_id", sharedID).Msg("co-commit: set memory domain")
 		}
 	}
-	// memauthor = LOCAL submitter (first-writer-wins); foreign coauthors are
-	// recorded in cocommit:coauthors, not memauthor.
-	if existing, gErr := app.badgerStore.GetMemoryAuthor(sharedID); gErr == nil && existing == "" {
-		if authErr := app.badgerStore.SetMemoryAuthor(sharedID, localID); authErr != nil {
-			app.logger.Error().Err(authErr).Str("memory_id", sharedID).Msg("co-commit: set memory author")
-		}
+	// memauthor = LOCAL submitter; foreign coauthors are recorded in
+	// cocommit:coauthors, not memauthor. Written UNCONDITIONALLY (not first-writer-
+	// wins): a genuine co-commit re-submit is already rejected above, so the only
+	// paths here are a fresh co-commit or a squat-reclaim (#3) — in the reclaim case
+	// the author MUST be overwritten to localID to correct the squatter's record.
+	if authErr := app.badgerStore.SetMemoryAuthor(sharedID, localID); authErr != nil {
+		app.logger.Error().Err(authErr).Str("memory_id", sharedID).Msg("co-commit: set memory author")
 	}
 	classification := uint8(env.Classification)
 	if classErr := app.badgerStore.SetMemoryClassification(sharedID, classification); classErr != nil {
@@ -2982,6 +3033,18 @@ func (app *SageApp) processCoCommitSubmit(parsedTx *tx.ParsedTx, height int64, b
 		}
 	}
 	app.pendingWrites = append(app.pendingWrites, pendingWrite{writeType: "memory", data: record})
+	// #1/#2: the memory INSERT does not write committed_at; only UpdateStatus (driven
+	// by a status_update pendingWrite) does. The normal quorum path emits one on
+	// commit — mirror it here so a co-committed row gets committed_at = blockTime
+	// instead of NULL. Also converts a reclaimed squat's off-chain row to committed.
+	app.pendingWrites = append(app.pendingWrites, pendingWrite{
+		writeType: "status_update",
+		data: &statusUpdate{
+			MemoryID: sharedID,
+			Status:   memory.StatusCommitted,
+			At:       blockTime,
+		},
+	})
 	app.pendingWrites = append(app.pendingWrites, pendingWrite{
 		writeType: "mem_classification",
 		data: &memClassificationData{

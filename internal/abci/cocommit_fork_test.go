@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"testing"
 	"time"
 
@@ -287,6 +288,147 @@ func TestCoCommit_CheckTxDualGate(t *testing.T) {
 	resp2, err := app.CheckTx(context.TODO(), &abcitypes.RequestCheckTx{Tx: encoded})
 	require.NoError(t, err)
 	assert.NotEqual(t, uint32(10), resp2.Code, "post-fork CheckTx admits co-commit (gate passed): %s", resp2.Log)
+}
+
+// TestCoCommit_ReclaimsFrontRunSquat (#3): a co-commit reclaims its cryptographic
+// SharedID slot from a front-run normal-memory squat (denial defeated + author
+// corrected), and a later normal submit can no longer clobber the committed
+// co-commit.
+func TestCoCommit_ReclaimsFrontRunSquat(t *testing.T) {
+	app := setupTestApp(t)
+	app.appV10AppliedHeight = 1 // so the squat records an author
+	app.appV15AppliedHeight = 1
+	local := newAgentKey(t)
+	env, _ := buildCoCommitEnvelope(t, local, "family.photos", []byte("n1"), "sage-b")
+
+	// Attacker front-runs a normal memory into memory:<sharedID> (shared domain).
+	attacker := newAgentKey(t)
+	squat := makeMemorySubmitTx(t, attacker, "general", "attacker squat content long enough to pass")
+	squat.MemorySubmit.MemoryID = env.SharedID
+	require.Equal(t, uint32(0), app.processMemorySubmit(squat, 5, time.Now()).Code, "squat submit")
+	a0, _ := app.badgerStore.GetMemoryAuthor(env.SharedID)
+	require.Equal(t, attacker.id, a0, "precondition: squatter is recorded author")
+
+	// The co-commit RECLAIMS its slot.
+	res := app.processCoCommitSubmit(coCommitSubmitTx(t, local, env), 10, time.Now())
+	require.Equal(t, uint32(0), res.Code, "co-commit reclaims squatted slot: %s", res.Log)
+	_, st, _ := app.badgerStore.GetMemoryHash(env.SharedID)
+	assert.Equal(t, string(memory.StatusCommitted), st)
+	author, _ := app.badgerStore.GetMemoryAuthor(env.SharedID)
+	assert.Equal(t, local.id, author, "reclaim overwrites the squatter's author")
+	core, _ := app.badgerStore.GetCoCommitCore(env.SharedID)
+	assert.Equal(t, tx.CoreHashOf(env), core)
+
+	// A later normal submit can no longer clobber the co-commit.
+	squat2 := makeMemorySubmitTx(t, attacker, "general", "another attempt to clobber the cocommit id")
+	squat2.MemorySubmit.MemoryID = env.SharedID
+	res2 := app.processMemorySubmit(squat2, 11, time.Now())
+	assert.Equal(t, uint32(11), res2.Code, "normal submit cannot overwrite a committed co-commit")
+}
+
+// TestCoCommit_ReSubmitRejected (#3): a genuine co-commit re-submit is rejected.
+func TestCoCommit_ReSubmitRejected(t *testing.T) {
+	app := setupTestApp(t)
+	app.appV15AppliedHeight = 1
+	local := newAgentKey(t)
+	env, _ := buildCoCommitEnvelope(t, local, "family.photos", []byte("n1"), "sage-b")
+	require.Equal(t, uint32(0), app.processCoCommitSubmit(coCommitSubmitTx(t, local, env), 10, time.Now()).Code)
+	res := app.processCoCommitSubmit(coCommitSubmitTx(t, local, env), 11, time.Now())
+	assert.Equal(t, uint32(98), res.Code, "re-submit of an already-committed co-commit rejected")
+}
+
+// TestCoCommit_TooManyCoauthorsRejected (#5): the coauthor-count cap.
+func TestCoCommit_TooManyCoauthorsRejected(t *testing.T) {
+	app := setupTestApp(t)
+	app.appV15AppliedHeight = 5
+	local := newAgentKey(t)
+	ch := sha256.Sum256([]byte("many"))
+	env := &tx.CoCommitSubmit{
+		SchemaVersion: 1, ContentHash: ch[:], MemoryType: tx.MemoryTypeFact,
+		Domain: "d", Classification: tx.ClearanceInternal, ConfidenceScore: 0.5,
+		CreatedAtUnix: 1, AgreementNonce: []byte("n"),
+		Coauthors: []tx.CoCommitCoauthor{{PubKey: local.pub, ChainID: "sage-local"}},
+	}
+	privs := []ed25519.PrivateKey{local.priv}
+	for i := 0; i < maxCoCommitCoauthors; i++ { // local + 64 = 65 > 64
+		p, s, err := ed25519.GenerateKey(rand.Reader)
+		require.NoError(t, err)
+		env.Coauthors = append(env.Coauthors, tx.CoCommitCoauthor{PubKey: p, ChainID: fmt.Sprintf("sage-%d", i)})
+		privs = append(privs, s)
+	}
+	core := tx.CanonicalCoreBytes(env)
+	for i := range env.Coauthors {
+		env.Coauthors[i].Sig = ed25519.Sign(privs[i], core)
+	}
+	env.SharedID = tx.ComputeSharedID(tx.CoreHashOf(env), env.Coauthors, env.AgreementNonce)
+	res := app.processCoCommitSubmit(coCommitSubmitTx(t, local, env), 10, time.Now())
+	assert.Equal(t, uint32(95), res.Code)
+	assert.Contains(t, res.Log, "too many coauthors")
+}
+
+// TestCoCommit_SingleAndDuplicateCoauthorRejected (#4).
+func TestCoCommit_SingleAndDuplicateCoauthorRejected(t *testing.T) {
+	app := setupTestApp(t)
+	app.appV15AppliedHeight = 5
+	local := newAgentKey(t)
+	ch := sha256.Sum256([]byte("dc"))
+
+	mk := func(coauthors []tx.CoCommitCoauthor, signers []ed25519.PrivateKey) *tx.ParsedTx {
+		env := &tx.CoCommitSubmit{
+			SchemaVersion: 1, ContentHash: ch[:], MemoryType: tx.MemoryTypeFact,
+			Domain: "d", Classification: tx.ClearanceInternal, ConfidenceScore: 0.5,
+			CreatedAtUnix: 1, AgreementNonce: []byte("n"), Coauthors: coauthors,
+		}
+		core := tx.CanonicalCoreBytes(env)
+		for i := range env.Coauthors {
+			env.Coauthors[i].Sig = ed25519.Sign(signers[i], core)
+		}
+		env.SharedID = tx.ComputeSharedID(tx.CoreHashOf(env), env.Coauthors, env.AgreementNonce)
+		return coCommitSubmitTx(t, local, env)
+	}
+
+	// Single self-coauthor -> "at least 2 distinct".
+	single := mk(
+		[]tx.CoCommitCoauthor{{PubKey: local.pub, ChainID: "sage-local"}},
+		[]ed25519.PrivateKey{local.priv},
+	)
+	r1 := app.processCoCommitSubmit(single, 10, time.Now())
+	assert.Equal(t, uint32(95), r1.Code)
+	assert.Contains(t, r1.Log, "at least 2 distinct")
+
+	// Duplicate coauthor pubkey -> "duplicate".
+	foreign := genTestCoauthor(t, "sage-b")
+	dup := mk(
+		[]tx.CoCommitCoauthor{
+			{PubKey: local.pub, ChainID: "sage-local"},
+			{PubKey: foreign.pub, ChainID: "sage-b"},
+			{PubKey: foreign.pub, ChainID: "sage-b"},
+		},
+		[]ed25519.PrivateKey{local.priv, foreign.priv, foreign.priv},
+	)
+	r2 := app.processCoCommitSubmit(dup, 11, time.Now())
+	assert.Equal(t, uint32(95), r2.Code)
+	assert.Contains(t, r2.Log, "duplicate")
+}
+
+// TestCoCommit_EmitsStatusUpdate (#1/#2): a status_update pendingWrite is emitted
+// so the off-chain committed_at is populated.
+func TestCoCommit_EmitsStatusUpdate(t *testing.T) {
+	app := setupTestApp(t)
+	app.appV15AppliedHeight = 5
+	local := newAgentKey(t)
+	env, _ := buildCoCommitEnvelope(t, local, "family.photos", []byte("n1"), "sage-b")
+	require.Equal(t, uint32(0), app.processCoCommitSubmit(coCommitSubmitTx(t, local, env), 10, time.Now()).Code)
+
+	found := false
+	for _, pw := range app.pendingWrites {
+		if pw.writeType == "status_update" {
+			if su, ok := pw.data.(*statusUpdate); ok && su.MemoryID == env.SharedID && su.Status == memory.StatusCommitted {
+				found = true
+			}
+		}
+	}
+	assert.True(t, found, "co-commit must emit a status_update pendingWrite (committed_at population)")
 }
 
 // TestCoCommit_CoauthorCannotSelfCorroborate (M2): a recorded coauthor cannot
