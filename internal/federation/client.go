@@ -73,10 +73,25 @@ func (m *Manager) doPeerRequest(ctx context.Context, agreement *store.CrossFedRe
 		return nil, 0, fmt.Errorf("generate nonce: %w", err)
 	}
 	ts := time.Now().Unix()
-	sig := auth.SignRequestV2(m.agentKey, m.localChainID, agreement.RemoteChainID, method, path, body, ts, nonce)
+
+	// Sign v3 (rotating TOTP factor) when a shared seed is unlocked in cache for
+	// this agreement; otherwise v2. The receiver's fail-closed gate rejects v2
+	// once a seed is established, so a downgrade cannot be forced.
+	sigVersion := SigVersion2
+	var sig []byte
+	if seed, ok := m.currentSeed(agreement.RemoteChainID); ok {
+		if ownPin, pErr := m.ownPin(); pErr == nil {
+			k := DeriveKTOTP(seed, m.localChainID, ownPin, agreement.RemoteChainID, agreement.PeerPubKey)
+			sig = auth.SignRequestV3(m.agentKey, k, m.localChainID, agreement.RemoteChainID, method, path, body, ts, nonce)
+			sigVersion = SigVersion3
+		}
+	}
+	if sig == nil {
+		sig = auth.SignRequestV2(m.agentKey, m.localChainID, agreement.RemoteChainID, method, path, body, ts, nonce)
+	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(HeaderSigVersion, SigVersion2)
+	req.Header.Set(HeaderSigVersion, sigVersion)
 	req.Header.Set(HeaderChainID, m.localChainID)
 	req.Header.Set(HeaderAgentID, hex.EncodeToString(m.agentPub))
 	req.Header.Set(HeaderTimestamp, strconv.FormatInt(ts, 10))

@@ -77,6 +77,39 @@ type Manager struct {
 	// calls: each blocks up to the commit timeout, so an unbounded push flood
 	// would otherwise pin a goroutine per push. A small pool caps the hold.
 	broadcastSem chan struct{}
+
+	// seedMu guards seedCache — per-agreement TOTP seeds (v11 join ceremony),
+	// keyed by remote chain id → the candidate seeds (current + previous epoch
+	// during a rotation cutover). Populated once at unlock; zeroized on
+	// revoke/expiry. The fail-closed v3 gate reads the persisted seed_established
+	// header (readable while locked) separately, never this cache's KDF.
+	seedMu    sync.RWMutex
+	seedCache map[string][][]byte
+
+	// vaultPassphrase, when non-empty, wraps the seed at rest with Argon2id+
+	// AES-GCM (a strictly stronger protection domain than agent.key). Empty =
+	// the 0600-plaintext floor (the honest fallback: v3's gain shrinks to
+	// cert-holder→seed-holder scoping — see the join-ceremony honesty ledger).
+	vaultPassphrase string
+
+	// ownPinCache is this node's own CA SPKI fingerprint (the pin peers hold for
+	// us), loaded once for the v3 factor's pin-pair (RT-10 authoritative self-pin).
+	ownPinMu    sync.Mutex
+	ownPinCache []byte
+
+	// joins is the host-side JoinSession registry (v11 ceremony). Non-nil once
+	// the listener is wired.
+	joins *JoinStore
+}
+
+// JoinStore returns (lazily creating) the host-side join session registry.
+func (m *Manager) JoinStore() *JoinStore {
+	m.ownPinMu.Lock()
+	defer m.ownPinMu.Unlock()
+	if m.joins == nil {
+		m.joins = NewJoinStore()
+	}
+	return m.joins
 }
 
 // NewManager builds the federation transport manager. It is safe to construct
@@ -95,6 +128,7 @@ func NewManager(cfg Config) *Manager {
 		seenSigs:     make(map[string]map[string]int64),
 		caCache:      make(map[string]*x509.Certificate),
 		broadcastSem: make(chan struct{}, maxConcurrentReceiptBroadcasts),
+		seedCache:    make(map[string][][]byte),
 	}
 }
 

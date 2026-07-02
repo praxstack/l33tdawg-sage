@@ -60,6 +60,23 @@ func SPKIFingerprint(cert *x509.Certificate) []byte {
 	return sum[:]
 }
 
+// ownPin returns this node's OWN authoritative CA SPKI fingerprint (the pin the
+// PEER holds for us). Read from <certsDir>/ca.crt and cached. Load-bearing for
+// RT-10: this is the node's own authoritative pin, never a scanned/echoed value.
+func (m *Manager) ownPin() ([]byte, error) {
+	m.ownPinMu.Lock()
+	defer m.ownPinMu.Unlock()
+	if m.ownPinCache != nil {
+		return m.ownPinCache, nil
+	}
+	cert, err := tlsca.ReadCert(filepath.Join(m.certsDir, tlsca.CACertFile))
+	if err != nil {
+		return nil, fmt.Errorf("read own CA for pin: %w", err)
+	}
+	m.ownPinCache = SPKIFingerprint(cert)
+	return m.ownPinCache, nil
+}
+
 // remoteCAPath is where the out-of-band-provisioned CA certificate for a
 // remote chain lives. Callers must ValidateChainID first.
 func (m *Manager) remoteCAPath(remoteChainID string) string {

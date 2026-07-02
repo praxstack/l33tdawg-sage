@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"testing"
 
+	"github.com/l33tdawg/sage/internal/auth"
 	"github.com/l33tdawg/sage/internal/totp"
 )
 
@@ -121,13 +122,35 @@ func TestEnrollSigTagSeparation(t *testing.T) {
 	}
 }
 
-// TestV3FactorBindsSeedAndStep: the ongoing factor changes with seed + step and
-// a v3 signature verifies only under the matching k_totp.
+// TestV3RoundTripUnderKTOTP: a v3 signature verifies under the matching k_totp
+// (both peers derive the same key), and fails under a different seed — the
+// downgrade-resistance property the fail-closed gate relies on.
 func TestV3RoundTripUnderKTOTP(t *testing.T) {
 	seed, _ := totp.NewSecret()
 	pinG, pinH := randN(32), randN(32)
-	k := DeriveKTOTP(seed, "guest", pinG, "host", pinH)
-	if len(k) != 32 {
-		t.Fatal("bad k_totp")
+	// Sender = guest, receiver = host; both derive the same k_totp.
+	kSend := DeriveKTOTP(seed, "guest", pinG, "host", pinH)
+	kRecv := DeriveKTOTP(seed, "host", pinH, "guest", pinG)
+	if string(kSend) != string(kRecv) {
+		t.Fatal("k_totp differs across peers")
+	}
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	body := []byte(`{"mode":"text"}`)
+	nonce := randN(16)
+	ts := int64(1_700_000_000)
+	sig := auth.SignRequestV3(priv, kSend, "guest", "host", "POST", "/fed/v1/query", body, ts, nonce)
+
+	if !auth.VerifyRequestV3(pub, kRecv, "guest", "host", "POST", "/fed/v1/query", body, ts, nonce, sig) {
+		t.Fatal("valid v3 signature failed to verify under the matching k_totp")
+	}
+	// A different seed → different k_totp → verification fails (downgrade/forge resistance).
+	otherSeed, _ := totp.NewSecret()
+	kOther := DeriveKTOTP(otherSeed, "host", pinH, "guest", pinG)
+	if auth.VerifyRequestV3(pub, kOther, "guest", "host", "POST", "/fed/v1/query", body, ts, nonce, sig) {
+		t.Fatal("v3 signature verified under a WRONG seed — factor not binding")
+	}
+	// Tampered body fails.
+	if auth.VerifyRequestV3(pub, kRecv, "guest", "host", "POST", "/fed/v1/query", []byte(`{"mode":"x"}`), ts, nonce, sig) {
+		t.Fatal("v3 signature verified over a tampered body")
 	}
 }

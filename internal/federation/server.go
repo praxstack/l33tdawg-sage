@@ -3,6 +3,7 @@ package federation
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
@@ -69,8 +70,9 @@ func (m *Manager) Router() http.Handler {
 //  4. the signature must be fresh (chain-scoped replay cache).
 func (m *Manager) peerAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get(HeaderSigVersion) != SigVersion2 {
-			httpError(w, http.StatusUnauthorized, "X-Sig-Version 2 required")
+		sigVersion := r.Header.Get(HeaderSigVersion)
+		if sigVersion != SigVersion2 && sigVersion != SigVersion3 {
+			httpError(w, http.StatusUnauthorized, "unsupported X-Sig-Version")
 			return
 		}
 		peerChain := r.Header.Get(HeaderChainID)
@@ -148,10 +150,44 @@ func (m *Manager) peerAuth(next http.Handler) http.Handler {
 		if r.URL.RawQuery != "" {
 			reqPath += "?" + r.URL.RawQuery
 		}
-		if !auth.VerifyRequestV2(pub, peerChain, m.localChainID, r.Method, reqPath, body, ts, nonce, sig) {
-			m.logger.Warn().Str("peer", peerChain).Str("agent", agentID[:16]).Msg("federation request denied: bad signature")
-			httpError(w, http.StatusUnauthorized, "signature verification failed")
+		// Fail-closed version gate (§2.6.3): the required signature version is
+		// driven by the agreement's persisted seed_established flag + the
+		// in-memory seed cache — NEVER by running a KDF (DoS note). Reads the
+		// plaintext seed header; if a seed is established but not unlocked, DENY
+		// (503) — never silently accept v2.
+		established := m.seedEstablished(peerChain)
+		candidates := m.seedCandidates(peerChain)
+		switch {
+		case established && len(candidates) > 0:
+			if sigVersion != SigVersion3 {
+				httpError(w, http.StatusUnauthorized, "X-Sig-Version 3 required")
+				return
+			}
+			if !m.verifyV3AnyEpoch(pub, peerChain, agreement.PeerPubKey, candidates, r.Method, reqPath, body, ts, nonce, sig) {
+				// Epoch mismatch after trying every known seed epoch — a genuine
+				// cross-peer desync, not a local lock. Loud alarm + diagnostic
+				// (§2.6.4); never a silent blackout.
+				m.logger.Error().Str("peer", peerChain).Msg("federation seed desync — v3 factor verified against no known epoch; re-enroll required")
+				httpError(w, http.StatusUnauthorized, "federation seed desync — re-enroll required")
+				return
+			}
+		case established && len(candidates) == 0:
+			// Seed established but not unlocked (locked vault / I/O error) — a
+			// local operator unlock problem, NOT a reason to strip the factor.
+			m.logger.Warn().Str("peer", peerChain).Msg("federation locked: seed established but not in cache")
+			httpError(w, http.StatusServiceUnavailable, "federation locked — unlock to resume")
 			return
+		default:
+			// No seed established (legacy peer / non-active agreement) — accept v2.
+			if sigVersion != SigVersion2 {
+				httpError(w, http.StatusUnauthorized, "X-Sig-Version 2 required")
+				return
+			}
+			if !auth.VerifyRequestV2(pub, peerChain, m.localChainID, r.Method, reqPath, body, ts, nonce, sig) {
+				m.logger.Warn().Str("peer", peerChain).Str("agent", agentID[:16]).Msg("federation request denied: bad signature")
+				httpError(w, http.StatusUnauthorized, "signature verification failed")
+				return
+			}
 		}
 
 		if !m.replayFresh(peerChain, agentID+":"+sigHex, ts) {
@@ -166,6 +202,24 @@ func (m *Manager) peerAuth(next http.Handler) http.Handler {
 		})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// verifyV3AnyEpoch tries the v3 signature against each candidate seed (current
+// + previous epoch during a rotation cutover), deriving k_totp from the seed +
+// the (own, peer) pin pair. Returns true on the first match.
+func (m *Manager) verifyV3AnyEpoch(pub ed25519.PublicKey, peerChain string, peerPin []byte, candidates [][]byte, method, path string, body []byte, ts int64, nonce, sig []byte) bool {
+	ownPin, err := m.ownPin()
+	if err != nil {
+		m.logger.Error().Err(err).Msg("v3 verify: own pin unavailable")
+		return false
+	}
+	for _, seed := range candidates {
+		k := DeriveKTOTP(seed, m.localChainID, ownPin, peerChain, peerPin)
+		if auth.VerifyRequestV3(pub, k, peerChain, m.localChainID, method, path, body, ts, nonce, sig) {
+			return true
+		}
+	}
+	return false
 }
 
 // replayFresh records a signature under its peer chain's shard and reports

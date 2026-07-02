@@ -29,6 +29,9 @@ const (
 
 	// SigVersion2 is the chain-qualified signature scheme (auth.SignRequestV2).
 	SigVersion2 = "2"
+	// SigVersion3 adds the rotating per-agreement TOTP factor (auth.SignRequestV3),
+	// required once a shared seed is established for the agreement.
+	SigVersion3 = "3"
 )
 
 // Query modes — which store search the serving peer runs.
