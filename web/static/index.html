@@ -5,27 +5,21 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CEREBRUM — Your SAGE Brain</title>
     <link rel="icon" type="image/svg+xml" href="/ui/favicon.svg">
-    <link rel="stylesheet" href="/ui/css/sage.css?v=680">
-    <!-- Core runtime + QR: vendored locally (no CDN) so the packaged app loads
-         and the join wizards render/scan QR fully offline. -->
+    <link rel="stylesheet" href="/ui/css/sage.css?v=690">
+    <!-- Core runtime + QR + 3D brain graph: all vendored locally (no CDN) so the
+         packaged app loads, the join wizards render/scan QR, and the MRI brain
+         renders fully offline. three.js + 3d-force-graph are pre-bundled into one
+         self-contained module (web/static/js/vendor/sage-graph.bundle.js), imported
+         directly by mri-brain.js - so no importmap / esm.sh fetch is needed. -->
     <script src="/ui/js/vendor/preact.umd.js"></script>
     <script src="/ui/js/vendor/preact.hooks.umd.js"></script>
     <script src="/ui/js/vendor/htm.umd.js"></script>
     <script src="/ui/js/vendor/qrcode.min.js"></script>
     <script src="/ui/js/vendor/jsQR.min.js"></script>
     <script>window.html = htm.bind(preact.h);</script>
-    <script type="importmap">
-    {
-      "imports": {
-        "three": "https://esm.sh/three@0.180.0",
-        "three/": "https://esm.sh/three@0.180.0/",
-        "3d-force-graph": "https://esm.sh/3d-force-graph@1.73.4?external=three"
-      }
-    }
-    </script>
 </head>
 <body>
     <div id="app"></div>
-    <script type="module" src="/ui/js/app.js?v=680"></script>
+    <script type="module" src="/ui/js/app.js?v=690"></script>
 </body>
 </html>

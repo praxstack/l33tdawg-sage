@@ -2,10 +2,11 @@
 // /ui/mri.html page and the in-dashboard MRI mode (no iframe; dashboard
 // X-Frame-Options/CSP correctly forbid embedding, so we render natively).
 //
-// Three.js + 3d-force-graph load as ES modules via the host page's importmap,
-// sharing a SINGLE Three instance (esm.sh ?external=three) — no "multiple
-// instances of Three.js" warning and no deprecated UMD global build.
-// Call mountMriBrain(container, opts) → returns a cleanup function.
+// Three.js + 3d-force-graph + the UnrealBloomPass addon are pre-bundled into one
+// self-contained local module (vendor/sage-graph.bundle.js) - no CDN, no importmap,
+// so the packaged app renders the brain fully offline. Everything shares the SINGLE
+// Three instance baked into that bundle (no "multiple instances of Three.js" warning).
+// Call mountMriBrain(container, opts) -> returns a cleanup function.
 //
 // The complementary-learning-systems reading (SAGE_AGI_BRAIN_ANALOGY.md):
 //   size+glow = corroboration (consolidation) · fade = confidence (decay)
@@ -14,9 +15,7 @@
 // No embeddings or full content cross the wire — content is truncated
 // server-side and the graph respects the same RBAC isolation as every read.
 
-import * as THREE from 'three';
-import ForceGraph3D from '3d-force-graph';
-import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { THREE, ForceGraph3D, UnrealBloomPass } from '/ui/js/vendor/sage-graph.bundle.js';
 
 const LINK_TYPES = {
   supports:    { color: '#5ee2a0', label: 'supports',    typed: true },

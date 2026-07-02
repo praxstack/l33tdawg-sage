@@ -8,13 +8,8 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Cerebrum · MRI</title>
-<script type="importmap">
-{ "imports": {
-  "three": "https://esm.sh/three@0.180.0",
-  "three/": "https://esm.sh/three@0.180.0/",
-  "3d-force-graph": "https://esm.sh/3d-force-graph@1.73.4?external=three"
-} }
-</script>
+<!-- three.js + 3d-force-graph are vendored, pre-bundled, and imported directly by
+     mri-brain.js (vendor/sage-graph.bundle.js) - no importmap / CDN, renders offline. -->
 <style>
   html,body{margin:0;height:100%;background:#05070d;overflow:hidden}
   #mount{position:fixed;inset:0}
