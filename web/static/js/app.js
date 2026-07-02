@@ -3507,10 +3507,11 @@ function ImportPage({ sse }) {
     useEffect(() => {
         if (!sse) return;
         const unsub = sse.on('import', (data) => {
-            if (data.phase === 'complete') {
+            const p = data.data || data;
+            if (p.phase === 'complete') {
                 setProgress(null);
             } else {
-                setProgress(data);
+                setProgress(p);
             }
         });
         return unsub;
@@ -4767,6 +4768,15 @@ function LoginScreen({ onSuccess, nextHint }) {
 // ============================================================================
 
 const CLEARANCE_LABELS = ['Guest', 'Internal', 'Confidential', 'Secret', 'Top Secret'];
+
+// Role metadata. Role is immutable after on-chain registration, so the Access
+// tab renders it read-only (no editable selector) to avoid reporting a "Saved"
+// that never reaches consensus.
+const ROLE_META = {
+    admin: { name: 'Admin', desc: 'Full access. Can manage agents and network settings.' },
+    member: { name: 'Member', desc: 'Read/write within allowed domains. Cannot manage agents.' },
+    observer: { name: 'Observer', desc: 'Read-only. Can view memories but cannot submit.' },
+};
 const AGENT_EMOJIS = ['🤖', '🧠', '🎙️', '🔬', '👤', '🛡️', '📡', '🔮', '🦉', '🐺', '🌐', '💎'];
 
 const DEPLOY_PHASES = [
@@ -4999,6 +5009,10 @@ function NetworkPage({ sse }) {
     const [showGovModal, setShowGovModal] = useState(false);
     const [govSubmitting, setGovSubmitting] = useState(false);
     const [govVoting, setGovVoting] = useState(false);
+    // Local record of votes cast from this dashboard, keyed by proposal_id. The
+    // votes array from the detail endpoint has no self-marker, so we remember
+    // our own decision here to render the "You voted" badge across reloads.
+    const [myVotes, setMyVotes] = useState({});
     const [govNewOp, setGovNewOp] = useState('add_validator');
     const [govNewTarget, setGovNewTarget] = useState('');
     const [govNewPower, setGovNewPower] = useState('10');
@@ -5058,10 +5072,25 @@ function NetworkPage({ sse }) {
                     fetchHealth()
                 ]);
                 if (detail) {
-                    setActiveProposal(detail.proposal || detail);
+                    const base = detail.proposal || detail;
+                    const votes = detail.votes || [];
+                    const q = detail.quorum_progress || {};
+                    let accept = 0, reject = 0, abstain = 0;
+                    for (const v of votes) {
+                        if (v.decision === 'accept') accept++;
+                        else if (v.decision === 'reject') reject++;
+                        else if (v.decision === 'abstain') abstain++;
+                    }
+                    setActiveProposal({
+                        ...base,
+                        accept_power: q.accept_power || 0,
+                        total_power: q.total_power || 0,
+                        accept_count: accept,
+                        reject_count: reject,
+                        abstain_count: abstain,
+                    });
                     // If proposal is no longer voting, refresh the full list
-                    const p = detail.proposal || detail;
-                    if (p.status !== 'voting') {
+                    if (base.status !== 'voting') {
                         loadGovProposals();
                     }
                 }
@@ -5090,10 +5119,10 @@ function NetworkPage({ sse }) {
             try {
                 const s = await fetchRedeployStatus();
                 setRedeployStatus(s);
-                if (!s || s.status === 'idle' || s.status === 'completed' || s.status === 'failed') {
+                if (!s || s.active === false) {
                     clearInterval(redeployPollRef.current);
                     redeployPollRef.current = null;
-                    if (s?.status === 'completed') loadAgents();
+                    loadAgents();
                 }
             } catch (e) { clearInterval(redeployPollRef.current); redeployPollRef.current = null; }
         }, 1000);
@@ -5101,7 +5130,7 @@ function NetworkPage({ sse }) {
 
     useEffect(() => {
         fetchRedeployStatus().then(s => {
-            if (s?.status && s.status !== 'idle') { setRedeployStatus(s); startRedeployPoll(); }
+            if (s?.active === true) { setRedeployStatus(s); startRedeployPoll(); }
         }).catch(() => {});
         return () => { if (redeployPollRef.current) clearInterval(redeployPollRef.current); };
     }, []);
@@ -5135,7 +5164,7 @@ function NetworkPage({ sse }) {
             .filter(([_, v]) => v.read || v.write)
             .map(([domain, p]) => ({ domain, read: p.read, write: p.write }));
         try {
-            const res = await updateAgent(agentId, { role: editRole, clearance: editClearance, domain_access: JSON.stringify(arr), visible_agents: editVisibleAgents });
+            const res = await updateAgent(agentId, { clearance: editClearance, domain_access: JSON.stringify(arr), visible_agents: editVisibleAgents });
             if (res.error) { showToast(res.error, 'error'); return; }
             if (res.on_chain_warning) {
                 showToast('Access saved locally but on-chain RBAC grant failed - will auto-heal on next agent boot. (' + res.on_chain_warning + ')', 'warning', 8000);
@@ -5229,7 +5258,10 @@ function NetworkPage({ sse }) {
         try {
             const res = await submitGovVote(proposalId, decision);
             if (res.error) { showToast(res.error, 'error'); }
-            else { showToast(`Vote submitted: ${decision}`, 'success'); }
+            else {
+                showToast(`Vote submitted: ${decision}`, 'success');
+                setMyVotes(m => ({ ...m, [proposalId]: decision }));
+            }
             loadGovProposals();
         } catch (e) { showToast('Vote failed: ' + e.message, 'error'); }
         setGovVoting(false);
@@ -5282,11 +5314,11 @@ function NetworkPage({ sse }) {
 
     if (loading) return html`<div class="network-page"><p style="color:var(--text-muted);text-align:center;padding:40px;">Loading agents...</p></div>`;
 
-    const isRedeploying = redeployStatus?.status && !['idle','completed','failed'].includes(redeployStatus.status);
+    const isRedeploying = redeployStatus?.active === true;
 
     return html`
         <div class="network-page fade-in">
-            ${isRedeploying && html`<div class="redeploy-banner"><span class="deploy-spinner"></span> Network reconfiguration in progress... Phase: ${(DEPLOY_PHASES.find(p => p.key === redeployStatus.current_phase) || {}).label || redeployStatus.current_phase}</div>`}
+            ${isRedeploying && html`<div class="redeploy-banner"><span class="deploy-spinner"></span> Network reconfiguration in progress...${redeployStatus.operation ? ` (${redeployStatus.operation.replace(/_/g, ' ')})` : ''}</div>`}
             <div class="network-header">
                 <div><h2>Network <${HelpTip} text="Manage agents on your SAGE chain. Each agent is a separate node that participates in BFT consensus. Click any agent to expand its details and permissions." /><${PageHelp} section="network" label="Network & Agents guide" /></h2><div class="network-header-sub">${agents.length} agent${agents.length !== 1 ? 's' : ''} on this network</div></div>
             </div>
@@ -5307,7 +5339,7 @@ function NetworkPage({ sse }) {
                             ${govStatusBadge('voting')}
                         </div>
                         <div class="gov-proposal-meta">
-                            Proposed by: ${resolveAgentName(activeProposal.proposer_id)}${activeProposal.proposed_height ? ` \u00b7 Block #${activeProposal.proposed_height}` : ''}
+                            Proposed by: ${resolveAgentName(activeProposal.proposer_id)}${activeProposal.created_height ? ` \u00b7 Block #${activeProposal.created_height}` : ''}
                         </div>
                         ${activeProposal.reason && html`
                             <div class="gov-proposal-reason">"${activeProposal.reason}"</div>
@@ -5331,9 +5363,9 @@ function NetworkPage({ sse }) {
                             </div>
                         ` : ''}
                         <div class="gov-vote-actions">
-                            ${activeProposal.my_vote ? html`
+                            ${(myVotes[activeProposal.proposal_id] || activeProposal.my_vote) ? html`
                                 <div class="gov-voted-badge">
-                                    You voted: <strong>${activeProposal.my_vote}</strong>
+                                    You voted: <strong>${myVotes[activeProposal.proposal_id] || activeProposal.my_vote}</strong>
                                 </div>
                             ` : html`
                                 <button class="gov-vote-btn accept" onClick=${() => handleGovVote(activeProposal.proposal_id, 'accept')} disabled=${govVoting}>Accept</button>
@@ -5361,7 +5393,7 @@ function NetworkPage({ sse }) {
                                     <div class="gov-history-info">
                                         <div class="gov-history-op">${govOpLabel(p.operation)}: ${resolveAgentName(p.target_agent_id)}</div>
                                         <div class="gov-history-detail">
-                                            by ${resolveAgentName(p.proposer_id)}${p.proposed_height ? ` \u00b7 Block #${p.proposed_height}` : ''}
+                                            by ${resolveAgentName(p.proposer_id)}${p.created_height ? ` \u00b7 Block #${p.created_height}` : ''}
                                         </div>
                                     </div>
                                     <div class="gov-history-right">
@@ -5549,19 +5581,15 @@ function NetworkPage({ sse }) {
 
                                     ${expandedTab === 'access' && html`
                                         <div>
-                                            <div class="access-section-title">Role <${HelpTip} text="Admins have full access to all domains and can manage the network. Members read/write in allowed domains only. Observers are read-only." /></div>
+                                            <div class="access-section-title">Role <${HelpTip} text="Admins have full access to all domains and can manage the network. Members read/write in allowed domains only. Observers are read-only. Role is fixed when the agent is registered on-chain and cannot be changed here." /></div>
                                             <div class="role-selector" onClick=${e => e.stopPropagation()}>
-                                                ${[
-                                                    { key: 'admin', name: 'Admin', desc: 'Full access. Can manage agents and network settings.' },
-                                                    { key: 'member', name: 'Member', desc: 'Read/write within allowed domains. Cannot manage agents.' },
-                                                    { key: 'observer', name: 'Observer', desc: 'Read-only. Can view memories but cannot submit.' },
-                                                ].map(r => html`
-                                                    <div class="role-card ${editRole === r.key ? 'selected ' + r.key : ''}"
-                                                        onClick=${() => { setEditRole(r.key); setAccessDirty(true); }}>
-                                                        <div class="role-card-name">${r.name}</div>
-                                                        <div class="role-card-desc">${r.desc}</div>
-                                                    </div>
-                                                `)}
+                                                <div class="role-card selected ${agent.role}">
+                                                    <div class="role-card-name">${(ROLE_META[agent.role] || {}).name || agent.role || 'Member'}</div>
+                                                    <div class="role-card-desc">${(ROLE_META[agent.role] || {}).desc || ''}</div>
+                                                </div>
+                                            </div>
+                                            <div style="color:var(--text-muted);font-size:12px;margin-top:6px;">
+                                                Role is set at registration and cannot be changed here.
                                             </div>
 
                                             <div class="access-section-title">Domain Access <${HelpTip} text="Control which knowledge domains this agent can read from and write to. Enabling write automatically enables read. Enforced server-side on every request." /></div>
@@ -5825,7 +5853,7 @@ function AddAgentWizard({ onClose, onCreated }) {
             try {
                 const s = await fetchRedeployStatus();
                 setDeployStatus(s);
-                if (!s || s.status === 'idle' || s.status === 'completed' || s.status === 'failed') {
+                if (!s || s.active === false) {
                     clearInterval(deployPollRef.current);
                     deployPollRef.current = null;
                     setDeploying(false);

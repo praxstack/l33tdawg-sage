@@ -44,6 +44,7 @@ export async function fetchMemories(params = {}) {
     if (params.agent) q.set('agent', params.agent);
     if (params.tag) q.set('tag', params.tag);
     const res = await fetch(`${API_BASE}/v1/dashboard/memory/list?${q}`);
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
     return res.json();
 }
 
@@ -421,6 +422,7 @@ export async function fetchTasks(params = {}) {
     if (params.domain) q.set('domain', params.domain);
     if (params.limit) q.set('limit', params.limit);
     const res = await fetch(`${API_BASE}/v1/dashboard/tasks?${q}`);
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
     return res.json();
 }
 
@@ -448,11 +450,13 @@ export async function fetchPipeline(params = {}) {
     if (params.status) q.set('status', params.status);
     if (params.limit) q.set('limit', params.limit);
     const res = await fetch(`${API_BASE}/v1/dashboard/pipeline?${q}`);
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
     return res.json();
 }
 
 export async function fetchPipelineStats() {
     const res = await fetch(`${API_BASE}/v1/dashboard/pipeline/stats`);
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);
     return res.json();
 }
 

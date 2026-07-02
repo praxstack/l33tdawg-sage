@@ -116,6 +116,7 @@ func (h *DashboardHandler) handleCreateAgent(agentStore store.AgentStore) http.H
 			DeptID       string `json:"dept_id"`
 			DomainAccess string `json:"domain_access"`
 			P2PAddress   string `json:"p2p_address"`
+			Provider     string `json:"provider"`
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -158,6 +159,7 @@ func (h *DashboardHandler) handleCreateAgent(agentStore store.AgentStore) http.H
 			DeptID:          req.DeptID,
 			DomainAccess:    req.DomainAccess,
 			P2PAddress:      req.P2PAddress,
+			Provider:        req.Provider,
 		}
 
 		if createErr := agentStore.CreateAgent(r.Context(), agent); createErr != nil {
@@ -178,7 +180,7 @@ func (h *DashboardHandler) handleCreateAgent(agentStore store.AgentStore) http.H
 						Name:       req.Name,
 						Role:       req.Role,
 						BootBio:    req.BootBio,
-						Provider:   "",
+						Provider:   req.Provider,
 						P2PAddress: req.P2PAddress,
 					},
 				}

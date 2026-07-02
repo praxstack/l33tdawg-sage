@@ -7,9 +7,12 @@ export class SSEClient {
         this.es = null;
         this.connected = false;
         this.reconnectDelay = 1000;
+        this._reconnectTimer = null;
+        this._closed = false;
     }
 
     connect() {
+        if (this._closed) return;
         this.es = new EventSource(this.url);
 
         this.es.onopen = () => {
@@ -22,11 +25,11 @@ export class SSEClient {
             this.connected = false;
             this._emit('connection', { connected: false });
             this.es.close();
-            setTimeout(() => this.connect(), this.reconnectDelay);
+            this._reconnectTimer = setTimeout(() => this.connect(), this.reconnectDelay);
             this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30000);
         };
 
-        const eventTypes = ['remember', 'recall', 'forget', 'vote', 'consensus', 'agent', 'update', 'governance'];
+        const eventTypes = ['remember', 'recall', 'forget', 'vote', 'consensus', 'agent', 'update', 'governance', 'import'];
         for (const type of eventTypes) {
             this.es.addEventListener(type, (e) => {
                 try {
@@ -54,6 +57,11 @@ export class SSEClient {
     }
 
     disconnect() {
+        this._closed = true;
+        if (this._reconnectTimer) {
+            clearTimeout(this._reconnectTimer);
+            this._reconnectTimer = null;
+        }
         if (this.es) {
             this.es.close();
             this.es = null;
