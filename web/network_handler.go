@@ -190,7 +190,36 @@ func (h *DashboardHandler) handleCreateAgent(agentStore store.AgentStore) http.H
 				if encErr != nil {
 					return
 				}
-				_ = broadcastTxSync(h.CometBFTRPC, encoded)
+				// AgentRegister must land before AgentSetPermission (the agent has
+				// to exist on-chain first); broadcastTxSync waits for the commit.
+				if bErr := broadcastTxSync(h.CometBFTRPC, encoded); bErr != nil {
+					return
+				}
+				// Sync the wizard-chosen permissions on-chain immediately, so
+				// BadgerDB matches SQLite at creation instead of only after a later
+				// edit (the create-time on-chain/off-chain drift the audit flagged:
+				// authoritative on-chain RBAC checks otherwise disagreed with the
+				// dashboard right after an agent was created).
+				permTx := &tx.ParsedTx{
+					Type:      tx.TxTypeAgentSetPermission,
+					Nonce:     tx.MonotonicNonce(h.SigningKey),
+					Timestamp: time.Now(),
+					AgentSetPermission: &tx.AgentSetPermission{
+						AgentID:       agentID,
+						Clearance:     uint8(agent.Clearance), // #nosec G115 -- clearance is 0-4
+						DomainAccess:  agent.DomainAccess,
+						VisibleAgents: agent.VisibleAgents,
+						OrgID:         agent.OrgID,
+						DeptID:        agent.DeptID,
+					},
+				}
+				embedDashboardAgentProof(permTx, h.SigningKey)
+				if signErr := tx.SignTx(permTx, h.SigningKey); signErr != nil {
+					return
+				}
+				if penc, pencErr := tx.EncodeTx(permTx); pencErr == nil {
+					_ = broadcastTxSync(h.CometBFTRPC, penc)
+				}
 			}()
 		}
 
