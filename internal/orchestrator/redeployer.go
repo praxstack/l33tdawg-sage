@@ -398,7 +398,14 @@ func (r *Redeployer) GetLiveStatus(ctx context.Context) (status, currentPhase, o
 		// would let a poll stop early and flash a false success).
 		status = "running"
 	default:
-		status = "idle"
+		// Lock released, yet the last recorded phase is a non-terminal one that
+		// never reached COMPLETED - the run was abandoned (e.g. lock TTL expired
+		// mid-flight). Report failed, never idle, so a poll can't read it as a
+		// success. The genuine success window (COMPLETED row still flipping from
+		// in_progress) is caught by the PhaseCompleted case above, so this cannot
+		// misfire on a real completion.
+		status = "failed"
+		errMsg = "redeployment did not complete (stalled at " + latest.Phase + ")"
 	}
 	return status, currentPhase, operation, agentID, errMsg, nil
 }
