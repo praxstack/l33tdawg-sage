@@ -89,6 +89,17 @@ type FederationService interface {
 	StageRemoteCA(remoteChainID string, caPEM []byte) (pin []byte, commit func() error, rollback func(), err error)
 	PeerStatus(ctx context.Context, remoteChainID string) (*federation.StatusResponse, error)
 	LocalChainID() string
+
+	// v11 JOIN ceremony drivers (off-consensus; the operator half). Host side:
+	HostCreate(hostEndpoint string) (*federation.HostCreateResult, error)
+	HostScanReturn(sessionID, returnURI string) error
+	HostSessionStatus(sessionID string) (*federation.HostSessionView, error)
+	HostApprove(sessionID, typedCode string, grant federation.ScopeWire) error
+	HostAbort(sessionID string)
+	// Guest side:
+	GuestScan(ctx context.Context, uri, guestEndpoint string) (*federation.GuestScanResult, error)
+	GuestRequest(ctx context.Context, sessionID, guestEndpoint string, scope federation.ScopeWire) (*federation.GuestRequestResult, error)
+	GuestConfirm(ctx context.Context, sessionID, guestEndpoint string, hostScope federation.ScopeWire) (string, error)
 }
 
 // SuppCacheWriter is the interface the REST server uses to store supplementary data
@@ -293,6 +304,17 @@ func (s *Server) setupRouter() chi.Router {
 		r.Get("/v1/federation/cross", s.handleCrossFedList)
 		r.Post("/v1/federation/cross/{chain_id}/revoke", s.handleCrossFedRevoke)
 		r.Get("/v1/federation/cross/{chain_id}/status", s.handleCrossFedPeerStatus)
+
+		// v11 real-TOTP JOIN ceremony - the operator's localhost control surface
+		// (the guided guest/host wizards). Node-operator-only; off-consensus.
+		r.Post("/v1/federation/join/host/create", s.handleJoinHostCreate)
+		r.Post("/v1/federation/join/host/scan-return", s.handleJoinHostScanReturn)
+		r.Get("/v1/federation/join/host/{session_id}", s.handleJoinHostStatus)
+		r.Post("/v1/federation/join/host/{session_id}/approve", s.handleJoinHostApprove)
+		r.Post("/v1/federation/join/host/{session_id}/abort", s.handleJoinHostAbort)
+		r.Post("/v1/federation/join/guest/scan", s.handleJoinGuestScan)
+		r.Post("/v1/federation/join/guest/request", s.handleJoinGuestRequest)
+		r.Post("/v1/federation/join/guest/confirm", s.handleJoinGuestConfirm)
 		r.Post("/v1/cocommit/submit", s.handleCoCommitSubmit)
 		r.Post("/v1/cocommit/{shared_id}/receipt/send", s.handleCoCommitReceiptSend)
 		r.Get("/v1/cocommit/{shared_id}/status", s.handleCoCommitStatus)

@@ -53,6 +53,9 @@ func (m *Manager) Router() http.Handler {
 		r.Post("/fed/v1/query", m.handleQuery)
 		r.Post("/fed/v1/receipt", m.handleReceipt)
 	})
+	// The pre-agreement JOIN ceremony routes sit behind joinAuth, NOT peerAuth
+	// (no active agreement exists yet during a join).
+	m.mountJoinRoutes(r)
 	return r
 }
 

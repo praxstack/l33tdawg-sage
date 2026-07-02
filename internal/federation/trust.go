@@ -279,9 +279,19 @@ func (m *Manager) ServerTLSConfig() (*tls.Config, error) {
 	}, nil
 }
 
-// verifyFederationClientCert accepts a client chain iff it verifies against
-// the pin-checked CA of at least one active agreement. Fail-closed on every
-// path; the error is deliberately generic (handshake errors leak to strangers).
+// verifyFederationClientCert accepts a client chain iff it verifies against the
+// pin-checked CA of at least one active agreement OR it is a guest connecting
+// during an in-flight JOIN ceremony (there is no agreement yet during a join).
+// Fail-closed on every path; the error is deliberately generic (handshake
+// errors leak to strangers).
+//
+// The join-window acceptance is a COARSE handshake gate only: it lets a scanning
+// guest reach the /fed/v1/join/* routes while the host has a session open. The
+// REAL gates are per-route - the 64-bit session id from the QR, the assertion
+// that the guest CA's SPKI equals the pin the host scanned off the return QR,
+// and the per-session TLS-cert binding (RT-2/RT-5). A stranger who reaches the
+// join routes without a valid session id and a CA matching a scanned pin gets
+// nowhere, and the RT-3 rate-limit + per-session fail cap bound the surface.
 func (m *Manager) verifyFederationClientCert(rawCerts [][]byte) error {
 	agreements := m.ActiveAgreements()
 	for i := range agreements {
@@ -293,7 +303,40 @@ func (m *Manager) verifyFederationClientCert(rawCerts [][]byte) error {
 			return nil
 		}
 	}
+	// A bound guest cert (post-request) verifies against its exact leaf SPKI; an
+	// as-yet-unbound guest is accepted only while a host session is genuinely
+	// open (deliberately opened by the operator, 15-min TTL). Both close as soon
+	// as the ceremony finishes.
+	if m.joinWindowAccepts(rawCerts) {
+		return nil
+	}
 	return errors.New("federation: client certificate matches no active agreement")
+}
+
+// joinWindowAccepts reports whether an in-flight join session should let this
+// client cert through the handshake. Post-bind sessions require the exact leaf
+// SPKI; pre-bind sessions (awaiting the first /join/request or serving the CA
+// fetch) accept any cert (the per-route pin assertion is the real gate).
+func (m *Manager) joinWindowAccepts(rawCerts [][]byte) bool {
+	open := m.joins.OpenSessions()
+	if len(open) == 0 {
+		return false
+	}
+	var leafSPKI []byte
+	if len(rawCerts) > 0 {
+		if leaf, err := x509.ParseCertificate(rawCerts[0]); err == nil {
+			leafSPKI = SPKIFingerprint(leaf)
+		}
+	}
+	for _, js := range open {
+		if len(js.BoundCertSPKI) == 0 {
+			return true // pre-bind window (CA fetch / first request)
+		}
+		if leafSPKI != nil && subtle.ConstantTimeCompare(js.BoundCertSPKI, leafSPKI) == 1 {
+			return true // the bound guest re-connecting for status/confirm
+		}
+	}
+	return false
 }
 
 // clientTLSConfig builds the outbound tls.Config for dialing one agreement's

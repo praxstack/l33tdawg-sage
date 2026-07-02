@@ -1,10 +1,12 @@
 package federation
 
 import (
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base32"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -28,8 +30,17 @@ type JoinSession struct {
 	Seed         []byte
 	HostNonce    []byte
 
-	// Guest-side material (bound at the first Request — one-guest-identity).
+	// ExpectedGuestPin is the guest CA SPKI the host scanned off the guest's
+	// return QR over the authenticated visual channel (§2.2.5). It is the
+	// ANCHOR: at the first /join/request the host asserts SPKIFingerprint(the
+	// presented guest CA) == ExpectedGuestPin, so a body-supplied pin can never
+	// substitute the scanned one. Set by ScanReturn BEFORE the guest requests.
+	ExpectedGuestPin []byte
+	ExpectedGuestEnd string // guest endpoint scanned off the return QR
+
+	// Guest-side material (bound at the first Request - one-guest-identity).
 	GuestChain    string
+	GuestAgentPub []byte // guest node-operator ed25519 pub (verifies guest_sig/ack over E)
 	GuestPin      []byte
 	GuestEndpoint string
 	GuestNonce    []byte
@@ -37,11 +48,32 @@ type JoinSession struct {
 	HostScope     [32]byte
 	BoundCertSPKI []byte // RT-2/RT-5: the TLS client-cert SPKI bound to this session
 
-	// RT-6 freeze (locked at HOST_APPROVED).
-	Approved           bool
-	ApprovedE          [32]byte
-	ApprovedGuestPin   []byte
-	ApprovedGuestNonce []byte
+	// Host grant terms for cross_fed:<guest> (what the guest may read from the
+	// host). Set by Approve from the operator's H3/H5 choices; folded into
+	// HostScope (RT-9) and used to build the host's tx-33.
+	HostGrantClearance uint8
+	HostGrantDomains   []string
+	HostGrantExpiry    int64
+	HostGrantMode      string
+	HostGrantDirection string
+
+	// Staged, un-committed material held between /join/request and /join/confirm.
+	// The guest CA is staged (pending sidecar) at request and committed only
+	// AFTER the host's tx-33 lands (mirrors the CA stage→broadcast→commit rule).
+	commitGuestCA   func() error
+	rollbackGuestCA func()
+
+	// RT-6 freeze (locked at HOST_APPROVED). Every guest field folded into E - or
+	// used to build/verify the host's tx-33 - is snapshotted here, so a
+	// concurrent/late re-request that mutates the live fields can never make the
+	// host broadcast against, or verify signatures under, an identity no human
+	// compared.
+	Approved            bool
+	ApprovedE           [32]byte
+	ApprovedGuestPin    []byte
+	ApprovedGuestNonce  []byte
+	ApprovedGuestEnd    string
+	ApprovedGuestAgent  []byte
 
 	failCount int
 }
@@ -52,9 +84,15 @@ const (
 	JoinRequested      = "REQUESTED"
 	JoinHostApproved   = "HOST_APPROVED"
 	JoinGuestConfirmed = "GUEST_CONFIRMED"
-	JoinActive         = "ACTIVE"
-	JoinAborted        = "ABORTED"
-	JoinExpired        = "EXPIRED"
+	// JoinConfirming is the transient window between CheckConfirm handing the
+	// commit/rollback closures to the confirm driver and MarkActive. The reaper
+	// must not immediately reap it (its staged CA is being committed), and the
+	// closures are already nil on the live session so the reaper cannot roll it
+	// back out from under the in-flight broadcast.
+	JoinConfirming = "CONFIRMING"
+	JoinActive     = "ACTIVE"
+	JoinAborted    = "ABORTED"
+	JoinExpired    = "EXPIRED"
 )
 
 const (
@@ -103,7 +141,25 @@ func (s *JoinStore) Create(localChain string, hostPin []byte, hostEndpoint strin
 // SessionID returns the base32 id for the QR (x_sage_sid).
 func (js *JoinSession) SessionID() string { return js.ID }
 
-// Get returns a live (non-expired) session, expiring it lazily.
+// snapshot returns a copy of the session for lock-free reads. It MUST be called
+// while holding s.mu. Every OTHER slice field is only ever reassigned (never
+// mutated in place) by the mutators, so a shallow header copy is a consistent
+// immutable view - EXCEPT Seed, which Cleanup scrubs in place for secret
+// hygiene; so Seed is DEEP-copied here, otherwise a lock-free reader
+// (confirmCodes) would race the reaper zeroing the shared backing array.
+func (js *JoinSession) snapshot() *JoinSession {
+	cp := *js
+	cp.Seed = append([]byte(nil), js.Seed...)
+	// The unexported commit/rollback closures are node-local ceremony plumbing;
+	// never expose them on a read snapshot handed to lock-free callers.
+	cp.commitGuestCA = nil
+	cp.rollbackGuestCA = nil
+	return &cp
+}
+
+// Get returns a locked snapshot of a live (non-expired) session, expiring it
+// lazily. Callers read fields off the snapshot; all mutation goes through the
+// id-based JoinStore methods.
 func (s *JoinStore) Get(id string, now time.Time) (*JoinSession, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -115,19 +171,82 @@ func (s *JoinStore) Get(id string, now time.Time) (*JoinSession, bool) {
 		js.State = JoinExpired
 		return nil, false
 	}
-	return js, true
+	return js.snapshot(), true
+}
+
+// confirmCodes computes CODE_G/CODE_H from a session's own fields (host view).
+// Pure over the session, so both the host wizard poll and the atomic approve
+// compute an identical value.
+func (js *JoinSession) confirmCodes() (codeG, codeH string) {
+	return ConfirmCodes(js.Seed, js.GuestChain, js.GuestPin, js.LocalChain, js.HostPin,
+		js.GuestNonce, js.HostNonce, js.ConfirmStep)
+}
+
+// attestation computes the frozen enrollment attestation E from the host view
+// (host grant scope digest supplied).
+func (js *JoinSession) attestation(hostScope [32]byte) [32]byte {
+	return EnrollInputs{
+		GuestChain:    js.GuestChain,
+		HostChain:     js.LocalChain,
+		GuestPin:      js.GuestPin,
+		HostPin:       js.HostPin,
+		GuestEndpoint: js.GuestEndpoint,
+		HostEndpoint:  js.HostEndpoint,
+		GuestScope:    js.GuestScope,
+		HostScope:     hostScope,
+		Seed:          js.Seed,
+		GuestNonce:    js.GuestNonce,
+		HostNonce:     js.HostNonce,
+	}.Attestation()
 }
 
 // AllowConn reports whether a request from connKey (a TLS-connection-derived
 // key, NOT XFF) is within the rate limit.
 func (s *JoinStore) AllowConn(connKey string, now time.Time) bool { return s.rl.allow(connKey, now) }
 
+// SetExpectedGuest records the guest CA SPKI + endpoint the host scanned off the
+// guest's return QR (§2.2.5) over the authenticated visual channel. This is the
+// anchor the first /join/request asserts the presented guest CA against. Setting
+// it does not advance state; it only arms the session to accept a request.
+func (s *JoinStore) SetExpectedGuest(id string, pin []byte, endpoint string, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	js, ok := s.sessions[id]
+	if !ok || (now.After(js.ExpiresAt) && js.State != JoinActive) {
+		return fmt.Errorf("join session not found or expired")
+	}
+	if len(pin) != 32 {
+		return fmt.Errorf("scanned guest pin must be 32 bytes")
+	}
+	js.ExpectedGuestPin = append([]byte(nil), pin...)
+	js.ExpectedGuestEnd = endpoint
+	return nil
+}
+
+// GuestRequestInput carries everything the first /join/request binds.
+type GuestRequestInput struct {
+	GuestChain    string
+	GuestAgentPub []byte
+	GuestNonce    []byte
+	GuestPin      []byte
+	GuestEndpoint string
+	GuestScope    [32]byte
+	CertSPKI      []byte // presented TLS client-cert leaf SPKI (RT-2/RT-5)
+	// CommitGuestCA/RollbackGuestCA persist/discard the staged guest CA (held
+	// until the host's tx-33 lands). Attached only on the first bind.
+	CommitGuestCA   func() error
+	RollbackGuestCA func()
+}
+
 // Request binds the guest identity + TLS cert to the session on the first call
-// (one-guest-identity, RT-2/RT-5), picks the confirm step, and moves to
+// (one-guest-identity, RT-2/RT-5), asserts the presented guest pin equals the
+// SCANNED anchor (ExpectedGuestPin), picks the confirm step, and moves to
 // REQUESTED. A second request with a DIFFERENT guest identity/cert is refused;
 // a re-request that mutates guest fields after approval resets the approval
-// (enforced in Approve/Confirm via the frozen check).
-func (s *JoinStore) Request(id string, now time.Time, guestChain string, guestNonce, guestPin []byte, guestEndpoint string, guestScope, hostScope [32]byte, certSPKI []byte) (*JoinSession, error) {
+// (enforced in Approve/Confirm via the frozen check). On the first successful
+// bind the staged-CA closures are attached; a rejected first bind returns an
+// error so the caller rolls back its own staged CA.
+func (s *JoinStore) Request(id string, now time.Time, in GuestRequestInput) (*JoinSession, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	js, ok := s.sessions[id]
@@ -137,111 +256,260 @@ func (s *JoinStore) Request(id string, now time.Time, guestChain string, guestNo
 	if js.failCount >= joinMaxFailPerSid {
 		return nil, fmt.Errorf("join session locked (too many attempts)")
 	}
+	// The host must have scanned the guest's return QR first: the ANCHOR is the
+	// visually-scanned pin, never a body-supplied one.
+	if len(js.ExpectedGuestPin) != 32 {
+		return nil, fmt.Errorf("host has not scanned your connection code yet")
+	}
+	if subtle.ConstantTimeCompare(js.ExpectedGuestPin, in.GuestPin) != 1 {
+		js.failCount++
+		return nil, fmt.Errorf("guest key does not match the scanned connection code")
+	}
+	if len(in.GuestAgentPub) == 0 {
+		return nil, fmt.Errorf("missing guest agent key")
+	}
 	// One-guest-identity binding: after the first request, a different guest
 	// chain or cert is refused (a distinct guest needs a distinct session).
 	if js.GuestChain != "" {
-		if js.GuestChain != guestChain || subtle.ConstantTimeCompare(js.BoundCertSPKI, certSPKI) != 1 {
+		if js.GuestChain != in.GuestChain || subtle.ConstantTimeCompare(js.BoundCertSPKI, in.CertSPKI) != 1 {
 			js.failCount++
 			return nil, fmt.Errorf("join session already bound to a different guest")
 		}
 	}
-	// A re-request that changes guest material after an approval resets it
-	// (RT-6: a resumed/regenerated session needs a fresh human compare).
-	if js.Approved && (subtle.ConstantTimeCompare(js.GuestPin, guestPin) != 1 ||
-		subtle.ConstantTimeCompare(js.GuestNonce, guestNonce) != 1) {
+	// A re-request that changes ANY guest field folded into E (pin, nonce,
+	// endpoint, scope, agent key) after an approval resets it (RT-6: a
+	// resumed/regenerated session needs a fresh human compare). CheckConfirm
+	// verifies against the frozen snapshot regardless, but resetting here also
+	// re-advances the state machine so the wizard re-drives the compare.
+	if js.Approved && (subtle.ConstantTimeCompare(js.GuestPin, in.GuestPin) != 1 ||
+		subtle.ConstantTimeCompare(js.GuestNonce, in.GuestNonce) != 1 ||
+		js.GuestEndpoint != in.GuestEndpoint ||
+		js.GuestScope != in.GuestScope ||
+		subtle.ConstantTimeCompare(js.GuestAgentPub, in.GuestAgentPub) != 1) {
 		js.Approved = false
 		js.ApprovedE = [32]byte{}
+		if js.State == JoinHostApproved {
+			js.State = JoinRequested
+		}
 	}
-	js.GuestChain = guestChain
-	js.GuestNonce = append([]byte(nil), guestNonce...)
-	js.GuestPin = append([]byte(nil), guestPin...)
-	js.GuestEndpoint = guestEndpoint
-	js.GuestScope = guestScope
-	js.HostScope = hostScope
-	js.BoundCertSPKI = append([]byte(nil), certSPKI...)
+	firstBind := js.GuestChain == ""
+	js.GuestChain = in.GuestChain
+	js.GuestAgentPub = append([]byte(nil), in.GuestAgentPub...)
+	js.GuestNonce = append([]byte(nil), in.GuestNonce...)
+	js.GuestPin = append([]byte(nil), in.GuestPin...)
+	js.GuestEndpoint = in.GuestEndpoint
+	js.GuestScope = in.GuestScope
+	js.BoundCertSPKI = append([]byte(nil), in.CertSPKI...)
+	if firstBind {
+		js.commitGuestCA = in.CommitGuestCA
+		js.rollbackGuestCA = in.RollbackGuestCA
+	} else if in.RollbackGuestCA != nil {
+		// A re-request re-staged a fresh CA sidecar; drop it (the first bind's
+		// staged CA is authoritative for this bound guest).
+		in.RollbackGuestCA()
+	}
 	if js.ConfirmStep == 0 {
-		js.ConfirmStep = time.Now().Unix() / 30 // frozen for the whole join window
+		js.ConfirmStep = now.Unix() / 30 // frozen for the whole join window
 	}
 	if js.State == JoinCreated {
 		js.State = JoinRequested
 	}
-	return js, nil
+	return js.snapshot(), nil
 }
 
-// Approve records approval #1 and FREEZES the attestation identity (RT-6). The
-// host has already compared CODE_G. e is the attestation computed from the
-// current (bound) session fields.
-func (s *JoinStore) Approve(id string, e [32]byte) error {
+// HostGrant is the host operator's chosen cross_fed:<guest> terms (H3/H5),
+// recorded at approval and folded into HostScope (RT-9) + the host tx-33.
+type HostGrant struct {
+	Clearance uint8
+	Domains   []string
+	Expiry    int64
+	Mode      string
+	Direction string
+	Scope     [32]byte // ScopeDigest of the above (recomputed identically by the guest)
+}
+
+// ApproveWithCode is approval #1, done ATOMICALLY: under a single lock it
+// recomputes CODE_G from the CURRENT session, constant-time-compares it to what
+// the operator typed (the code they heard the guest read), and - only on a
+// match - records the host grant, computes the attestation E over exactly those
+// same fields, and FREEZES the identity (RT-6). Doing the compare and the E
+// computation in one critical section removes the TOCTOU where a concurrent
+// re-request could shift the fields between "compared" and "frozen". A wrong
+// code bumps the per-session fail cap. Returns whether the session is now locked.
+func (s *JoinStore) ApproveWithCode(id, typedCode string, grant HostGrant) (locked bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	js, ok := s.sessions[id]
 	if !ok || js.State == JoinExpired || js.State == JoinAborted {
-		return fmt.Errorf("join session not approvable")
+		return false, fmt.Errorf("join session not approvable")
 	}
+	if js.GuestChain == "" || (js.State != JoinRequested && js.State != JoinHostApproved) {
+		return false, fmt.Errorf("no guest request to approve")
+	}
+	if js.failCount >= joinMaxFailPerSid {
+		return true, fmt.Errorf("join session locked (too many attempts)")
+	}
+	codeG, _ := js.confirmCodes()
+	if subtle.ConstantTimeCompare([]byte(strings.TrimSpace(typedCode)), []byte(codeG)) != 1 {
+		js.failCount++
+		return js.failCount >= joinMaxFailPerSid, fmt.Errorf("code does not match what the guest read")
+	}
+	js.HostGrantClearance = grant.Clearance
+	js.HostGrantDomains = append([]string(nil), grant.Domains...)
+	js.HostGrantExpiry = grant.Expiry
+	js.HostGrantMode = grant.Mode
+	js.HostGrantDirection = grant.Direction
+	js.HostScope = grant.Scope
 	js.Approved = true
-	js.ApprovedE = e
+	js.ApprovedE = js.attestation(grant.Scope)
 	js.ApprovedGuestPin = append([]byte(nil), js.GuestPin...)
 	js.ApprovedGuestNonce = append([]byte(nil), js.GuestNonce...)
+	js.ApprovedGuestEnd = js.GuestEndpoint
+	js.ApprovedGuestAgent = append([]byte(nil), js.GuestAgentPub...)
 	js.State = JoinHostApproved
-	return nil
+	return false, nil
 }
 
 // CheckConfirm verifies a confirm against the FROZEN attestation (RT-6): the
-// approval must stand and the session's current guest fields must equal the
-// frozen ones. Returns the frozen E to verify the guest ack signature against.
-func (s *JoinStore) CheckConfirm(id string) (*JoinSession, [32]byte, error) {
+// approval must stand, the presented TLS cert must match the bound one, and the
+// session's current guest fields must equal the frozen ones. It returns a COPY
+// of the ceremony fields the confirm driver needs (frozen E, guest agent key,
+// host grant, staged-CA committer) so the driver can broadcast + commit without
+// holding the store lock. It does NOT advance state; the driver calls MarkActive
+// after its tx-33 lands. Concurrent confirms are idempotent at the anchor layer
+// (the existing-record short-circuit) and single-flow in practice.
+func (s *JoinStore) CheckConfirm(id string, certSPKI, guestSig, guestAckSig []byte, now time.Time) (*ConfirmContext, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	js, ok := s.sessions[id]
 	if !ok {
-		return nil, [32]byte{}, fmt.Errorf("join session not found")
+		return nil, fmt.Errorf("join session not found")
+	}
+	// Expiry gate (parity with Get/Request): never drive a confirm on a lapsed
+	// session - combined with the reaper NOT reaping CONFIRMING/ACTIVE, this
+	// closes the commit-vs-reap race on the staged CA sidecar.
+	if now.After(js.ExpiresAt) {
+		return nil, fmt.Errorf("join session expired")
 	}
 	if !js.Approved || js.State != JoinHostApproved {
-		return nil, [32]byte{}, fmt.Errorf("join session not host-approved")
+		return nil, fmt.Errorf("join session not host-approved")
 	}
-	// Reject on ANY mutation of the guest fields since approval.
+	// RT-2/RT-5: the confirm must come from the same TLS client cert bound at
+	// request time.
+	if subtle.ConstantTimeCompare(js.BoundCertSPKI, certSPKI) != 1 {
+		return nil, fmt.Errorf("confirm from an unbound client certificate")
+	}
+	// Reject on ANY mutation of the guest fields folded into the frozen E since
+	// approval.
 	if subtle.ConstantTimeCompare(js.ApprovedGuestPin, js.GuestPin) != 1 ||
-		subtle.ConstantTimeCompare(js.ApprovedGuestNonce, js.GuestNonce) != 1 {
+		subtle.ConstantTimeCompare(js.ApprovedGuestNonce, js.GuestNonce) != 1 ||
+		js.ApprovedGuestEnd != js.GuestEndpoint ||
+		subtle.ConstantTimeCompare(js.ApprovedGuestAgent, js.GuestAgentPub) != 1 {
 		js.Approved = false
 		js.ApprovedE = [32]byte{}
 		js.State = JoinRequested
-		return nil, [32]byte{}, fmt.Errorf("guest identity changed since approval — re-confirm required")
+		return nil, fmt.Errorf("guest identity changed since approval - re-confirm required")
 	}
-	return js, js.ApprovedE, nil
+	// Verify the guest's approval-#2 signatures over the FROZEN E, using the
+	// FROZEN agent key - INSIDE the lock, BEFORE any state change. A bad
+	// signature leaves the session HOST_APPROVED (retryable) and never transfers
+	// the staged-CA closures, so a bogus confirm can neither brick the ceremony
+	// nor consume the pending sidecar.
+	pub := ed25519.PublicKey(js.ApprovedGuestAgent)
+	if !VerifyEnroll(pub, js.ApprovedE, false, guestSig) || !VerifyEnroll(pub, js.ApprovedE, true, guestAckSig) {
+		return nil, fmt.Errorf("guest approval signatures do not verify against the frozen attestation")
+	}
+	// Signatures good: move to CONFIRMING and TRANSFER ownership of the staged-CA
+	// closures to the driver - nil them on the live session so the reaper can
+	// never roll back (or double-commit) the pending CA the driver is about to
+	// commit. A second concurrent confirm now finds CONFIRMING (not
+	// HOST_APPROVED) and is rejected, so the host broadcasts its tx-33 once.
+	ctx := &ConfirmContext{
+		GuestChain:    js.GuestChain,
+		GuestPin:      append([]byte(nil), js.ApprovedGuestPin...),
+		GuestEndpoint: js.ApprovedGuestEnd,
+		Seed:          append([]byte(nil), js.Seed...),
+		HostGrant: HostGrant{
+			Clearance: js.HostGrantClearance,
+			Domains:   append([]string(nil), js.HostGrantDomains...),
+			Expiry:    js.HostGrantExpiry,
+			Mode:      js.HostGrantMode,
+			Direction: js.HostGrantDirection,
+			Scope:     js.HostScope,
+		},
+		commitGuestCA:   js.commitGuestCA,
+		rollbackGuestCA: js.rollbackGuestCA,
+	}
+	js.commitGuestCA = nil
+	js.rollbackGuestCA = nil
+	js.State = JoinConfirming
+	return ctx, nil
 }
 
-// MarkActive transitions to ACTIVE after the host broadcasts its tx-33.
+// ConfirmContext is the snapshot the confirm driver needs to broadcast the host
+// tx-33 and commit the staged guest CA + the exact ceremony seed. The guest
+// signatures were already verified against the frozen E inside CheckConfirm
+// (under the lock); every field here is a copy - the driver holds no live
+// pointer.
+type ConfirmContext struct {
+	GuestChain      string
+	GuestPin        []byte
+	GuestEndpoint   string
+	Seed            []byte // the ceremony's own seed (NOT re-resolved by chain id)
+	HostGrant       HostGrant
+	commitGuestCA   func() error
+	rollbackGuestCA func()
+}
+
+// CommitGuestCA persists the staged guest CA (called by the driver ONLY after
+// the host's tx-33 lands on-chain).
+func (c *ConfirmContext) CommitGuestCA() error {
+	if c.commitGuestCA == nil {
+		return nil
+	}
+	return c.commitGuestCA()
+}
+
+// RollbackGuestCA discards the staged guest CA sidecar (called by the driver if
+// its tx-33 broadcast fails, so a failed confirm leaks no pending file). The
+// driver owns these closures exclusively after CheckConfirm, so the reaper never
+// races this.
+func (c *ConfirmContext) RollbackGuestCA() {
+	if c.rollbackGuestCA != nil {
+		c.rollbackGuestCA()
+	}
+}
+
+// MarkActive transitions to ACTIVE after the host broadcasts its tx-33 (the
+// staged guest CA is committed by the driver first).
 func (s *JoinStore) MarkActive(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if js, ok := s.sessions[id]; ok {
 		js.State = JoinActive
+		js.rollbackGuestCA = nil // committed; do not roll back on later cleanup
+		js.commitGuestCA = nil
 	}
 }
 
-// Abort marks a session aborted (burned on a human "No" or an error).
+// Abort marks a session aborted (burned on a human "No" or an error) and rolls
+// back any staged-but-uncommitted guest CA sidecar.
 func (s *JoinStore) Abort(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if js, ok := s.sessions[id]; ok {
+		if js.State != JoinActive && js.rollbackGuestCA != nil {
+			js.rollbackGuestCA()
+			js.rollbackGuestCA = nil
+			js.commitGuestCA = nil
+		}
 		js.State = JoinAborted
 	}
 }
 
-// Fail increments the per-session fail cap and returns whether it is now locked.
-func (s *JoinStore) Fail(id string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	js, ok := s.sessions[id]
-	if !ok {
-		return true
-	}
-	js.failCount++
-	return js.failCount >= joinMaxFailPerSid
-}
-
-// OpenSessions returns the sessions still in flight (for the
-// verifyFederationClientCert extension: their staged guest CAs authenticate).
+// OpenSessions returns SNAPSHOTS of the sessions still in flight (for the
+// verifyFederationClientCert extension: their bound guest certs authenticate).
+// Snapshots so the handshake path never dereferences a live session off-lock.
 func (s *JoinStore) OpenSessions() []*JoinSession {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -254,23 +522,47 @@ func (s *JoinStore) OpenSessions() []*JoinSession {
 		if js.State == JoinAborted || js.State == JoinExpired || js.State == JoinActive {
 			continue
 		}
-		out = append(out, js)
+		out = append(out, js.snapshot())
 	}
 	return out
 }
 
-// Cleanup drops expired/terminal sessions.
+// Cleanup drops expired/terminal sessions, rolling back any staged-but-
+// uncommitted guest CA sidecar for a session that expired mid-ceremony and
+// zeroizing its shared seed (secret hygiene). A session lingers only until its
+// TTL lapses; the reaper (Manager.StartMaintenance) invokes this periodically.
 func (s *JoinStore) Cleanup(now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for id, js := range s.sessions {
-		if now.After(js.ExpiresAt.Add(joinSessionTTL)) || js.State == JoinAborted {
+		// CONFIRMING and ACTIVE are protected from the immediate expiry-reap: a
+		// CONFIRMING session's staged CA is being committed by the driver (which
+		// owns the closures), and an ACTIVE one is done. Both are only reaped
+		// after the TTL grace window, by which time any in-flight confirm
+		// (bounded by the broadcast timeout) has long finished.
+		protected := js.State == JoinActive || js.State == JoinConfirming
+		terminal := js.State == JoinAborted || js.State == JoinExpired ||
+			(now.After(js.ExpiresAt) && !protected)
+		if terminal || now.After(js.ExpiresAt.Add(joinSessionTTL)) {
+			if !protected && js.rollbackGuestCA != nil {
+				js.rollbackGuestCA()
+			}
+			for i := range js.Seed {
+				js.Seed[i] = 0
+			}
 			delete(s.sessions, id)
 		}
 	}
 }
 
-// connRateLimiter is the RT-3 rate limiter — keyed on a TLS-connection-derived
+// Maintain reaps expired/terminal sessions and drains the rate-limiter map.
+// Invoked periodically by Manager.StartMaintenance.
+func (s *JoinStore) Maintain(now time.Time) {
+	s.Cleanup(now)
+	s.rl.sweep(now)
+}
+
+// connRateLimiter is the RT-3 rate limiter - keyed on a TLS-connection-derived
 // value the caller supplies (never X-Forwarded-For). Same token-bucket shape as
 // web/pairing.go's redeemRateLimiter, re-keyed safely for the direct-connect
 // federation listener.
@@ -304,4 +596,26 @@ func (rl *connRateLimiter) allow(key string, now time.Time) bool {
 	}
 	rl.attempts[key] = append(fresh, now)
 	return true
+}
+
+// sweep drops keys whose window has fully drained, so the outer map cannot grow
+// unboundedly under connections from many/rotating source addresses (a stranger
+// spraying the open pre-bind join window). Called by the periodic reaper.
+func (rl *connRateLimiter) sweep(now time.Time) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	cutoff := now.Add(-connWindow)
+	for key, ts := range rl.attempts {
+		live := ts[:0]
+		for _, t := range ts {
+			if t.After(cutoff) {
+				live = append(live, t)
+			}
+		}
+		if len(live) == 0 {
+			delete(rl.attempts, key)
+		} else {
+			rl.attempts[key] = live
+		}
+	}
 }

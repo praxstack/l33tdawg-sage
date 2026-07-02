@@ -782,6 +782,9 @@ func runServe() (rerr error) {
 				WriteTimeout: 15 * time.Second,
 				IdleTimeout:  60 * time.Second,
 			}
+			// Periodic reaper for expired join sessions / guest drafts / rate-limit
+			// map (seed hygiene + staged-CA rollback + unbounded-growth guard).
+			fedMgr.StartMaintenance(ctx)
 			go func() {
 				logger.Info().Str("addr", fedAddr).Str("chain_id", cfg.ChainID).Msg("federation mTLS listener starting")
 				if fedServeErr := fedServer.ListenAndServeTLS("", ""); fedServeErr != nil && fedServeErr != http.ErrServerClosed {

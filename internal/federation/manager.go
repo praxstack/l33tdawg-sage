@@ -97,20 +97,31 @@ type Manager struct {
 	ownPinMu    sync.Mutex
 	ownPinCache []byte
 
-	// joins is the host-side JoinSession registry (v11 ceremony). Non-nil once
-	// the listener is wired.
-	joins *JoinStore
+	// joins is the host-side JoinSession registry (v11 ceremony); guestDrafts is
+	// the guest-side counterpart holding the transient per-ceremony secret (the
+	// scanned seed + host material + exchanged nonces) between the QR scan and
+	// the guest's tx-33, keyed by the host's session id. Both are node-local and
+	// off-consensus. Initialized in NewManager.
+	joins       *JoinStore
+	guestMu     sync.Mutex
+	guestDrafts map[string]*guestDraft
+
+	// broadcastFn submits an encoded tx to the local chain and returns
+	// (txHash, height). Defaults to broadcastTxCommit; overridable in tests so
+	// the join ceremony can be driven without a live CometBFT node.
+	broadcastFn func(txBytes []byte) (string, int64, error)
 }
 
-// JoinStore returns (lazily creating) the host-side join session registry.
-func (m *Manager) JoinStore() *JoinStore {
-	m.ownPinMu.Lock()
-	defer m.ownPinMu.Unlock()
-	if m.joins == nil {
-		m.joins = NewJoinStore()
+// broadcast dispatches an encoded tx through the (possibly test-injected) path.
+func (m *Manager) broadcast(txBytes []byte) (string, int64, error) {
+	if m.broadcastFn != nil {
+		return m.broadcastFn(txBytes)
 	}
-	return m.joins
+	return m.broadcastTxCommit(txBytes)
 }
+
+// JoinStore returns the host-side join session registry.
+func (m *Manager) JoinStore() *JoinStore { return m.joins }
 
 // NewManager builds the federation transport manager. It is safe to construct
 // even when federation is unused — every entry point re-checks agreement state.
@@ -129,6 +140,8 @@ func NewManager(cfg Config) *Manager {
 		caCache:      make(map[string]*x509.Certificate),
 		broadcastSem: make(chan struct{}, maxConcurrentReceiptBroadcasts),
 		seedCache:    make(map[string][][]byte),
+		joins:        NewJoinStore(),
+		guestDrafts:  make(map[string]*guestDraft),
 	}
 }
 

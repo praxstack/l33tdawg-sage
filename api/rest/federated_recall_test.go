@@ -41,6 +41,29 @@ func (f *fakeFederation) PeerStatus(context.Context, string) (*federation.Status
 }
 func (f *fakeFederation) LocalChainID() string { return "chain-local" }
 
+// v11 JOIN ceremony drivers - unused by the recall tests; stubbed to satisfy
+// the FederationService interface.
+func (f *fakeFederation) HostCreate(string) (*federation.HostCreateResult, error) {
+	return nil, errors.New("na")
+}
+func (f *fakeFederation) HostScanReturn(string, string) error { return errors.New("na") }
+func (f *fakeFederation) HostSessionStatus(string) (*federation.HostSessionView, error) {
+	return nil, errors.New("na")
+}
+func (f *fakeFederation) HostApprove(string, string, federation.ScopeWire) error {
+	return errors.New("na")
+}
+func (f *fakeFederation) HostAbort(string) {}
+func (f *fakeFederation) GuestScan(context.Context, string, string) (*federation.GuestScanResult, error) {
+	return nil, errors.New("na")
+}
+func (f *fakeFederation) GuestRequest(context.Context, string, string, federation.ScopeWire) (*federation.GuestRequestResult, error) {
+	return nil, errors.New("na")
+}
+func (f *fakeFederation) GuestConfirm(context.Context, string, string, federation.ScopeWire) (string, error) {
+	return "", errors.New("na")
+}
+
 func TestFederatedRecallMergesRemoteResults(t *testing.T) {
 	srv, memStore, _ := newTestServer(t, "")
 
