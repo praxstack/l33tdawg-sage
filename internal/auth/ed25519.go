@@ -2,6 +2,7 @@ package auth
 
 import (
 	"crypto/ed25519"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -137,6 +138,66 @@ func SignRequestV2(privateKey ed25519.PrivateKey, senderChainID, receiverChainID
 // chain id — a signature minted for any other (sender, receiver) pair fails.
 func VerifyRequestV2(publicKey ed25519.PublicKey, senderChainID, receiverChainID, method, path string, body []byte, timestamp int64, nonce []byte, signature []byte) bool {
 	return Verify(publicKey, buildRequestMessageV2(senderChainID, receiverChainID, method, path, body, timestamp, nonce), signature)
+}
+
+// --- X-Sig-Version=3 — v2 PLUS a rotating per-request TOTP factor (v11 join) ---
+//
+// V3 folds an HMAC-SHA256 TOTP factor, keyed by the per-agreement shared seed,
+// INSIDE the Ed25519-signed message so it cannot be stripped — a defense-in-
+// depth downgrade-resistance + seed-holder-scoping layer over the pinned mTLS +
+// v2 signature (NOT independent MITM detection; see the join-ceremony honesty
+// ledger). The step is derived from the SINGLE signed timestamp, so peer clock
+// skew is absorbed by the same ±5-min ts gate as v2 — there is no separate
+// step-skew problem and no ±1 skew window. k_totp is derived by the caller
+// (federation.deriveKTOTP over seed+pin_pair) and passed in as bytes, keeping
+// this package free of any federation/HKDF dependency.
+
+const sigV3DomainTag = "sage-fed-sig-v3"
+
+// TOTPFactor computes the v3 rotating factor for a chain pair at a step:
+// HMAC-SHA256(kTOTP, tag \x00 chainBindingHash(32) BE64(step)). Exported so a
+// verifier can recompute it under a different seed epoch during cutover.
+func TOTPFactor(kTOTP []byte, senderChainID, receiverChainID string, step int64) [32]byte {
+	ch := chainBindingHash(senderChainID, receiverChainID)
+	mac := hmac.New(sha256.New, kTOTP)
+	mac.Write([]byte(sigV3DomainTag))
+	mac.Write([]byte{0x00})
+	mac.Write(ch[:])
+	var sb [8]byte
+	binary.BigEndian.PutUint64(sb[:], uint64(step)) // #nosec G115 -- step is a non-negative counter
+	mac.Write(sb[:])
+	var out [32]byte
+	copy(out[:], mac.Sum(nil))
+	return out
+}
+
+// v3StepFromTS derives the TOTP step from the single signed timestamp (one
+// clock read), so the verifier recomputes the same step from the same ts.
+func v3StepFromTS(timestamp int64) int64 { return timestamp / 30 }
+
+// buildRequestMessageV3 = chainBindingHash(32) || totp_factor(32) || v1 body.
+// Fixed-width prefixes before the variable-length body keep the encoding
+// injective (the v2 argument), and prevent a v2 message from ever parsing as v3.
+func buildRequestMessageV3(kTOTP []byte, senderChainID, receiverChainID, method, path string, body []byte, timestamp int64, nonce []byte) []byte {
+	ch := chainBindingHash(senderChainID, receiverChainID)
+	factor := TOTPFactor(kTOTP, senderChainID, receiverChainID, v3StepFromTS(timestamp))
+	msg := make([]byte, 0, 64+len(body)+64)
+	msg = append(msg, ch[:]...)
+	msg = append(msg, factor[:]...)
+	msg = append(msg, buildRequestMessage(method, path, body, timestamp, nonce)...)
+	return msg
+}
+
+// SignRequestV3 signs a federation request with the rotating TOTP factor folded
+// in. kTOTP is the per-agreement derived key (federation.deriveKTOTP).
+func SignRequestV3(privateKey ed25519.PrivateKey, kTOTP []byte, senderChainID, receiverChainID, method, path string, body []byte, timestamp int64, nonce []byte) []byte {
+	return Sign(privateKey, buildRequestMessageV3(kTOTP, senderChainID, receiverChainID, method, path, body, timestamp, nonce))
+}
+
+// VerifyRequestV3 verifies a v3 signature under a specific kTOTP. During a seed
+// epoch cutover the caller tries each candidate kTOTP.
+func VerifyRequestV3(publicKey ed25519.PublicKey, kTOTP []byte, senderChainID, receiverChainID, method, path string, body []byte, timestamp int64, nonce []byte, signature []byte) bool {
+	return Verify(publicKey, buildRequestMessageV3(kTOTP, senderChainID, receiverChainID, method, path, body, timestamp, nonce), signature)
 }
 
 // VerifyAgentProof re-verifies an agent's Ed25519 signature on-chain using the
