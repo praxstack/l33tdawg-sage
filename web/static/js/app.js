@@ -1719,6 +1719,7 @@ const TASK_COLUMNS = [
 function TasksPage() {
     const [tasks, setTasks] = useState([]);
     const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(null);
     const [domainFilter, setDomainFilter] = useState('');
     const [domains, setDomains] = useState([]);
     const [dragging, setDragging] = useState(null);
@@ -1733,13 +1734,14 @@ function TasksPage() {
 
     async function loadTasks() {
         setLoading(true);
+        setError(null);
         try {
             const data = await fetchTasks({ all: true, limit: 200 });
             const items = data.tasks || [];
             setTasks(items);
             const ds = [...new Set(items.map(t => t.domain_tag).filter(Boolean))].sort();
             setDomains(ds);
-        } catch (e) { setTasks([]); }
+        } catch (e) { setTasks([]); setError(e && e.message ? e.message : 'Failed to load tasks'); }
         setLoading(false);
     }
 
@@ -1849,6 +1851,12 @@ function TasksPage() {
                     <button class="btn" onClick=${() => setShowOldDone(false)}>Hide old</button>
                 </div>
             `}
+            ${error && html`
+                <div style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.4);color:#ef4444;padding:12px 16px;border-radius:8px;margin-bottom:12px;display:flex;align-items:center;gap:12px;font-size:13px;">
+                    <span style="flex:1;">Couldn't load tasks: ${error}</span>
+                    <button class="btn" onClick=${loadTasks}>Retry</button>
+                </div>
+            `}
             <div class="kanban-board">
                 ${TASK_COLUMNS.map(col => {
                     const colTasks = filtered.filter(t => t.task_status === col.key);
@@ -1908,6 +1916,7 @@ function SearchPage({ onSelectMemory }) {
     const [results, setResults] = useState([]);
     const [total, setTotal] = useState(0);
     const [loading, setLoading] = useState(false);
+    const [error, setError] = useState(null);
     const [agentFilter, setAgentFilter] = useState('');
     const [agents, setAgents] = useState([]);
     const [domainFilter, setDomainFilter] = useState('');
@@ -1924,6 +1933,7 @@ function SearchPage({ onSelectMemory }) {
 
     async function loadMemories(search, agent, domain, tag) {
         setLoading(true);
+        setError(null);
         try {
             const params = { limit: 100, sort: 'newest' };
             if (agent) params.agent = agent;
@@ -1942,6 +1952,7 @@ function SearchPage({ onSelectMemory }) {
             setTotal(data.total || memories.length);
         } catch (err) {
             setResults([]);
+            setError(err && err.message ? err.message : 'Failed to load memories');
         }
         setLoading(false);
     }
@@ -1975,7 +1986,7 @@ function SearchPage({ onSelectMemory }) {
             <input class="search-page-input" type="text" placeholder="Search memories..."
                    value=${query} onInput=${handleSearch} />
             <div class="search-filters">
-                <${HelpTip} text="Search across all committed memories by content, domain, or tags. Results are ranked by relevance." />
+                <${HelpTip} text="Search committed memories by exact text (case-insensitive) in content or domain. There is no semantic or relevance ranking - matches are sorted newest first. Domain, tag, and agent filters narrow the set." />
                 <${PageHelp} section="search" label="Search & Import guide" />
                 <select class="filter-select" value=${domainFilter} onChange=${handleDomainFilter}>
                     <option value="">All domains</option>
@@ -1993,9 +2004,15 @@ function SearchPage({ onSelectMemory }) {
                         ${agents.map(a => html`<option value=${a.agent_id}>${a.name} (${a.agent_id.slice(0, 8)}...)</option>`)}
                     </select>
                 `}
-                <span style="font-size: 12px; color: var(--text-muted); align-self: center;">${total} memories</span>
+                <span style="font-size: 12px; color: var(--text-muted); align-self: center;">${results.length} memories</span>
             </div>
             <div class="memory-list">
+                ${error && html`
+                    <div style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.4);color:#ef4444;padding:12px 16px;border-radius:8px;margin-bottom:12px;display:flex;align-items:center;gap:12px;font-size:13px;">
+                        <span style="flex:1;">Couldn't load memories: ${error}</span>
+                        <button class="btn" onClick=${() => loadMemories(query, agentFilter, domainFilter, tagFilter)}>Retry</button>
+                    </div>
+                `}
                 ${results.map(m => html`
                     <div class="memory-card" onClick=${() => onSelectMemory({
                         id: m.memory_id,
@@ -2022,7 +2039,7 @@ function SearchPage({ onSelectMemory }) {
                         </div>
                     </div>
                 `)}
-                ${results.length === 0 && !loading && html`
+                ${results.length === 0 && !loading && !error && html`
                     <div style="text-align: center; color: var(--text-muted); padding: 40px;">
                         ${query ? 'No memories match your search.' : 'No memories yet.'}
                     </div>
@@ -4982,7 +4999,7 @@ function NetworkPage({ sse }) {
         govPollRef.current = setInterval(async () => {
             try {
                 const [detail, health] = await Promise.all([
-                    fetchGovProposalDetail(activeProposal.id),
+                    fetchGovProposalDetail(activeProposal.proposal_id),
                     fetchHealth()
                 ]);
                 if (detail) {
@@ -4997,7 +5014,7 @@ function NetworkPage({ sse }) {
             } catch (e) { /* ignore polling errors */ }
         }, 3000);
         return () => { if (govPollRef.current) { clearInterval(govPollRef.current); govPollRef.current = null; } };
-    }, [activeProposal?.id, loadGovProposals]);
+    }, [activeProposal?.proposal_id, loadGovProposals]);
 
     // SSE governance events — auto-refresh on governance activity
     useEffect(() => {
@@ -5062,19 +5079,25 @@ function NetworkPage({ sse }) {
         const arr = Object.entries(editDomainAccess)
             .filter(([_, v]) => v.read || v.write)
             .map(([domain, p]) => ({ domain, read: p.read, write: p.write }));
-        await updateAgent(agentId, { role: editRole, clearance: editClearance, domain_access: JSON.stringify(arr), visible_agents: editVisibleAgents });
-        loadAgents();
-        setAccessDirty(false);
-        setAccessSaved(true);
-        setTimeout(() => setAccessSaved(false), 2000);
-    }, [editRole, editClearance, editDomainAccess, loadAgents]);
+        try {
+            const res = await updateAgent(agentId, { role: editRole, clearance: editClearance, domain_access: JSON.stringify(arr), visible_agents: editVisibleAgents });
+            if (res.error) { showToast(res.error, 'error'); return; }
+            if (res.on_chain_warning) {
+                showToast('Access saved locally but on-chain RBAC grant failed - will auto-heal on next agent boot. (' + res.on_chain_warning + ')', 'warning', 8000);
+            }
+            loadAgents();
+            setAccessDirty(false);
+            setAccessSaved(true);
+            setTimeout(() => setAccessSaved(false), 2000);
+        } catch (e) { showToast('Failed to save access: ' + e.message, 'error'); }
+    }, [editRole, editClearance, editDomainAccess, editVisibleAgents, loadAgents]);
 
     const handleOverviewSave = useCallback(async (agentId) => {
         try {
             const res = await updateAgent(agentId, { name: editName, boot_bio: editBio });
             if (res.error) { showToast(res.error, 'error'); return; }
             if (res.on_chain_warning) {
-                showToast('Saved locally but on-chain sync failed — will auto-heal on next agent boot. (' + res.on_chain_warning + ')', 'warning', 8000);
+                showToast('Saved locally but on-chain sync failed - will auto-heal on next agent boot. (' + res.on_chain_warning + ')', 'warning', 8000);
             }
             loadAgents();
             setEditing(false);
@@ -5162,11 +5185,11 @@ function NetworkPage({ sse }) {
         try {
             const proposal = {
                 operation: govNewOp,
-                target_agent_id: govNewTarget,
+                target_id: govNewTarget,
                 reason: govNewReason,
             };
             if (govNewOp === 'add_validator' || govNewOp === 'update_power') {
-                proposal.power = parseInt(govNewPower, 10) || 10;
+                proposal.target_power = parseInt(govNewPower, 10) || 10;
             }
             const res = await submitGovProposal(proposal);
             if (res.error) { showToast(res.error, 'error'); }
@@ -5258,9 +5281,9 @@ function NetworkPage({ sse }) {
                                     You voted: <strong>${activeProposal.my_vote}</strong>
                                 </div>
                             ` : html`
-                                <button class="gov-vote-btn accept" onClick=${() => handleGovVote(activeProposal.id, 'accept')} disabled=${govVoting}>Accept</button>
-                                <button class="gov-vote-btn reject" onClick=${() => handleGovVote(activeProposal.id, 'reject')} disabled=${govVoting}>Reject</button>
-                                <button class="gov-vote-btn abstain" onClick=${() => handleGovVote(activeProposal.id, 'abstain')} disabled=${govVoting}>Abstain</button>
+                                <button class="gov-vote-btn accept" onClick=${() => handleGovVote(activeProposal.proposal_id, 'accept')} disabled=${govVoting}>Accept</button>
+                                <button class="gov-vote-btn reject" onClick=${() => handleGovVote(activeProposal.proposal_id, 'reject')} disabled=${govVoting}>Reject</button>
+                                <button class="gov-vote-btn abstain" onClick=${() => handleGovVote(activeProposal.proposal_id, 'abstain')} disabled=${govVoting}>Abstain</button>
                             `}
                         </div>
                     </div>
@@ -5279,7 +5302,7 @@ function NetworkPage({ sse }) {
                     ${govHistoryOpen && html`
                         <div class="gov-history-list">
                             ${pastProposals.map(p => html`
-                                <div class="gov-history-card" key=${p.id}>
+                                <div class="gov-history-card" key=${p.proposal_id}>
                                     <div class="gov-history-info">
                                         <div class="gov-history-op">${govOpLabel(p.operation)}: ${resolveAgentName(p.target_agent_id)}</div>
                                         <div class="gov-history-detail">
@@ -5338,7 +5361,7 @@ function NetworkPage({ sse }) {
                         </div>
                         <div class="wizard-footer">
                             <button class="btn" onClick=${() => setShowGovModal(false)}>Cancel</button>
-                            <button class="btn btn-primary" onClick=${handleGovSubmit} disabled=${govSubmitting || !govNewTarget}>
+                            <button class="btn btn-primary" onClick=${handleGovSubmit} disabled=${govSubmitting || !govNewTarget || !govNewReason.trim()}>
                                 ${govSubmitting ? 'Submitting...' : 'Submit Proposal'}
                             </button>
                         </div>
@@ -6594,10 +6617,12 @@ function PipelinePage() {
     const [total, setTotal] = useState(0);
     const [filter, setFilter] = useState('');
     const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(null);
     const [expanded, setExpanded] = useState(null);
 
     const loadData = useCallback(async () => {
         setLoading(true);
+        setError(null);
         try {
             const [pipeData, statsData] = await Promise.all([
                 fetchPipeline({ status: filter || undefined, limit: 100 }),
@@ -6608,6 +6633,7 @@ function PipelinePage() {
             setTotal(statsData.total || 0);
         } catch (e) {
             console.error('Pipeline load error:', e);
+            setError(e && e.message ? e.message : 'Failed to load pipeline');
         }
         setLoading(false);
     }, [filter]);
@@ -6672,11 +6698,17 @@ function PipelinePage() {
                 </span>
             </div>
 
+            ${error && html`
+                <div style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.4);color:#ef4444;padding:12px 16px;border-radius:8px;margin-bottom:16px;display:flex;align-items:center;gap:12px;font-size:13px;">
+                    <span style="flex:1;">Couldn't load pipeline: ${error}</span>
+                    <button class="btn" onClick=${loadData}>Retry</button>
+                </div>
+            `}
             ${loading && items.length === 0 && html`
                 <div style="text-align:center;padding:60px;color:var(--text-muted);">Loading pipeline...</div>
             `}
 
-            ${!loading && items.length === 0 && html`
+            ${!loading && !error && items.length === 0 && html`
                 <div style="text-align:center;padding:80px 20px;">
                     <div style="margin-bottom:16px;opacity:0.25;">${icons.pipeline}</div>
                     <p style="color:var(--text-muted);font-size:14px;margin:0 0 8px;">

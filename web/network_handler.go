@@ -317,34 +317,34 @@ func (h *DashboardHandler) handleUpdateAgent(agentStore store.AgentStore) http.H
 					onChainWarning = "on-chain sync failed: " + err.Error()
 				}
 			}
-			// Permission changes go through AgentSetPermission (keep non-blocking — less critical)
-			if req.Clearance != nil || req.DomainAccess != nil || req.VisibleAgents != nil {
-				go func() {
-					clearance := uint8(existing.Clearance) // #nosec G115 -- clearance is 0-4
-					domainAccess := existing.DomainAccess
-					permTx := &tx.ParsedTx{
-						Type:      tx.TxTypeAgentSetPermission,
-						Nonce:     tx.MonotonicNonce(h.SigningKey),
-						Timestamp: time.Now(),
-						AgentSetPermission: &tx.AgentSetPermission{
-							AgentID:       id,
-							Clearance:     clearance,
-							DomainAccess:  domainAccess,
-							VisibleAgents: existing.VisibleAgents,
-							OrgID:         existing.OrgID,
-							DeptID:        existing.DeptID,
-						},
-					}
-					embedDashboardAgentProof(permTx, h.SigningKey)
-					if signErr := tx.SignTx(permTx, h.SigningKey); signErr != nil {
-						return
-					}
-					encoded, encErr := tx.EncodeTx(permTx)
-					if encErr != nil {
-						return
-					}
-					_ = broadcastTxSync(h.CometBFTRPC, encoded)
-				}()
+			// Permission changes go through AgentSetPermission. Broadcast
+			// SYNCHRONOUSLY and surface any failure: this is a SECURITY control
+			// (role/clearance/domain-access/visible-agents), so a silently-failed
+			// on-chain grant that diverges BadgerDB from SQLite - while the GUI
+			// shows "Saved" - is exactly the kind of trust bug we must not ship.
+			if onChainWarning == "" && (req.Clearance != nil || req.DomainAccess != nil || req.VisibleAgents != nil) {
+				clearance := uint8(existing.Clearance) // #nosec G115 -- clearance is 0-4
+				permTx := &tx.ParsedTx{
+					Type:      tx.TxTypeAgentSetPermission,
+					Nonce:     tx.MonotonicNonce(h.SigningKey),
+					Timestamp: time.Now(),
+					AgentSetPermission: &tx.AgentSetPermission{
+						AgentID:       id,
+						Clearance:     clearance,
+						DomainAccess:  existing.DomainAccess,
+						VisibleAgents: existing.VisibleAgents,
+						OrgID:         existing.OrgID,
+						DeptID:        existing.DeptID,
+					},
+				}
+				embedDashboardAgentProof(permTx, h.SigningKey)
+				if signErr := tx.SignTx(permTx, h.SigningKey); signErr != nil {
+					onChainWarning = "on-chain permission sync failed: " + signErr.Error()
+				} else if encoded, encErr := tx.EncodeTx(permTx); encErr != nil {
+					onChainWarning = "on-chain permission sync failed: " + encErr.Error()
+				} else if bErr := broadcastTxSync(h.CometBFTRPC, encoded); bErr != nil {
+					onChainWarning = "on-chain permission sync failed: " + bErr.Error()
+				}
 			}
 		}
 
