@@ -804,6 +804,16 @@ func (s *SQLiteStore) InsertMemory(ctx context.Context, record *memory.MemoryRec
 			submitting_agent = excluded.submitting_agent,
 			status = excluded.status,
 			created_at = excluded.created_at,
+			-- content/hash/domain/type/confidence are overwritten so a co-commit
+			-- squat-reclaim (which rewrites Badger's content hash to the co-commit's)
+			-- also replaces the squatter's off-chain content, keeping the SQLite
+			-- mirror consistent with the committed on-chain hash. In every other
+			-- conflict case the memory_id is content-derived, so these are identical.
+			content = excluded.content,
+			content_hash = excluded.content_hash,
+			domain_tag = excluded.domain_tag,
+			memory_type = excluded.memory_type,
+			confidence_score = excluded.confidence_score,
 			embedding = COALESCE(excluded.embedding, memories.embedding),
 			embedding_hash = COALESCE(excluded.embedding_hash, memories.embedding_hash),
 			provider = COALESCE(NULLIF(excluded.provider, ''), memories.provider),

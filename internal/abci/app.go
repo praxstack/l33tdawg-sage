@@ -2032,6 +2032,22 @@ func (app *SageApp) FinalizeBlock(_ context.Context, req *abcitypes.RequestFinal
 			continue
 		}
 
+		// app-v15 (v11): reject non-canonical tx encodings. DecodeTx tolerates
+		// trailing bytes and a few fields have more than one valid wire form (e.g.
+		// the co-commit optional-window), so a signed tx is malleable to distinct
+		// byte strings - and CometBFT tx-hashes - carrying the SAME signature.
+		// EncodeTx emits the one canonical form, so requiring the delivered bytes to
+		// re-encode identically pins every accepted tx to a single encoding. Fork-
+		// gated: pre-v15 blocks replay with the old lenient behavior (byte-identical
+		// AppHash); v15+ enforce canonicalization. Legit txs are built via EncodeTx,
+		// so they always pass.
+		if app.postAppV15Fork(req.Height) {
+			if canon, encErr := tx.EncodeTx(parsedTx); encErr != nil || !bytes.Equal(canon, rawTx) {
+				txResults[i] = &abcitypes.ExecTxResult{Code: 1, Log: "non-canonical tx encoding rejected"}
+				continue
+			}
+		}
+
 		// Use req.Time for deterministic timestamps (NOT time.Now())
 		blockTime := req.Time
 
@@ -3389,12 +3405,21 @@ func (app *SageApp) checkAndApplyQuorum(memoryID string, height int64, blockTime
 	// == "" (not "proposed"), so we never panic or mis-credit.
 	creditVerdict := app.postV8_3Fork(height)
 	recordV8_3Branch(creditVerdict)
+	// app-v15 (v11): gate the terminal-status WRITE below on priorStatus==proposed
+	// so a stale/replayed vote on an already-terminal memory cannot re-fire
+	// SetMemoryHash - which would clobber a reclaimed co-commit's real content hash
+	// to nil (committed branch) or flip it to deprecated. Capture priorStatus when
+	// EITHER verdict-crediting (v8.3) or this guard is active.
+	guardTerminalWrite := app.postAppV15Fork(height)
 	var priorStatus string
-	if creditVerdict {
+	if creditVerdict || guardTerminalWrite {
 		if _, st, err := app.badgerStore.GetMemoryHash(memoryID); err == nil {
 			priorStatus = st
 		}
 	}
+	// When the guard is active, only a currently-proposed memory may transition to
+	// a terminal status here - the proposed -> committed/deprecated move is one-way.
+	canWriteTerminal := !guardTerminalWrite || priorStatus == string(memory.StatusProposed)
 
 	// v8.4: resolve the memory's domain so the weight loop can condition each
 	// validator's vote on its verdict-correctness IN that domain. Domain
@@ -3489,7 +3514,7 @@ func (app *SageApp) checkAndApplyQuorum(memoryID string, height int64, blockTime
 	// v8.3: track whether THIS call drives the memory to a terminal verdict,
 	// and which one, so we credit verdict-match exactly once below.
 	var becameTerminal, finalAccepted bool
-	if reached {
+	if canWriteTerminal && reached {
 		// Transition to committed on-chain (BadgerDB). becameTerminal and the
 		// off-chain status mirror are gated on the on-chain write SUCCEEDING — a
 		// swallowed SetMemoryHash error must NOT leave us crediting a verdict (or
@@ -3517,7 +3542,7 @@ func (app *SageApp) checkAndApplyQuorum(memoryID string, height int64, blockTime
 			app.logger.Error().Err(err).Str("memory_id", memoryID).Int64("height", height).
 				Msg("commit status write failed — verdict NOT credited, status unchanged")
 		}
-	} else if len(votes) >= len(validators) && len(validators) > 0 {
+	} else if canWriteTerminal && len(votes) >= len(validators) && len(validators) > 0 {
 		// All validators voted but quorum not reached (e.g. 2-2 tie) — deprecate.
 		// Without this, the memory stays "proposed" forever and the validator
 		// ticker resubmits votes every 2 seconds, flooding the chain. Same
