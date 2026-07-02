@@ -5115,11 +5115,16 @@ function NetworkPage({ sse }) {
     // Redeploy polling
     const startRedeployPoll = useCallback(() => {
         if (redeployPollRef.current) return;
+        let sawRunning = false, ticks = 0;
         redeployPollRef.current = setInterval(async () => {
             try {
+                ticks++;
                 const s = await fetchRedeployStatus();
                 setRedeployStatus(s);
-                if (!s || s.active === false) {
+                if (s && s.status === 'running') { sawRunning = true; return; }
+                // Only end THIS run once we've seen it reach 'running' (guards a stale
+                // prior-run verdict), with a ~15s safety stop if it never registers.
+                if (sawRunning || ticks > 15 || !s) {
                     clearInterval(redeployPollRef.current);
                     redeployPollRef.current = null;
                     loadAgents();
@@ -5849,20 +5854,20 @@ function AddAgentWizard({ onClose, onCreated }) {
 
     const startDeployPoll = () => {
         if (deployPollRef.current) return;
+        let sawRunning = false, ticks = 0;
+        const stop = () => { clearInterval(deployPollRef.current); deployPollRef.current = null; setDeploying(false); };
         deployPollRef.current = setInterval(async () => {
             try {
+                ticks++;
                 const s = await fetchRedeployStatus();
                 setDeployStatus(s);
-                if (!s || s.active === false) {
-                    clearInterval(deployPollRef.current);
-                    deployPollRef.current = null;
-                    setDeploying(false);
-                }
-            } catch (e) {
-                clearInterval(deployPollRef.current);
-                deployPollRef.current = null;
-                setDeploying(false);
-            }
+                if (s && s.status === 'running') { sawRunning = true; return; }
+                // Terminal (completed/failed/idle): only trust it once we've seen THIS
+                // run reach 'running', so a stale verdict from a prior redeploy can't
+                // flash instant success/failure at the start. Safety-stop after ~15s
+                // in case the run never registers (e.g. trigger failed silently).
+                if (sawRunning || ticks > 15 || !s) stop();
+            } catch (e) { stop(); }
         }, 1000);
     };
 

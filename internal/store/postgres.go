@@ -1832,6 +1832,10 @@ func (s *PostgresStore) GetRedeployLog(_ context.Context, _ string) ([]*Redeploy
 	return nil, fmt.Errorf("GetRedeployLog not implemented for PostgresStore")
 }
 
+func (s *PostgresStore) GetLatestRedeployLog(_ context.Context) (*RedeploymentLogEntry, error) {
+	return nil, fmt.Errorf("GetLatestRedeployLog not implemented for PostgresStore")
+}
+
 func (s *PostgresStore) UpdateRedeployLog(_ context.Context, _ int64, _, _ string) error {
 	return fmt.Errorf("UpdateRedeployLog not implemented for PostgresStore")
 }

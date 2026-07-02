@@ -349,6 +349,54 @@ func (r *Redeployer) GetRedeployStatus(ctx context.Context) (active bool, operat
 	return status.Active, string(status.Operation), status.AgentID, nil
 }
 
+// GetLiveStatus returns a status view suitable for the dashboard status poll:
+// a coarse status string (running|completed|failed|idle), the current-or-last
+// phase, and an error message when the run failed. Because the redeploy lock is
+// released on BOTH success and failure, active==false alone cannot tell the two
+// apart - so the terminal outcome is derived from the most-recent redeploy log
+// entry. current_phase lets the frontend advance its phase checklist.
+func (r *Redeployer) GetLiveStatus(ctx context.Context) (status, currentPhase, operation, agentID, errMsg string, err error) {
+	lock, lockErr := r.GetStatus(ctx)
+	if lockErr != nil {
+		return "", "", "", "", "", lockErr
+	}
+	operation = string(lock.Operation)
+	agentID = lock.AgentID
+
+	latest, logErr := r.store.GetLatestRedeployLog(ctx)
+	if logErr != nil {
+		return "", "", "", "", "", logErr
+	}
+	if latest == nil {
+		// No redeployment has ever run.
+		return "idle", "", operation, agentID, "", nil
+	}
+
+	// When the lock is already released, carry the identity from the last run.
+	if operation == "" {
+		operation = latest.Operation
+	}
+	if agentID == "" {
+		agentID = latest.AgentID
+	}
+	currentPhase = latest.Phase
+
+	switch {
+	case latest.Status == string(StatusFailed) || latest.Status == string(StatusRolledBack):
+		status = "failed"
+		errMsg = latest.Error
+	case latest.Phase == string(PhaseCompleted):
+		// COMPLETED only ever appears on the success path, so treat it as done
+		// even in the brief window before its row flips in_progress->completed.
+		status = "completed"
+	case latest.Status == string(StatusInProgress):
+		status = "running"
+	default:
+		status = "idle"
+	}
+	return status, currentPhase, operation, agentID, errMsg, nil
+}
+
 // GetStatus returns the current redeployment status.
 func (r *Redeployer) GetStatus(ctx context.Context) (*RedeployStatus, error) {
 	lock, err := r.store.GetRedeployLock(ctx)

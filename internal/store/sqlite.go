@@ -2917,6 +2917,28 @@ func (s *SQLiteStore) GetRedeployLog(ctx context.Context, operation string) ([]*
 	return entries, nil
 }
 
+func (s *SQLiteStore) GetLatestRedeployLog(ctx context.Context) (*RedeploymentLogEntry, error) {
+	row := s.conn.QueryRowContext(ctx, `
+		SELECT id, operation, agent_id, phase, status, COALESCE(details,''),
+			COALESCE(sqlite_backup,''), COALESCE(genesis_backup,''),
+			started_at, completed_at, COALESCE(error,'')
+		FROM redeployment_log ORDER BY id DESC LIMIT 1`)
+	e := &RedeploymentLogEntry{}
+	var startedAt, completedAt *string
+	err := row.Scan(&e.ID, &e.Operation, &e.AgentID, &e.Phase, &e.Status,
+		&e.Details, &e.SQLiteBackup, &e.GenesisBackup,
+		&startedAt, &completedAt, &e.Error)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get latest redeploy log: %w", err)
+	}
+	e.StartedAt = parseTimePtr(startedAt)
+	e.CompletedAt = parseTimePtr(completedAt)
+	return e, nil
+}
+
 func (s *SQLiteStore) UpdateRedeployLog(ctx context.Context, id int64, status, errorMsg string) error {
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
 	_, err := s.writeExecContext(ctx, `

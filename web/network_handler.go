@@ -631,20 +631,23 @@ func handleClaimAgent(agentStore store.AgentStore) http.HandlerFunc {
 // handleRedeployStatusLive returns the current redeployment status using the orchestrator.
 func (h *DashboardHandler) handleRedeployStatusLive(w http.ResponseWriter, r *http.Request) {
 	if h.Redeployer == nil {
-		writeJSONResp(w, http.StatusOK, map[string]any{"active": false, "error": "redeployer not configured"})
+		writeJSONResp(w, http.StatusOK, map[string]any{"active": false, "status": "idle", "message": "redeployer not configured"})
 		return
 	}
 
-	active, operation, agentID, err := h.Redeployer.GetRedeployStatus(r.Context())
+	status, currentPhase, operation, agentID, errMsg, err := h.Redeployer.GetLiveStatus(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	writeJSONResp(w, http.StatusOK, map[string]any{
-		"active":    active,
-		"operation": operation,
-		"agent_id":  agentID,
+		"active":        status == "running",
+		"status":        status,
+		"current_phase": currentPhase,
+		"operation":     operation,
+		"agent_id":      agentID,
+		"error":         errMsg,
 	})
 }
 

@@ -144,6 +144,10 @@ type RedeployOrchestrator interface {
 	RedeployChecker
 	DeployOp(ctx context.Context, op, agentID string) error
 	GetRedeployStatus(ctx context.Context) (active bool, operation, agentID string, err error)
+	// GetLiveStatus reports the coarse run status (running|completed|failed|idle),
+	// the current-or-last phase, and an error message on failure - derived from the
+	// redeploy log so a poll can tell a completed redeploy from a failed one.
+	GetLiveStatus(ctx context.Context) (status, currentPhase, operation, agentID, errMsg string, err error)
 }
 
 // PreValidateVote represents a single validator's vote result from pre-validation.

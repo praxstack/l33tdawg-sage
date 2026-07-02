@@ -390,6 +390,11 @@ type AgentStore interface {
 	GetRedeployLock(ctx context.Context) (*RedeploymentLock, error)
 	InsertRedeployLog(ctx context.Context, entry *RedeploymentLogEntry) error
 	GetRedeployLog(ctx context.Context, operation string) ([]*RedeploymentLogEntry, error)
+	// GetLatestRedeployLog returns the single most-recent redeployment log entry
+	// (highest id) across all operations, or nil if the log is empty. Used to
+	// report the current phase and terminal outcome (completed/failed) of a
+	// redeployment for status polling.
+	GetLatestRedeployLog(ctx context.Context) (*RedeploymentLogEntry, error)
 	UpdateRedeployLog(ctx context.Context, id int64, status, errorMsg string) error
 }
 
