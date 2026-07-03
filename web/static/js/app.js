@@ -2057,6 +2057,7 @@ function SearchPage({ onSelectMemory }) {
         fetchAgents().then(data => setAgents(data.agents || [])).catch(() => {});
         fetchStats().then(data => { if (data.by_domain) setDomains(Object.keys(data.by_domain).sort()); }).catch(() => {});
         fetchTags().then(data => setAllTags(data.tags || [])).catch(() => {});
+        return () => clearTimeout(searchTimer.current); // drop any pending debounced search on unmount
     }, []);
 
     async function loadMemories(search, agent, domain, tag, status = statusFilter) {

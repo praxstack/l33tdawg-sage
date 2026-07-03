@@ -893,6 +893,9 @@ func (h *DashboardHandler) handleListMemories(w http.ResponseWriter, r *http.Req
 			TopK:             limit,
 			SubmittingAgents: opts.SubmittingAgents,
 		}
+		if opts.Tag != "" {
+			qopts.Tags = []string{opts.Tag} // honor the tag filter on the FTS path too (the fallback already did)
+		}
 		if ftsRecs, ferr := h.store.SearchByText(r.Context(), qStr, qopts); ferr == nil {
 			records, total = ftsRecs, len(ftsRecs)
 		} else {
