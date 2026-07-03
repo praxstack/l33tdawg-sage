@@ -1,6 +1,6 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
-import { fetchStats, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, fetchValidators, fetchMcpConfig, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchReranker, saveReranker, testReranker, fetchTasks, updateTaskStatus, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken,
+import { fetchStats, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, fetchValidators, fetchMcpConfig, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchReranker, saveReranker, testReranker, fetchTasks, updateTaskStatus, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken, connectProvider,
 fedConnections, fedRevoke, fedPeerStatus, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestConfirm } from './api.js';
 
 import { mountMriBrain } from './mri-brain.js';
@@ -5351,6 +5351,8 @@ function NetworkPage({ sse }) {
     // External-client wizard state (v6.7.3)
     const [showChatGPTWizard, setShowChatGPTWizard] = useState(false);
     const [showCursorPanel, setShowCursorPanel] = useState(false);
+    // Same-machine connect entry (Phase 5b-1)
+    const [showConnectTool, setShowConnectTool] = useState(false);
 
     // Governance state
     const [govProposals, setGovProposals] = useState([]);
@@ -5813,6 +5815,24 @@ function NetworkPage({ sse }) {
 
             <div class="ext-clients-section">
                 <div class="ext-clients-header">
+                    <h3>Connect an AI tool <${HelpTip} text="Wire an AI tool to your SAGE brain. Pick where the tool runs and which tool it is - SAGE writes the config for you. No terminal needed." /></h3>
+                </div>
+                <div class="ext-clients-grid">
+                    <div class="ext-client-card" role="button" tabIndex="0"
+                        onClick=${() => setShowConnectTool(true)}
+                        onKeyDown=${e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setShowConnectTool(true); } }}>
+                        <div class="ext-client-icon">🔌</div>
+                        <div class="ext-client-info">
+                            <div class="ext-client-title">Connect an AI tool</div>
+                            <div class="ext-client-desc">Claude Code, Codex, Cursor, Windsurf, or Claude Desktop - on this computer or another. We write the config for you.</div>
+                        </div>
+                        <div class="ext-client-cta">Get started →</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="ext-clients-section">
+                <div class="ext-clients-header">
                     <h3>Connect external clients <${HelpTip} text="Wire SAGE up to ChatGPT, Cursor, Cline, or Claude Desktop. Local-first — your tunnel, your domain, your bearer. SAGE never proxies through anyone's cloud." /></h3>
                 </div>
                 <div class="ext-clients-grid">
@@ -6120,6 +6140,7 @@ function NetworkPage({ sse }) {
             ${showWizard && html`<${AddAgentWizard} onClose=${() => setShowWizard(false)} onCreated=${() => { setShowWizard(false); loadAgents(); }} />`}
             ${showChatGPTWizard && html`<${ChatGPTSetupWizard} agents=${agents} onClose=${() => setShowChatGPTWizard(false)} />`}
             ${showCursorPanel && html`<${CursorSetupPanel} agents=${agents} onClose=${() => setShowCursorPanel(false)} />`}
+            ${showConnectTool && html`<${ConnectToolModal} onClose=${() => setShowConnectTool(false)} />`}
             ${showRemoveConfirm && html`<${RemoveConfirmModal} agent=${showRemoveConfirm} onConfirm=${() => handleRemove(showRemoveConfirm)} onCancel=${() => setShowRemoveConfirm(null)} />`}
             ${showRotateConfirm && html`
                 <div class="wizard-overlay" onClick=${(e) => { if (e.target === e.currentTarget) setShowRotateConfirm(null); }}>
@@ -6986,6 +7007,183 @@ function CursorSetupPanel({ agents, onClose }) {
                 </div>
                 <div class="wizard-footer">
                     <button class="btn" onClick=${onClose}>${mintedToken ? 'Done' : 'Cancel'}</button>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+// SAME_MACHINE_PROVIDERS — the AI tools SAGE can wire up on THIS computer.
+// folder=true tools keep their MCP config inside a project directory (so we
+// need an absolute project path); folder=false tools have one app-wide config
+// and ignore any path.
+const SAME_MACHINE_PROVIDERS = [
+    { key: 'claude-code', name: 'Claude Code', icon: '\u{1F916}', folder: true },
+    { key: 'codex', name: 'Codex', icon: '⌨️', folder: true },
+    { key: 'cursor', name: 'Cursor', icon: '\u{1F4BB}', folder: true },
+    { key: 'windsurf', name: 'Windsurf', icon: '\u{1F30A}', folder: false },
+    { key: 'claude-desktop', name: 'Claude Desktop', icon: '\u{1F5A5}️', folder: false },
+];
+
+// ConnectToolModal — Phase 5b entry point for wiring an AI tool to SAGE.
+// Step 0 branches on WHERE the tool lives. Flow 1 (same machine) is fully
+// implemented here: pick a provider, give a project folder for folder-scoped
+// tools, hit Connect, and the node writes/merges the tool's MCP config, then we
+// show a per-file result rail. Flows 2 and 3 are placeholders for later.
+function ConnectToolModal({ onClose }) {
+    const [view, setView] = useState('branch'); // 'branch' | 'flow1' | 'flow2' | 'flow3'
+    const [provider, setProvider] = useState('');
+    const [projectPath, setProjectPath] = useState('');
+    const [connecting, setConnecting] = useState(false);
+    const [result, setResult] = useState(null); // full response JSON { ok, files, provider, error? }
+    const [error, setError] = useState(null);    // thrown / network / 400 error message
+
+    const selected = SAME_MACHINE_PROVIDERS.find(p => p.key === provider) || null;
+    const needsPath = !!(selected && selected.folder);
+    const canConnect = !!selected && (!needsPath || projectPath.trim()) && !connecting;
+
+    const resetFlow1 = () => { setProvider(''); setProjectPath(''); setResult(null); setError(null); };
+    const pickProvider = (key) => { setProvider(key); setResult(null); setError(null); };
+
+    const doConnect = async () => {
+        if (!selected) return;
+        setConnecting(true);
+        setResult(null);
+        setError(null);
+        try {
+            const body = {};
+            if (needsPath) body.path = projectPath.trim();
+            const data = await connectProvider(selected.key, body);
+            setResult(data);
+        } catch (e) {
+            setError(e.message || 'Connection failed');
+        }
+        setConnecting(false);
+    };
+
+    const badgeStyle = (action) => action === 'created'
+        ? 'background:var(--accent-dim);color:var(--accent);'
+        : 'background:var(--primary-dim);color:var(--primary);';
+
+    return html`
+        <div class="wizard-overlay" onClick=${e => { if (e.target === e.currentTarget) onClose(); }}>
+            <div class="wizard-modal" style="max-width:640px;max-height:85vh;display:flex;flex-direction:column;">
+                <div class="wizard-header">
+                    <h2>Connect an AI tool</h2>
+                    <button class="detail-close" onClick=${onClose}>×</button>
+                </div>
+                <div class="wizard-body" style="overflow-y:auto;flex:1;padding:20px;line-height:1.55;">
+                    ${view === 'branch' && html`
+                        <h3 style="margin-top:0;">Is the tool on THIS computer, or another one?</h3>
+                        <p style="color:var(--text-dim);">Pick where the AI tool you want to connect actually runs.</p>
+                        <div class="connect-cards" style="grid-template-columns:1fr;margin-top:16px;">
+                            <div class="connect-card" style="text-align:left;" role="button" tabIndex="0"
+                                onClick=${() => { resetFlow1(); setView('flow1'); }}
+                                onKeyDown=${e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); resetFlow1(); setView('flow1'); } }}>
+                                <div class="connect-card-icon">\u{1F5A5}️</div>
+                                <h4>On this computer</h4>
+                                <p>Claude Code, Codex, Cursor, Windsurf, or Claude Desktop running right here. SAGE writes its config.</p>
+                            </div>
+                            <div class="connect-card" style="text-align:left;" role="button" tabIndex="0"
+                                onClick=${() => setView('flow2')}
+                                onKeyDown=${e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setView('flow2'); } }}>
+                                <div class="connect-card-icon">\u{1F4AC}</div>
+                                <h4>On another computer (AI chat/tool)</h4>
+                                <p>A hosted chat or a tool on a different machine that reaches SAGE over the network.</p>
+                            </div>
+                            <div class="connect-card" style="text-align:left;" role="button" tabIndex="0"
+                                onClick=${() => setView('flow3')}
+                                onKeyDown=${e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setView('flow3'); } }}>
+                                <div class="connect-card-icon">\u{1F5A7}</div>
+                                <h4>On another computer on my network - make it an agent here</h4>
+                                <p>Turn a tool on another machine into a full agent on this node.</p>
+                            </div>
+                        </div>
+                    `}
+
+                    ${view === 'flow2' && html`
+                        <button class="btn" style="margin-bottom:16px;" onClick=${() => setView('branch')}>← Back</button>
+                        <div class="summary-card" style="text-align:center;padding:32px 20px;">
+                            <div style="font-size:40px;margin-bottom:12px;">\u{1F6A7}</div>
+                            <h3 style="margin:0 0 8px;">Coming in the next update</h3>
+                            <p style="color:var(--text-dim);margin:0;">Connecting a chat or tool on another computer is on its way. For now, use the ChatGPT or Cursor cards below.</p>
+                        </div>
+                    `}
+
+                    ${view === 'flow3' && html`
+                        <button class="btn" style="margin-bottom:16px;" onClick=${() => setView('branch')}>← Back</button>
+                        <div class="summary-card" style="text-align:center;padding:32px 20px;">
+                            <div style="font-size:40px;margin-bottom:12px;">\u{1F6A7}</div>
+                            <h3 style="margin:0 0 8px;">Coming in the next update</h3>
+                            <p style="color:var(--text-dim);margin:0;">Making a tool on another machine into a full agent here is on its way.</p>
+                        </div>
+                    `}
+
+                    ${view === 'flow1' && html`
+                        <button class="btn" style="margin-bottom:16px;" onClick=${() => setView('branch')}>← Back</button>
+                        <h3 style="margin-top:0;">Which tool on this computer?</h3>
+                        <div class="connect-cards" style="grid-template-columns:repeat(auto-fill,minmax(150px,1fr));margin-bottom:4px;">
+                            ${SAME_MACHINE_PROVIDERS.map(p => html`
+                                <div class="connect-card ${provider === p.key ? 'selected' : ''}" role="button" tabIndex="0"
+                                    onClick=${() => pickProvider(p.key)}
+                                    onKeyDown=${e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pickProvider(p.key); } }}>
+                                    <div class="connect-card-icon">${p.icon}</div>
+                                    <h4>${p.name}</h4>
+                                    <p>${p.folder ? 'Per-project config' : 'App-wide config'}</p>
+                                </div>
+                            `)}
+                        </div>
+
+                        ${needsPath && html`
+                            <div class="wizard-field" style="margin-top:16px;">
+                                <label>Project folder</label>
+                                <input class="wizard-input" value=${projectPath}
+                                    onInput=${e => setProjectPath(e.target.value)}
+                                    placeholder="/Users/you/project" />
+                                <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">
+                                    Absolute path to the project folder. There is no folder picker in this view - paste or type the full path.
+                                </div>
+                            </div>
+                        `}
+
+                        ${selected && html`
+                            <div style="font-size:11px;color:var(--text-muted);margin:10px 0 4px;">
+                                SAGE writes the config and the agent registers itself on first connect. You can manage its identity and permissions afterward here on the Agents page.
+                            </div>
+                        `}
+
+                        ${selected && html`
+                            <button class="btn btn-primary" style="width:100%;padding:12px;font-size:15px;margin-top:8px;"
+                                onClick=${doConnect} disabled=${!canConnect}>
+                                ${connecting ? 'Connecting...' : `Connect ${selected.name}`}
+                            </button>
+                        `}
+
+                        ${error && html`<div class="import-error" style="margin-top:16px;">${error}</div>`}
+
+                        ${result && html`
+                            <div style="margin-top:16px;">
+                                ${(result.files || []).map(f => html`
+                                    <div style="display:flex;align-items:center;gap:10px;background:var(--bg-elevated);border-radius:6px;padding:10px 12px;margin-bottom:8px;">
+                                        <span style="color:var(--accent);font-weight:700;font-size:15px;">✓</span>
+                                        <code style="flex:1;font-size:12px;word-break:break-all;">${f.path}</code>
+                                        <span style="font-size:11px;padding:2px 8px;border-radius:10px;${badgeStyle(f.action)}">${f.action}</span>
+                                    </div>
+                                `)}
+                                ${result.ok === false && html`
+                                    <div class="import-error" style="margin-top:4px;">${result.error || 'Connection failed'}</div>
+                                `}
+                                ${result.ok && html`
+                                    <div class="warning-banner" style="margin-top:8px;">
+                                        Restart ${selected ? selected.name : 'the tool'} to finish - it picks up its new SAGE connection on next launch.
+                                    </div>
+                                `}
+                            </div>
+                        `}
+                    `}
+                </div>
+                <div class="wizard-footer">
+                    <button class="btn" onClick=${onClose}>${result && result.ok ? 'Done' : 'Close'}</button>
                 </div>
             </div>
         </div>

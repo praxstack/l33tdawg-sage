@@ -135,6 +135,13 @@ type DashboardHandler struct {
 	// instead of doing exact-match (HasAccess). nil keeps pre-fork
 	// (v7.1.1-equivalent) semantics.
 	PostV8ForkFn func() bool
+
+	// ConnectFunc performs a same-machine one-click connect for a provider
+	// (claude-code, codex, cursor, windsurf, claude-desktop): it writes the
+	// provider's MCP config and returns the files touched. Wired in
+	// cmd/sage-gui to connectProvider so the config-writer funcs (package main)
+	// run without the web package importing them. nil disables the endpoint.
+	ConnectFunc func(provider, path, token string) ([]ConnectFile, error)
 }
 
 // isPostV8Fork is the internal accessor — returns false when no fork gate is
@@ -331,6 +338,9 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 			r.Post("/v1/dashboard/settings/boot-instructions", h.handleSaveBootInstructions)
 			r.Get("/v1/dashboard/settings/memory-mode", h.handleGetMemoryMode)
 			r.Post("/v1/dashboard/settings/memory-mode", h.handleSaveMemoryMode)
+
+			// Same-machine one-click connect — writes a provider's MCP config.
+			r.Post("/v1/dashboard/connect/{provider}", h.handleConnectProvider)
 
 			// Task backlog
 			r.Get("/v1/dashboard/tasks", h.handleGetTasks)

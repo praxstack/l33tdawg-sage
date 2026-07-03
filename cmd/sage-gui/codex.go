@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/l33tdawg/sage/web"
 )
 
 // runCodexInstall is the Codex-side mirror of runMCPInstall. It wires SAGE
@@ -45,45 +47,17 @@ func runCodexInstall() error {
 		sageHome = expandTilde(sageHome)
 	}
 
-	codexDir := filepath.Join(projectDir, ".codex")
-	hookDir := filepath.Join(codexDir, "hooks")
-	if err := os.MkdirAll(hookDir, 0755); err != nil {
-		return fmt.Errorf("create hooks dir: %w", err)
+	// The config.toml / hooks.json / hook-script writes now live in
+	// installCodexConfig — shared verbatim with the dashboard one-click connect
+	// path. runCodexInstall keeps only the CLI stdout UX.
+	if _, cfgErr := installCodexConfig(projectDir, sageHome, binPath); cfgErr != nil {
+		return cfgErr
 	}
 
-	// 1. .codex/config.toml — MCP server registration.
-	if writeErr := writeCodexConfig(filepath.Join(codexDir, "config.toml"), binPath, sageHome); writeErr != nil {
-		return writeErr
-	}
+	hookDir := filepath.Join(projectDir, ".codex", "hooks")
 	fmt.Printf("  ✓ .codex/config.toml: written\n")
-
-	// 2. .codex/hooks.json — hook lifecycle wiring. Codex doesn't expand env
-	// vars in hook commands, so we bake the absolute hook dir path in.
-	hooksPath := filepath.Join(codexDir, "hooks.json")
-	hooksConfig := map[string]any{"hooks": sageHooksConfig(hookDir)}
-	hooksData, _ := json.MarshalIndent(hooksConfig, "", "  ")
-	if writeErr := os.WriteFile(hooksPath, append(hooksData, '\n'), 0600); writeErr != nil {
-		return fmt.Errorf("write hooks.json: %w", writeErr)
-	}
 	fmt.Printf("  ✓ .codex/hooks.json: written\n")
-
-	// 3. .codex/hooks/sage-*.sh — same templates as Claude side.
-	for name, tpl := range hookScriptSet() {
-		content := strings.ReplaceAll(tpl, "__SAGE_GUI_BIN__", binPath)
-		path := filepath.Join(hookDir, name)
-		if writeErr := os.WriteFile(path, []byte(content), 0755); writeErr != nil { //nolint:gosec // hook scripts must be executable
-			return fmt.Errorf("write %s: %w", name, writeErr)
-		}
-	}
 	fmt.Printf("  ✓ .codex/hooks/: 5 scripts installed (%s)\n", hookDir)
-
-	// 4. AGENTS.md — boot reminder for non-Claude agents.
-	if mdErr := installAgentsMD(projectDir); mdErr != nil {
-		fmt.Fprintf(os.Stderr, "⚠ Could not install AGENTS.md: %v\n", mdErr)
-	}
-
-	// 5. memory_mode flag (shared with Claude side).
-	syncMemoryModeFlag(sageHome)
 
 	projectName := filepath.Base(projectDir)
 	fmt.Printf("✓ SAGE Codex hooks installed for project: %s\n", projectName)
@@ -91,6 +65,68 @@ func runCodexInstall() error {
 	fmt.Println("  Next: restart your Codex session in this folder.")
 	fmt.Println("  The agent will boot SAGE via sage_inception on its first turn.")
 	return nil
+}
+
+// installCodexConfig performs the actual Codex wiring for a project: the
+// .codex/config.toml MCP server registration, .codex/hooks.json lifecycle
+// wiring (absolute hook-dir path — Codex doesn't expand env vars in hook
+// commands), the .codex/hooks/sage-*.sh scripts, and the AGENTS.md boot block.
+//
+// It does NO summary stdout of its own; callers own their messaging. AGENTS.md
+// is best-effort (a warning to stderr, not a hard error). Returns one
+// ConnectFile per config file actually written so the connect endpoint can
+// report exactly what changed.
+func installCodexConfig(projectDir, sageHome, execPath string) ([]web.ConnectFile, error) {
+	var files []web.ConnectFile
+
+	codexDir := filepath.Join(projectDir, ".codex")
+	hookDir := filepath.Join(codexDir, "hooks")
+	if err := os.MkdirAll(hookDir, 0755); err != nil {
+		return files, fmt.Errorf("create hooks dir: %w", err)
+	}
+
+	// 1. .codex/config.toml — MCP server registration. Merge so any other
+	// [mcp_servers.X] the user already configured is preserved, not clobbered.
+	configPath := filepath.Join(codexDir, "config.toml")
+	configAction, cfgErr := mergeCodexConfig(configPath, execPath, sageHome)
+	if cfgErr != nil {
+		return files, cfgErr
+	}
+	files = append(files, web.ConnectFile{Path: configPath, Action: configAction})
+
+	// 2. .codex/hooks.json — hook lifecycle wiring. Codex doesn't expand env
+	// vars in hook commands, so we bake the absolute hook dir path in.
+	hooksPath := filepath.Join(codexDir, "hooks.json")
+	hooksAction := fileAction(hooksPath)
+	hooksConfig := map[string]any{"hooks": sageHooksConfig(hookDir)}
+	hooksData, _ := json.MarshalIndent(hooksConfig, "", "  ")
+	if writeErr := os.WriteFile(hooksPath, append(hooksData, '\n'), 0600); writeErr != nil {
+		return files, fmt.Errorf("write hooks.json: %w", writeErr)
+	}
+	files = append(files, web.ConnectFile{Path: hooksPath, Action: hooksAction})
+
+	// 3. .codex/hooks/sage-*.sh — same templates as Claude side.
+	for name, tpl := range hookScriptSet() {
+		content := strings.ReplaceAll(tpl, "__SAGE_GUI_BIN__", execPath)
+		path := filepath.Join(hookDir, name)
+		if writeErr := os.WriteFile(path, []byte(content), 0755); writeErr != nil { //nolint:gosec // hook scripts must be executable
+			return files, fmt.Errorf("write %s: %w", name, writeErr)
+		}
+	}
+
+	// 4. AGENTS.md — boot reminder for non-Claude agents (best-effort).
+	mdPath := filepath.Join(projectDir, "AGENTS.md")
+	mdAction := fileAction(mdPath)
+	if mdErr := installAgentsMD(projectDir); mdErr != nil {
+		fmt.Fprintf(os.Stderr, "⚠ Could not install AGENTS.md: %v\n", mdErr)
+	} else {
+		files = append(files, web.ConnectFile{Path: mdPath, Action: mdAction})
+	}
+
+	// 5. memory_mode flag (shared with Claude side).
+	syncMemoryModeFlag(sageHome)
+
+	return files, nil
 }
 
 // codexConfigTemplate is the TOML written to .codex/config.toml. Codex
@@ -113,6 +149,52 @@ func writeCodexConfig(path, binPath, sageHome string) error {
 		return fmt.Errorf("write codex config: %w", err)
 	}
 	return nil
+}
+
+// mergeCodexConfig writes the sage MCP server into .codex/config.toml while
+// PRESERVING any other [mcp_servers.X] the user already has. Codex config is
+// TOML, so instead of a full parse we strip any existing sage sections
+// ([mcp_servers.sage] and [mcp_servers.sage.env]) and append a fresh sage
+// block, leaving every other section byte-for-byte intact. Returns "created"
+// when the file did not exist, "merged" otherwise.
+func mergeCodexConfig(path, binPath, sageHome string) (string, error) {
+	sageBlock := strings.ReplaceAll(codexConfigTemplate, "__SAGE_GUI_BIN__", binPath)
+	sageBlock = strings.ReplaceAll(sageBlock, "__SAGE_HOME__", sageHome)
+
+	existing, err := os.ReadFile(path) //nolint:gosec // path composed from project dir, not remote input
+	if err != nil {
+		if os.IsNotExist(err) {
+			if writeErr := os.WriteFile(path, []byte(sageBlock), 0600); writeErr != nil { //nolint:gosec // project-dir path
+				return "", fmt.Errorf("write codex config: %w", writeErr)
+			}
+			return "created", nil
+		}
+		return "", fmt.Errorf("read codex config: %w", err)
+	}
+
+	// Keep every line except the ones inside a sage section. A TOML section
+	// header is "[...]"; a line "[mcp_servers.sage]" / "[mcp_servers.sage.env]"
+	// opens a sage section we drop, any other header closes it.
+	var kept []string
+	inSage := false
+	for _, line := range strings.Split(string(existing), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			inSage = trimmed == "[mcp_servers.sage]" || strings.HasPrefix(trimmed, "[mcp_servers.sage.")
+		}
+		if !inSage {
+			kept = append(kept, line)
+		}
+	}
+	body := strings.TrimRight(strings.Join(kept, "\n"), "\n")
+	out := sageBlock
+	if body != "" {
+		out = body + "\n\n" + sageBlock
+	}
+	if writeErr := os.WriteFile(path, []byte(out), 0600); writeErr != nil { //nolint:gosec // project-dir path
+		return "", fmt.Errorf("write codex config: %w", writeErr)
+	}
+	return "merged", nil
 }
 
 // sageAgentsMDBlock is the SAGE section injected into AGENTS.md. It mirrors

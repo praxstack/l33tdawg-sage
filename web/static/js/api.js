@@ -594,6 +594,29 @@ export async function wizardMintToken(agentId, tokenName) {
     return res.json();
 }
 
+// ─── Same-machine connect (Phase 5b-1) ───
+// Wire an AI tool running on THIS computer to SAGE by having the node write (or
+// merge into) that tool's MCP config. provider is one of:
+//   claude-code, codex, cursor (folder-scoped -> path required)
+//   windsurf, claude-desktop (app-scoped -> path ignored)
+// token is an optional claim token to adopt a preconfigured identity; when
+// absent the agent auto-registers on first connect (same as the CLI).
+// On bad input the endpoint returns 400 { error } -> we throw. On a run that
+// executed it returns 200 { ok, files, provider, error? } which we return as-is
+// so the caller can render partial results even when ok === false.
+export async function connectProvider(provider, { path, token } = {}) {
+    const res = await fetch(`${API_BASE}/v1/dashboard/connect/${provider}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path, token }),
+    });
+    if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        throw new Error(e.error || `connect failed (HTTP ${res.status})`);
+    }
+    return res.json();
+}
+
 // ============================================================================
 // v11 federation JOIN ceremony (cookie-authed dashboard proxy). Off-consensus;
 // the only chain writes are the two operators' own tx-33/tx-34, fired inside the

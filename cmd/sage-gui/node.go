@@ -549,6 +549,9 @@ func runServe() (rerr error) {
 	// Agent create/update will be broadcast on-chain in addition to direct SQLite writes.
 	dashboard.CometBFTRPC = cometRPC
 	dashboard.RESTAddr = cfg.RESTAddr // surfaced read-only in Settings > Connection
+	// Same-machine one-click connect: the dashboard endpoint delegates provider
+	// config writing to the package-main writers via this dispatcher.
+	dashboard.ConnectFunc = connectProvider
 	if sk := loadNodeSigningKey(cometCfg.PrivValidatorKeyFile(), logger); sk != nil {
 		dashboard.SigningKey = sk
 	}

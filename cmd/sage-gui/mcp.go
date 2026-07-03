@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/l33tdawg/sage/internal/mcp"
+	"github.com/l33tdawg/sage/web"
 )
 
 // Hook scripts deployed by `sage-gui mcp install`. The session-start and
@@ -255,30 +256,6 @@ func runMCPInstall() error {
 		return fmt.Errorf("get working directory: %w", err)
 	}
 
-	mcpPath := filepath.Join(projectDir, ".mcp.json")
-
-	if mcpHasSage(projectDir) {
-		fmt.Println("✓ SAGE MCP is already configured in this project.")
-		fmt.Printf("  .mcp.json: %s (ok)\n", mcpPath)
-		fmt.Println()
-		fmt.Println("  Checking Claude Code integration...")
-
-		// Still install/update hooks — older installs may be missing them.
-		if hookErr := installClaudeHooks(projectDir); hookErr != nil {
-			fmt.Fprintf(os.Stderr, "⚠ Could not install Claude Code hooks: %v\n", hookErr)
-			fmt.Fprintln(os.Stderr, "  SAGE will still work, but memory persistence may be less reliable.")
-		}
-
-		// Install or update CLAUDE.md with SAGE boot instructions
-		if mdErr := installClaudeMD(projectDir); mdErr != nil {
-			fmt.Fprintf(os.Stderr, "⚠ Could not install CLAUDE.md: %v\n", mdErr)
-		}
-
-		fmt.Println()
-		fmt.Println("  Restart your Claude Code session to activate updates.")
-		return nil
-	}
-
 	// Determine SAGE_HOME
 	sageHome := os.Getenv("SAGE_HOME")
 	if sageHome == "" {
@@ -291,72 +268,23 @@ func runMCPInstall() error {
 		sageHome = expandTilde(sageHome)
 	}
 
-	// === IDENTITY PATH FOR INSTALL (highest priority) ===
-	// Matches the resolution logic in runMCP() and the SDK.
-	// Enables `sage-gui mcp install --token` to write directly to
-	// SAGE_IDENTITY_PATH when set (e.g.for multi-agent tmux setups).
-	keyPath := os.Getenv("SAGE_IDENTITY_PATH")
-	if keyPath != "" {
-		keyPath = filepath.Clean(expandTilde(keyPath))
-		fmt.Fprintf(os.Stderr, "INFO: Install using SAGE_IDENTITY_PATH: %s\n", keyPath)
-		// Ensure parent dir exists (auto-generation + claiming)
-		if dir := filepath.Dir(keyPath); dir != "." {
-			if mkErr := os.MkdirAll(dir, 0700); mkErr != nil { //nolint:gosec // dir is cleaned above
-				return fmt.Errorf("create identity dir: %w", mkErr)
-			}
-		}
-	} else {
-		// Legacy fallback (unchanged)
-		agentDir := projectAgentDir(sageHome, projectDir)
-		if mkErr := os.MkdirAll(agentDir, 0700); mkErr != nil {
-			return fmt.Errorf("create agent dir: %w", mkErr)
-		}
-		keyPath = filepath.Join(agentDir, "agent.key")
+	mcpPath := filepath.Join(projectDir, ".mcp.json")
+	alreadyConfigured := mcpHasSage(projectDir)
+
+	// The .mcp.json write, hook install, CLAUDE.md patch, and identity claim
+	// now live in installClaudeCodeConfig — shared verbatim with the dashboard
+	// one-click connect path. runMCPInstall keeps only the CLI stdout UX.
+	if _, cfgErr := installClaudeCodeConfig(projectDir, sageHome, execPath, claimToken); cfgErr != nil {
+		return cfgErr
 	}
 
-	// If --token provided, claim the pre-configured identity from the dashboard
-	if claimToken != "" {
-		if claimErr := claimAgentIdentity(sageHome, claimToken, keyPath); claimErr != nil {
-			return fmt.Errorf("claim agent identity: %w", claimErr)
-		}
+	if alreadyConfigured {
+		fmt.Println("✓ SAGE MCP is already configured in this project.")
+		fmt.Printf("  .mcp.json: %s (ok)\n", mcpPath)
+		fmt.Println()
+		fmt.Println("  Restart your Claude Code session to activate updates.")
+		return nil
 	}
-
-	// Build the MCP config
-	config := map[string]any{
-		"mcpServers": map[string]any{
-			"sage": map[string]any{
-				"command": execPath,
-				"args":    []string{"mcp"},
-				"env": map[string]string{
-					"SAGE_HOME":     sageHome,
-					"SAGE_PROVIDER": "claude-code",
-				},
-			},
-		},
-	}
-
-	data, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal config: %w", err)
-	}
-
-	if writeErr := os.WriteFile(mcpPath, append(data, '\n'), 0600); writeErr != nil {
-		return fmt.Errorf("write .mcp.json: %w", writeErr)
-	}
-
-	// Install Claude Code hooks, permissions, and CLAUDE.md for reliable SAGE integration.
-	if hookErr := installClaudeHooks(projectDir); hookErr != nil {
-		fmt.Fprintf(os.Stderr, "⚠ Could not install Claude Code hooks: %v\n", hookErr)
-		fmt.Fprintln(os.Stderr, "  SAGE will still work, but memory persistence may be less reliable.")
-	}
-
-	// Install or update CLAUDE.md with SAGE boot instructions
-	if mdErr := installClaudeMD(projectDir); mdErr != nil {
-		fmt.Fprintf(os.Stderr, "⚠ Could not install CLAUDE.md: %v\n", mdErr)
-	}
-
-	// Sync memory mode flag file (default to "full" if not set)
-	syncMemoryModeFlag(sageHome)
 
 	projectName := filepath.Base(projectDir)
 	fmt.Printf("✓ SAGE MCP installed for project: %s\n", projectName)
@@ -371,6 +299,85 @@ func runMCPInstall() error {
 	fmt.Println("  Manage permissions from the CEREBRUM dashboard → Network page.")
 
 	return nil
+}
+
+// installClaudeCodeConfig performs the actual Claude Code wiring for a project:
+// merges the sage stdio server into <projectDir>/.mcp.json (preserving any
+// other MCP servers), installs the .claude/ hooks + settings.json, patches
+// CLAUDE.md, and — when claimToken is non-empty — adopts a pre-configured
+// identity (empty token means auto-register on first connect, same as the CLI
+// without --token).
+//
+// It does NO summary stdout of its own; callers (the CLI and the dashboard
+// connect endpoint) own their messaging. The reused installClaudeHooks /
+// installClaudeMD keep their own progress prints, and hook/CLAUDE.md failures
+// are best-effort (a warning to stderr, not a hard error) so a project still
+// gets a working .mcp.json — mirroring the previous CLI behaviour.
+//
+// Returns one ConnectFile per config file actually written so the connect
+// endpoint can report exactly what changed.
+func installClaudeCodeConfig(projectDir, sageHome, execPath, claimToken string) ([]web.ConnectFile, error) {
+	var files []web.ConnectFile
+
+	// === IDENTITY PATH (highest priority first) ===
+	// Matches runMCP() and the SDK: SAGE_IDENTITY_PATH wins, else a per-project
+	// agent key dir. The parent dir is created so a claim (or auto-generation)
+	// can write the key.
+	keyPath := os.Getenv("SAGE_IDENTITY_PATH")
+	if keyPath != "" {
+		keyPath = filepath.Clean(expandTilde(keyPath))
+		if dir := filepath.Dir(keyPath); dir != "." {
+			if mkErr := os.MkdirAll(dir, 0700); mkErr != nil { //nolint:gosec // dir is cleaned above
+				return files, fmt.Errorf("create identity dir: %w", mkErr)
+			}
+		}
+	} else {
+		agentDir := projectAgentDir(sageHome, projectDir)
+		if mkErr := os.MkdirAll(agentDir, 0700); mkErr != nil {
+			return files, fmt.Errorf("create agent dir: %w", mkErr)
+		}
+		keyPath = filepath.Join(agentDir, "agent.key")
+	}
+
+	// If a claim token was supplied, adopt the pre-configured identity. When
+	// empty the agent auto-registers on first connect.
+	if claimToken != "" {
+		if claimErr := claimAgentIdentity(sageHome, claimToken, keyPath); claimErr != nil {
+			return files, fmt.Errorf("claim agent identity: %w", claimErr)
+		}
+	}
+
+	// .mcp.json — merge the sage stdio server, preserving any other servers.
+	mcpPath := filepath.Join(projectDir, ".mcp.json")
+	action, mcpErr := mergeMCPServerConfig(mcpPath, execPath, sageHome, "claude-code")
+	if mcpErr != nil {
+		return files, mcpErr
+	}
+	files = append(files, web.ConnectFile{Path: mcpPath, Action: action})
+
+	// .claude/settings.json + hook scripts (best-effort).
+	settingsPath := filepath.Join(projectDir, ".claude", "settings.json")
+	settingsAction := fileAction(settingsPath)
+	if hookErr := installClaudeHooks(projectDir); hookErr != nil {
+		fmt.Fprintf(os.Stderr, "⚠ Could not install Claude Code hooks: %v\n", hookErr)
+		fmt.Fprintln(os.Stderr, "  SAGE will still work, but memory persistence may be less reliable.")
+	} else {
+		files = append(files, web.ConnectFile{Path: settingsPath, Action: settingsAction})
+	}
+
+	// CLAUDE.md boot instructions (best-effort).
+	mdPath := filepath.Join(projectDir, "CLAUDE.md")
+	mdAction := fileAction(mdPath)
+	if mdErr := installClaudeMD(projectDir); mdErr != nil {
+		fmt.Fprintf(os.Stderr, "⚠ Could not install CLAUDE.md: %v\n", mdErr)
+	} else {
+		files = append(files, web.ConnectFile{Path: mdPath, Action: mdAction})
+	}
+
+	// Keep the shared memory_mode flag in sync (default "full").
+	syncMemoryModeFlag(sageHome)
+
+	return files, nil
 }
 
 // installClaudeHooks creates .claude/hooks/ scripts and merges hook config +
