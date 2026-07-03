@@ -6986,8 +6986,13 @@ function CursorSetupPanel({ agents, onClose }) {
                     <button class="detail-close" onClick=${onClose}>×</button>
                 </div>
                 <div class="wizard-body" style="overflow-y:auto;flex:1;padding:20px;line-height:1.55;">
-                    <p>These clients accept bearer-token auth directly — <strong>no tunnel, no public URL, no Cloudflare account needed</strong>. They run on the same machine as SAGE and talk to <code>https://localhost:8443</code>.</p>
-                    <p>This is the most local-first option. Zero external surface area, no DNS to configure, no third party in the path.</p>
+                    <div class="summary-card" style="padding:14px;margin-bottom:14px;">
+                        <strong>Easiest path:</strong> use <em>Connect an AI tool → On this computer</em> — SAGE writes a working
+                        config for Cursor, Cline, or Claude Desktop automatically (a local stdio connection, no certificate to trust).
+                        The bearer-over-HTTPS method below is a manual alternative for clients that specifically need a URL.
+                    </div>
+                    <p>These clients can also take a bearer token directly — <strong>no tunnel, no public URL, no Cloudflare account needed</strong>. They run on the same machine as SAGE and talk to <code>https://localhost:8443</code>.</p>
+                    <p style="font-size:12px;color:var(--text-muted);">Heads up: <code>localhost:8443</code> uses SAGE's self-signed certificate. Stock Cursor/Cline reject that over a URL, so the stdio path above (or Claude Desktop, which prompts to trust it) is the reliable choice.</p>
 
                     ${error && html`<div class="import-error" style="margin-bottom:12px;">${error}</div>`}
 
@@ -7185,6 +7190,7 @@ function RemoteConnectPanel({ agents, onOpenChatGPT }) {
                     (Cursor: <code>~/.cursor/mcp.json</code> or Settings → MCP; Cline: its MCP settings JSON):
                 </p>
                 <pre style="background:var(--bg-elev);padding:10px;border-radius:4px;font-size:11px;overflow:auto;color:var(--text);">${remoteMcpJson('url', baseUrl, token, false)}</pre>
+                <p style="font-size:11px;color:var(--text-muted);margin-top:6px;">Save the file, then reload or restart ${selected.name} — SAGE shows up in its MCP servers list.</p>
             `;
         }
         // mcp-remote: stdio-only clients bridge through the npx shim.
@@ -7238,7 +7244,7 @@ function RemoteConnectPanel({ agents, onOpenChatGPT }) {
                 <h4 style="margin-top:0;">This node isn't reachable from another computer yet</h4>
                 <p style="color:var(--text-dim);">SAGE is listening on localhost only, so a tool on a different machine
                     has no way in. Give it a public URL — a stable HTTPS address that works from anywhere. The wizard sets up
-                    the tunnel, then hands you the exact ${selected.name} paste block.</p>
+                    the tunnel, then hands you the paste block for your tool.</p>
                 <button class="btn btn-primary" onClick=${() => onOpenChatGPT && onOpenChatGPT('tool')}>Set up a public tunnel →</button>
             </div>
         `}
@@ -7272,8 +7278,22 @@ function RemoteConnectPanel({ agents, onOpenChatGPT }) {
 
                 ${baseUrl && html`
                     <div style="font-size:12px;color:var(--text-muted);margin:6px 0 10px;">
-                        Configured at <code>${baseUrl}</code>${base === 'tunnel' ? '' : (lanCand && lanCand.is_private ? ' — reachable from devices on the same network' : ' — reachable from devices that can route to this address')}.
+                        Configured at <code>${baseUrl}</code>${base === 'tunnel'
+                            ? ''
+                            : (lanCand && lanCand.is_private
+                                ? ` — should be reachable from devices on the same network (if your firewall allows inbound TCP :${(info && info.mcp_port) || 8443})`
+                                : ' — reachable from devices that can route to this address')}.
                     </div>
+                    ${base === 'tunnel' && html`
+                        <div style="font-size:11px;color:var(--text-muted);margin:-4px 0 10px;">
+                            The cloudflared tunnel must be running on this machine for the tool to connect. If it can't reach SAGE, confirm the tunnel is up.
+                        </div>
+                    `}
+                    ${base === 'lan' && lanCand && !lanCand.is_private && html`
+                        <div class="warning-banner" style="margin:0 0 10px;">
+                            <strong>${lanCand.ip} is not a private LAN address.</strong> It may be reachable from the public internet — anyone with the bearer could connect, and mcp-remote is told to skip certificate checks. Prefer the public tunnel (a real certificate) unless you know this address is safe.
+                        </div>
+                    `}
                 `}
 
                 ${mintErr && html`<div class="import-error" style="margin-bottom:12px;">${mintErr}</div>`}
@@ -7294,20 +7314,25 @@ function RemoteConnectPanel({ agents, onOpenChatGPT }) {
                     : html`
                         ${!minted && html`
                             <h4 style="margin:14px 0 8px;">Mint a bearer for the other computer</h4>
-                            <div class="wizard-field">
-                                <label>Agent</label>
-                                <select class="wizard-select" value=${agentChoice} onInput=${e => setAgentChoice(e.target.value)}>
-                                    <option value="">Pick an agent…</option>
-                                    ${eligibleAgents.map(a => html`<option value=${a.agent_id}>${a.name} (${a.role}) — ${a.agent_id.slice(0,12)}…</option>`)}
-                                </select>
-                            </div>
-                            <div class="wizard-field">
-                                <label>Token name</label>
-                                <input class="wizard-input" value=${tokenName} onInput=${e => setTokenName(e.target.value)} placeholder="remote" />
-                            </div>
-                            <button class="btn btn-primary" onClick=${onMint} disabled=${minting || !agentChoice}>
-                                ${minting ? 'Minting…' : 'Mint bearer'}
-                            </button>
+                            ${eligibleAgents.length === 0
+                                ? html`<div class="import-error" style="margin-bottom:8px;">No agents yet — create one in the Network tab first, then come back to mint a bearer for it.</div>`
+                                : html`
+                                    <div class="wizard-field">
+                                        <label>Agent</label>
+                                        <select class="wizard-select" value=${agentChoice} onInput=${e => setAgentChoice(e.target.value)}>
+                                            <option value="">Pick an agent…</option>
+                                            ${eligibleAgents.map(a => html`<option value=${a.agent_id}>${a.name} (${a.role}) — ${a.agent_id.slice(0,12)}…</option>`)}
+                                        </select>
+                                        <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">No agent yet? Create one in the Network tab first. (Best practice: one dedicated agent per remote tool for clear audit trails.)</div>
+                                    </div>
+                                    <div class="wizard-field">
+                                        <label>Token name</label>
+                                        <input class="wizard-input" value=${tokenName} onInput=${e => setTokenName(e.target.value)} placeholder="remote" />
+                                    </div>
+                                    <button class="btn btn-primary" onClick=${onMint} disabled=${minting || !agentChoice}>
+                                        ${minting ? 'Minting…' : 'Mint bearer'}
+                                    </button>
+                                `}
                         `}
 
                         ${minted && html`
