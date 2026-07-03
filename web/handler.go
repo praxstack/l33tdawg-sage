@@ -1567,6 +1567,10 @@ func (h *DashboardHandler) handleGetTasks(w http.ResponseWriter, r *http.Request
 		TaskStatus      string  `json:"task_status"`
 		ConfidenceScore float64 `json:"confidence_score"`
 		CreatedAt       string  `json:"created_at"`
+		// Authorship so the board can badge agent-authored vs human-created tasks
+		// and filter by author. Human-created tasks carry an empty provider.
+		Provider        string `json:"provider"`
+		SubmittingAgent string `json:"submitting_agent"`
 	}
 	results := make([]taskResult, 0, len(tasks))
 	for _, t := range tasks {
@@ -1577,6 +1581,8 @@ func (h *DashboardHandler) handleGetTasks(w http.ResponseWriter, r *http.Request
 			TaskStatus:      string(t.TaskStatus),
 			ConfidenceScore: t.ConfidenceScore,
 			CreatedAt:       t.CreatedAt.Format("2006-01-02T15:04:05Z"),
+			Provider:        t.Provider,
+			SubmittingAgent: t.SubmittingAgent,
 		})
 	}
 	writeJSONResp(w, http.StatusOK, map[string]any{"tasks": results, "total": len(results)})
@@ -1605,6 +1611,11 @@ func (h *DashboardHandler) handleUpdateTaskStatusDashboard(w http.ResponseWriter
 	if err := h.store.UpdateTaskStatus(r.Context(), id, ts); err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
+	}
+	// Real-time: agents and humans update status through this same handler, so one
+	// broadcast keeps every open board in sync without a manual refresh.
+	if h.SSE != nil {
+		h.SSE.Broadcast(SSEEvent{Type: EventTask, MemoryID: id})
 	}
 	writeJSONResp(w, http.StatusOK, map[string]string{"memory_id": id, "task_status": body.TaskStatus})
 }
@@ -1688,6 +1699,10 @@ func (h *DashboardHandler) handleCreateTaskDashboard(w http.ResponseWriter, r *h
 	if err := h.store.InsertMemory(r.Context(), rec); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+
+	if h.SSE != nil {
+		h.SSE.Broadcast(SSEEvent{Type: EventTask, MemoryID: memoryID})
 	}
 
 	writeJSONResp(w, http.StatusCreated, map[string]string{

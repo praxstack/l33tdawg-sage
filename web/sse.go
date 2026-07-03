@@ -24,6 +24,7 @@ const (
 	EventImport     EventType = "import"
 	EventUpdate     EventType = "update"
 	EventGovernance EventType = "governance"
+	EventTask       EventType = "task"
 )
 
 // SSEEvent is an event sent to connected dashboard clients.

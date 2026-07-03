@@ -1788,12 +1788,13 @@ const TASK_COLUMNS = [
     { key: 'dropped', label: 'Dropped', color: 'var(--danger)', icon: '✕' },
 ];
 
-function TasksPage() {
+function TasksPage({ sse }) {
     const [tasks, setTasks] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
     const [domainFilter, setDomainFilter] = useState('');
     const [domains, setDomains] = useState([]);
+    const [agentFilter, setAgentFilter] = useState('');
     const [dragging, setDragging] = useState(null);
     const [dragOver, setDragOver] = useState(null);
     const [showAddForm, setShowAddForm] = useState(false);
@@ -1801,8 +1802,23 @@ function TasksPage() {
     const [newDomain, setNewDomain] = useState('');
     const [adding, setAdding] = useState(false);
     const [showOldDone, setShowOldDone] = useState(false);
+    const draggingRef = useRef(false);
+    const reloadTimer = useRef(null);
 
     useEffect(() => { loadTasks(); }, []);
+
+    // Live refresh: agents create and move tasks through the same shared store, so
+    // refresh on task/remember/forget events (debounced, and never mid-drag) instead
+    // of leaving the board stale until a manual reload.
+    useEffect(() => {
+        if (!sse) return;
+        const bump = () => {
+            clearTimeout(reloadTimer.current);
+            reloadTimer.current = setTimeout(() => { if (!draggingRef.current) loadTasks(); }, 500);
+        };
+        const subs = [sse.on('task', bump), sse.on('remember', bump), sse.on('forget', bump)];
+        return () => { clearTimeout(reloadTimer.current); subs.forEach(u => u && u()); };
+    }, [sse]);
 
     async function loadTasks() {
         setLoading(true);
@@ -1864,6 +1880,7 @@ function TasksPage() {
     }
 
     function handleDragStart(e, task) {
+        draggingRef.current = true; // pause live-refresh while a drag is in flight
         setDragging(task.memory_id);
         e.dataTransfer.effectAllowed = 'move';
         e.dataTransfer.setData('text/plain', task.memory_id);
@@ -1881,6 +1898,7 @@ function TasksPage() {
 
     function handleDrop(e, colKey) {
         e.preventDefault();
+        draggingRef.current = false;
         const taskId = e.dataTransfer.getData('text/plain');
         if (taskId && colKey) {
             moveTask(taskId, colKey);
@@ -1889,7 +1907,11 @@ function TasksPage() {
         setDragOver(null);
     }
 
-    const filtered = (domainFilter ? tasks.filter(t => t.domain_tag === domainFilter) : tasks).filter(isRecentDone);
+    const taskAuthors = [...new Set(tasks.map(t => t.provider).filter(Boolean))].sort();
+    const filtered = tasks
+        .filter(t => !domainFilter || t.domain_tag === domainFilter)
+        .filter(t => !agentFilter || (agentFilter === '__human__' ? !t.provider : t.provider === agentFilter))
+        .filter(isRecentDone);
     const hiddenDoneCount = tasks.filter(t => (t.task_status === 'done' || t.task_status === 'dropped') && !isRecentDone(t)).length;
 
     return html`
@@ -1904,6 +1926,13 @@ function TasksPage() {
                         <option value="">All domains</option>
                         ${domains.map(d => html`<option value=${d}>${d}</option>`)}
                     </select>
+                    ${taskAuthors.length > 0 && html`
+                        <select class="filter-select" value=${agentFilter} onChange=${e => setAgentFilter(e.target.value)} title="Filter by who created the task">
+                            <option value="">All authors</option>
+                            <option value="__human__">You (dashboard)</option>
+                            ${taskAuthors.map(p => html`<option value=${p}>${p}</option>`)}
+                        </select>
+                    `}
                     <button class="btn" onClick=${() => setShowAddForm(!showAddForm)} title="Add task" style="font-weight:bold;">+ Add</button>
                     <button class="btn" onClick=${loadTasks} title="Refresh">↻</button>
                 </div>
@@ -1969,13 +1998,17 @@ function TasksPage() {
                                 ${colTasks.map(task => html`
                                     <div class="kanban-card ${dragging === task.memory_id ? 'dragging' : ''}"
                                          draggable="true"
-                                         onDragStart=${e => handleDragStart(e, task)}>
+                                         onDragStart=${e => handleDragStart(e, task)}
+                                         onDragEnd=${() => { draggingRef.current = false; }}>
                                         <div class="kanban-card-content">${task.content.replace(/^\[TASK\]\s*/i, '')}</div>
                                         <div class="kanban-card-meta">
                                             <span class="domain-badge" style="background:${getDomainColor(task.domain_tag)}20;color:${getDomainColor(task.domain_tag)};font-size:10px;padding:2px 6px;">
                                                 ${task.domain_tag}
                                             </span>
-                                            <span style="font-size:11px;color:var(--text-muted);">${timeAgo(task.created_at)}</span>
+                                            ${task.provider
+                                                ? html`<span title="Created by an agent" style="font-size:10px;color:var(--text-dim);">🤖 ${task.provider}</span>`
+                                                : html`<span title="Created from the dashboard" style="font-size:10px;color:var(--primary);">You</span>`}
+                                            <span style="font-size:11px;color:var(--text-muted);margin-left:auto;">${timeAgo(task.created_at)}</span>
                                         </div>
                                         ${col.key !== 'done' && col.key !== 'dropped' ? html`
                                             <div class="kanban-card-actions">
@@ -7277,7 +7310,7 @@ function App() {
                     : html`<${MriView} sse=${sseRef.current} />`}
             `}
             ${page === 'search' && html`<${SearchPage} onSelectMemory=${onSelectMemory} />`}
-            ${page === 'tasks' && html`<${TasksPage} />`}
+            ${page === 'tasks' && html`<${TasksPage} sse=${sseRef.current} />`}
             ${page === 'import' && html`<${ImportPage} sse=${sseRef.current} />`}
             ${page === 'network' && html`<${NetworkPage} sse=${sseRef.current} />`}
             ${page === 'pipeline' && html`<${PipelinePage} />`}
