@@ -3505,6 +3505,22 @@ func (s *SQLiteStore) populateTaskAssignees(ctx context.Context, records []*memo
 	}
 }
 
+// ClaimTask atomically assigns a task to agentID ONLY if it is currently
+// unassigned OR already owned by agentID (a compare-and-swap). Returns whether
+// the claim was taken: (false, nil) means another agent owns it (or it does not
+// exist), so the caller must not proceed. This is the mutual-exclusion that stops
+// two agents doing the same work.
+func (s *SQLiteStore) ClaimTask(ctx context.Context, memoryID, agentID string) (bool, error) {
+	res, err := s.writeExecContext(ctx,
+		`UPDATE memories SET assignee = ? WHERE memory_id = ? AND memory_type = 'task' AND COALESCE(assignee, '') IN ('', ?)`,
+		agentID, memoryID, agentID)
+	if err != nil {
+		return false, fmt.Errorf("claim task: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
 // SetTaskAssignee assigns a task to (or claims it for) an agent. Empty assignee
 // clears the assignment. Only affects task-type memories.
 func (s *SQLiteStore) SetTaskAssignee(ctx context.Context, memoryID, assignee string) error {

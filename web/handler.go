@@ -1615,15 +1615,25 @@ func (h *DashboardHandler) handleUpdateTaskStatusDashboard(w http.ResponseWriter
 		writeError(w, http.StatusBadRequest, "task_status must be one of: planned, in_progress, done, dropped")
 		return
 	}
+	// Claim-on-pickup (atomic, BEFORE the status write): when an AGENT (X-Agent-ID
+	// present) starts a task, it must win an exclusive compare-and-swap claim. If
+	// another agent already owns it, reject with 409 so the loser picks different
+	// work - this is what actually prevents two agents doing the same task. Humans
+	// (dashboard, no header) never claim and are unaffected.
+	if agentID := strings.TrimSpace(r.Header.Get("X-Agent-ID")); agentID != "" && ts == memory.TaskStatusInProgress {
+		claimed, cErr := h.store.ClaimTask(r.Context(), id, agentID)
+		if cErr != nil {
+			writeError(w, http.StatusInternalServerError, cErr.Error())
+			return
+		}
+		if !claimed {
+			writeError(w, http.StatusConflict, "task is already claimed by another agent")
+			return
+		}
+	}
 	if err := h.store.UpdateTaskStatus(r.Context(), id, ts); err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
-	}
-	// Claim-on-pickup: when an AGENT (X-Agent-ID present) starts a task, auto-claim
-	// it so no other agent picks up the same work. Best-effort; failure to claim
-	// must not fail the status change. Humans (dashboard, no header) don't claim.
-	if agentID := strings.TrimSpace(r.Header.Get("X-Agent-ID")); agentID != "" && ts == memory.TaskStatusInProgress {
-		_ = h.store.SetTaskAssignee(r.Context(), id, agentID)
 	}
 	// Real-time: agents and humans update status through this same handler, so one
 	// broadcast keeps every open board in sync without a manual refresh.

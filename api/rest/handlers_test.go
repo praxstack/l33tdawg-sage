@@ -202,6 +202,8 @@ func (m *mockMemoryStore) GetOpenTasks(_ context.Context, _ string, _ string, _ 
 
 func (m *mockMemoryStore) SetTaskAssignee(_ context.Context, _, _ string) error { return nil }
 
+func (m *mockMemoryStore) ClaimTask(_ context.Context, _, _ string) (bool, error) { return true, nil }
+
 func (m *mockMemoryStore) GetAllTasks(_ context.Context, _ string, _ int) ([]*memory.MemoryRecord, error) {
 	var tasks []*memory.MemoryRecord
 	for _, rec := range m.memories {

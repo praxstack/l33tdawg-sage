@@ -1279,6 +1279,10 @@ func (s *PostgresStore) SetTaskAssignee(_ context.Context, _, _ string) error {
 	return fmt.Errorf("SetTaskAssignee not implemented for PostgresStore (SQLite-only feature)")
 }
 
+func (s *PostgresStore) ClaimTask(_ context.Context, _, _ string) (bool, error) {
+	return true, nil // no assignee column on Postgres; claim is a no-op that never blocks
+}
+
 func (s *PostgresStore) UpdateTaskStatus(ctx context.Context, memoryID string, taskStatus memory.TaskStatus) error {
 	result, err := s.db.Exec(ctx,
 		`UPDATE memories SET task_status = $2 WHERE memory_id = $1 AND memory_type = 'task'`,
