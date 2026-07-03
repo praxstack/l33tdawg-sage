@@ -925,6 +925,20 @@ func (h *DashboardHandler) handleListMemories(w http.ResponseWriter, r *http.Req
 		}
 	}
 
+	// Augment with corroboration counts so the UI can show how many agents have
+	// backed each memory (display-only; same value the graph/recall paths use).
+	if len(records) > 0 {
+		ids := make([]string, len(records))
+		for i, rec := range records {
+			ids[i] = rec.MemoryID
+		}
+		if counts, cErr := h.store.GetCorroborationCounts(r.Context(), ids); cErr == nil {
+			for _, rec := range records {
+				rec.CorroborationCount = counts[rec.MemoryID]
+			}
+		}
+	}
+
 	writeJSONResp(w, http.StatusOK, map[string]any{
 		"memories": records,
 		"total":    total,

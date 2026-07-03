@@ -1711,6 +1711,12 @@ function MemoryDetail({ memory, onClose, onDelete, onNavigate }) {
                         <label>Status</label>
                         <span class="value">${m.status}</span>
                     </div>
+                    ${(m.corroboration_count != null) && html`
+                        <div class="detail-meta-item">
+                            <label>Corroborations</label>
+                            <span class="value" title="How many agents have independently backed this memory toward consensus">◍ ${m.corroboration_count || 0}</span>
+                        </div>
+                    `}
                     <div class="detail-meta-item">
                         <label>Created</label>
                         <span class="value">${m.created_at ? timeAgo(m.created_at) : 'unknown'}</span>

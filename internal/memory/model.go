@@ -53,6 +53,10 @@ type MemoryRecord struct {
 	CreatedAt       time.Time    `json:"created_at"`
 	CommittedAt     *time.Time   `json:"committed_at,omitempty"`
 	DeprecatedAt    *time.Time   `json:"deprecated_at,omitempty"`
+	// CorroborationCount is a display-only augmentation (not persisted on this
+	// struct) populated by list/detail handlers so the UI can show how many
+	// agents have backed a memory toward consensus.
+	CorroborationCount int `json:"corroboration_count,omitempty"`
 }
 
 // MemoryLink represents a relationship between two memories.
