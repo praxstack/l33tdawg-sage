@@ -1,6 +1,6 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
-import { fetchStats, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchTasks, updateTaskStatus, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken,
+import { fetchStats, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, fetchValidators, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchTasks, updateTaskStatus, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken,
 fedConnections, fedRevoke, fedPeerStatus, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestConfirm } from './api.js';
 
 import { mountMriBrain } from './mri-brain.js';
@@ -231,6 +231,9 @@ const icons = {
     // Deliberately NOT the quorum "network" node-graph glyph (federation-join
     // ADDS a connection and deletes nothing; quorum-join wipes node state).
     federation: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="8" cy="12" r="5"/><circle cx="16" cy="12" r="5"/></svg>`,
+    // Speedometer gauge — the node control board. Deliberately distinct from the
+    // tasks 2x2 grid glyph so the two are not confused in the sidebar.
+    overview: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20a8 8 0 1 1 16 0"/><path d="M12 20l4-5"/><circle cx="12" cy="20" r="1.3" fill="currentColor"/></svg>`,
 };
 
 // ============================================================================
@@ -7122,6 +7125,296 @@ function PipelinePage() {
 }
 
 // ============================================================================
+// Overview - top-level node control board. Five stacked section cards (Chain
+// health, Quorum and nodes, Agents, Federation, Embeddings) plus an overall
+// node-status banner. Polls every 3s; each data source is stored independently
+// so one failing feed never blanks the board (last-good values are kept and the
+// affected section shows a subtle "stale" note). Terminology is locked:
+// "Agents" = this node's own agents; "Federation" = other nodes.
+// ============================================================================
+function OverviewPage({ sse }) {
+    const [health, setHealth] = useState(null);
+    const [stats, setStats] = useState(null);
+    const [agents, setAgents] = useState([]);
+    const [validators, setValidators] = useState(null);
+    const [fed, setFed] = useState(null);
+    const [failed, setFailed] = useState({});
+    const [blockRate, setBlockRate] = useState(null);
+    const [, setTick] = useState(0);
+    const prevBlockRef = useRef(null);          // { height, timeMs } across polls
+    const uptimeRef = useRef({ base: 0, at: 0 });
+    const fedEverRef = useRef(false);           // was federation ever reachable? a node with
+                                                // federation disabled returns 501 forever, which is
+                                                // "not federated", not a "stale" fetch error.
+
+    // Poll every 3s. allSettled so a single failed source keeps its last-good
+    // value while the others refresh; each result is stored independently.
+    useEffect(() => {
+        let alive = true;
+        const load = async () => {
+            const [rHealth, rStats, rAgents, rValidators, rFed] = await Promise.allSettled([
+                fetchHealth(), fetchStats(), fetchAgents(), fetchValidators(), fedConnections(),
+            ]);
+            if (!alive) return;
+            if (rHealth.status === 'fulfilled' && rHealth.value) {
+                const hv = rHealth.value;
+                setHealth(hv);
+                uptimeRef.current = { base: parseUptimeSec(hv.uptime || ''), at: Date.now() };
+                const ch = hv.chain;
+                if (ch) {
+                    const hgt = Number(ch.block_height || 0);
+                    const t = ch.block_time ? new Date(ch.block_time).getTime() : null;
+                    const prev = prevBlockRef.current;
+                    if (prev && t && prev.timeMs && hgt > prev.height) {
+                        const dt = (t - prev.timeMs) / 1000;
+                        const dh = hgt - prev.height;
+                        if (dt > 0 && dh > 0) setBlockRate(dt / dh);
+                    }
+                    prevBlockRef.current = { height: hgt, timeMs: t };
+                }
+            }
+            if (rStats.status === 'fulfilled') setStats(rStats.value);
+            if (rAgents.status === 'fulfilled') setAgents(rAgents.value?.agents || []);
+            if (rValidators.status === 'fulfilled') setValidators(rValidators.value);
+            if (rFed.status === 'fulfilled') { setFed(rFed.value); fedEverRef.current = true; }
+            setFailed({
+                health: rHealth.status !== 'fulfilled',
+                stats: rStats.status !== 'fulfilled',
+                agents: rAgents.status !== 'fulfilled',
+                validators: rValidators.status !== 'fulfilled',
+                fed: rFed.status !== 'fulfilled',
+            });
+        };
+        load();
+        const iv = setInterval(load, 3000);
+        return () => { alive = false; clearInterval(iv); };
+    }, []);
+
+    // 1s tick so block age, block-rate idle-ness and uptime advance live.
+    useEffect(() => {
+        const iv = setInterval(() => setTick(t => t + 1), 1000);
+        return () => clearInterval(iv);
+    }, []);
+
+    // ---- tone tokens + small render helpers ----
+    const TONE = {
+        healthy:  { bg: 'rgba(16,185,129,0.15)', fg: '#10b981' },
+        degraded: { bg: 'rgba(245,158,11,0.15)', fg: '#f59e0b' },
+        danger:   { bg: 'rgba(239,68,68,0.15)',  fg: '#ef4444' },
+        neutral:  { bg: 'rgba(107,114,128,0.15)', fg: '#9ca3af' },
+    };
+    const pill = (tone, text) => {
+        const t = TONE[tone] || TONE.neutral;
+        return html`<span style=${`display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;padding:3px 10px;border-radius:999px;background:${t.bg};color:${t.fg};`}>
+            <span style=${`width:7px;height:7px;border-radius:50%;background:${t.fg};`}></span>${text}</span>`;
+    };
+    const tile = (value, label, opts = {}) => {
+        const s = [];
+        if (opts.color) s.push(`color:${opts.color}`);
+        if (opts.small) s.push('font-size:14px;word-break:break-word');
+        return html`<div class="chain-stat-card" title=${opts.title || ''}>
+            <div class="chain-stat-value" style=${s.join(';')}>${value}</div>
+            <div class="chain-stat-label">${label}</div>
+            ${opts.sub ? html`<div style="font-size:10px;color:var(--text-muted);margin-top:4px">${opts.sub}</div>` : ''}
+        </div>`;
+    };
+    const deferredTile = (label, help) => html`<div class="chain-stat-card" title="Coming in a later phase.">
+        <div class="chain-stat-value" style="color:var(--text-muted)">--</div>
+        <div class="chain-stat-label" style="display:inline-flex;align-items:center;gap:4px;justify-content:center;">${label} <${HelpTip} text=${help} /></div>
+    </div>`;
+    const sectionCard = (title, help, pillNode, stale, body) => html`<div class="settings-section">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;">
+            <h3 style="font-size:14px;font-weight:600;margin:0;color:var(--text);">${title}</h3>
+            <${HelpTip} text=${help} />
+            <div style="flex:1"></div>
+            ${stale ? html`<span style="font-size:10px;color:var(--text-muted);font-style:italic;margin-right:4px;">stale</span>` : ''}
+            ${pillNode}
+        </div>
+        ${body}
+    </div>`;
+    const fmtAge = (ms) => {
+        if (ms == null) return '--';
+        const s = Math.floor(ms / 1000);
+        if (s < 60) return s + 's';
+        if (s < 3600) return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+        return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+    };
+
+    // ---- section 1: chain health ----
+    const CHAIN_IDLE_AFTER_MS = 30000;
+    const chain = health?.chain || null;
+    const blockElapsed = chain?.block_time ? Date.now() - new Date(chain.block_time).getTime() : null;
+    const chainIdle = blockElapsed !== null && blockElapsed > CHAIN_IDLE_AFTER_MS;
+    const ageS = blockElapsed !== null ? blockElapsed / 1000 : null;
+    const appVer = chain?.app_version || '';
+    const appVerNum = parseInt(appVer, 10);
+    // "0"/empty/unparseable -> neutral: a fresh or un-upgraded chain may not
+    // report a consensus app version yet, so do not cry "behind" (amber) on it.
+    // Only a real version below 15 is genuinely behind.
+    const appVerTone = appVer === '15' ? 'healthy' : (appVerNum > 0 && appVerNum < 15 ? 'degraded' : 'neutral');
+    const appVerShown = (appVer && appVer !== '0') ? ('v' + appVer) : '--';
+    const mempoolTxs = (chain && chain.mempool_txs != null) ? Number(chain.mempool_txs) : null;
+    const mempoolHot = mempoolTxs != null && !isNaN(mempoolTxs) && mempoolTxs > 50;
+    let uptimeDisplay = '--';
+    if (health && uptimeRef.current.at) {
+        uptimeDisplay = formatUptime(uptimeRef.current.base + Math.floor((Date.now() - uptimeRef.current.at) / 1000));
+    }
+    let chainTone = 'neutral';
+    if (chain) {
+        if (chain.catching_up) chainTone = 'degraded';
+        else if (mempoolHot) chainTone = 'degraded';
+        else if (chainIdle) chainTone = 'healthy';
+        else if (ageS !== null && ageS > 10) chainTone = 'degraded';
+        else chainTone = 'healthy';
+    }
+    const chainTiles = [
+        tile(chain ? Number(chain.block_height || 0).toLocaleString() : '--', 'Block height', { color: '#10b981', title: 'Total blocks committed to the chain.' }),
+        tile(fmtAge(blockElapsed), 'Last block age', { title: 'Time since the last committed block.', sub: chainIdle ? 'idle - not a stall' : '' }),
+        tile(chain ? (chain.catching_up ? 'Catching up' : 'In sync') : '--', 'Sync state', { small: true, color: chain ? (chain.catching_up ? '#f59e0b' : '#10b981') : undefined }),
+        tile(appVerShown, 'App version', { small: true, color: appVerTone === 'healthy' ? '#10b981' : (appVerTone === 'degraded' ? '#f59e0b' : undefined), title: 'CometBFT app protocol version. Green when current (15).' }),
+        tile(chainIdle ? 'Idle' : (blockRate ? blockRate.toFixed(1) + 's' : '--'), 'Block rate', { small: chainIdle, title: 'Seconds per block, derived client-side from height deltas.' }),
+        tile(uptimeDisplay, 'Node uptime', { small: true, title: 'Time since this node process started.' }),
+        tile(chain && chain.mempool_txs != null ? chain.mempool_txs : '--', 'Pending transactions', { color: mempoolHot ? '#f59e0b' : undefined, title: 'Unconfirmed transactions waiting in the mempool. Amber above 50 signals a backlog.' }),
+        tile(chain?.app_hash ? chain.app_hash.slice(0, 10) : '--', 'State fingerprint', { small: true, title: chain?.app_hash || 'Short prefix of the app hash (consensus state root).' }),
+    ];
+
+    // ---- section 2: quorum and nodes ----
+    const peerCount = Number(chain?.peers || 0);
+    const vCount = validators?.count;
+    let quorumTone = 'neutral', quorumLabel = 'Single node';
+    if (validators) {
+        if (validators.error) { quorumTone = 'degraded'; quorumLabel = 'RPC error'; }
+        else if ((vCount || 0) <= 1 && peerCount === 0) { quorumTone = 'neutral'; quorumLabel = 'Single node'; }
+        else { quorumTone = 'healthy'; quorumLabel = 'Quorum'; }
+    }
+    const quorumTiles = [
+        tile(vCount != null ? vCount : '--', 'Validators', { title: 'Validators in the consensus set.' }),
+        tile(validators && validators.total_voting_power != null ? validators.total_voting_power : '--', 'Total voting power', { small: true, title: 'Sum of every validator voting power.' }),
+        tile(chain ? peerCount : '--', 'Connected peers', { title: 'Connected SAGE nodes (0 = solo).' }),
+    ];
+
+    // ---- section 3: agents (this node's own) ----
+    const now = Date.now();
+    const agentAge = (a) => a.last_seen ? (now - new Date(a.last_seen).getTime()) : Infinity;
+    const online = agents.filter(a => agentAge(a) < 5 * 60 * 1000).length;
+    const offline = agents.filter(a => agentAge(a) > 60 * 60 * 1000).length;
+    const memSum = agents.reduce((s, a) => s + (a.memory_count || 0), 0);
+    const storedMem = (stats && stats.total_memories != null) ? stats.total_memories : (agents.length ? memSum : null);
+    const rankedAgents = agents.slice().sort((a, b) =>
+        (b.memory_count || 0) - (a.memory_count || 0) ||
+        (new Date(b.last_seen || 0).getTime() - new Date(a.last_seen || 0).getTime()));
+    const mostActive = rankedAgents[0] || null;
+    const topAgents = rankedAgents.slice(0, 5);
+    const dotColor = (a) => { const ms = agentAge(a); return ms < 5 * 60 * 1000 ? '#10b981' : (ms < 60 * 60 * 1000 ? '#f59e0b' : '#6b7280'); };
+    let agentTone = 'neutral';
+    if (agents.length) agentTone = online > 0 ? 'healthy' : 'neutral';
+    const agentTiles = [
+        tile(agents.length ? online : '--', 'Agents online', { color: '#10b981', title: 'Agents seen in the last 5 minutes.' }),
+        tile(agents.length ? offline : '--', 'Agents offline', { color: '#6b7280', title: 'Agents not seen for over 60 minutes.' }),
+        tile(storedMem != null ? Number(storedMem).toLocaleString() : '--', 'Stored memories', { title: 'Total memories stored on this node.' }),
+        tile(mostActive ? (mostActive.name || (mostActive.agent_id || '').slice(0, 8)) : '--', 'Most active agent', { small: true, sub: mostActive ? (mostActive.memory_count || 0) + ' memories' : '', title: 'Agent holding the most memories.' }),
+    ];
+
+    // ---- section 4: federation (other nodes) ----
+    const connections = (fed && fed.connections) || [];
+    const activeCount = connections.filter(c => c.status === 'active' && !c.expired).length;
+    let fedTone = 'neutral';
+    if (fed && connections.length) fedTone = activeCount > 0 ? 'healthy' : 'neutral';
+    const connTone = (c) => c.expired ? 'degraded' : (c.status === 'active' ? 'healthy' : (c.status === 'revoked' ? 'danger' : 'neutral'));
+    const fedTiles = [
+        tile(fed ? connections.length : '--', 'Connected nodes', { title: 'Other SAGE nodes federated with this one.' }),
+        tile(fed ? activeCount : '--', 'Active agreements', { title: 'Cross-node agreements that are active and unexpired.' }),
+        deferredTile('Nodes reachable', 'Live reachability probing of federated nodes is coming in a later phase.'),
+        deferredTile('Last exchange', 'Tracking the last cross-node exchange time is coming in a later phase.'),
+    ];
+
+    // ---- section 5: embeddings ----
+    const emb = describeEmbedder(health);
+    const rr = health?.embedder?.reranker;
+    const rrOn = !!(rr && rr.enabled);
+    const rrText = rrOn ? `On - ${rr.model || 'reranker'}` : 'Off';
+    const embTone = !health ? 'neutral' : ((emb.online && emb.provider !== 'hash') ? 'healthy' : 'degraded');
+    const embTiles = [
+        tile(emb.displayName || '--', 'Provider', { small: true, title: emb.label || '' }),
+        tile(emb.online ? 'Online' : 'Offline', 'Runtime state', { small: true, color: emb.online ? '#10b981' : '#ef4444' }),
+        tile(health?.embedder?.model || '--', 'Model', { small: true }),
+        tile(health?.embedder?.dimension || '--', 'Vector dimensions', { title: 'Embedding vector width.' }),
+        tile(rrText, 'Reranker', { small: true, color: rrOn ? '#10b981' : '#6b7280', title: (rr && rr.url) ? rr.url : 'Cross-encoder reranker over recall candidates.' }),
+    ];
+
+    // ---- overall node banner (worst section wins) ----
+    const cannotReach = failed.health && !health;
+    const loading = health === null && !failed.health;
+    const anyDegraded = [chainTone, quorumTone, agentTone, fedTone, embTone].includes('degraded');
+    const nodeTone = cannotReach ? 'danger' : (loading ? 'neutral' : (anyDegraded ? 'degraded' : 'healthy'));
+    const nodeLabel = cannotReach ? 'Cannot reach node' : (loading ? 'Checking node' : (anyDegraded ? 'Node degraded' : 'Node healthy'));
+    const nodePillText = cannotReach ? 'offline' : (loading ? 'checking' : (anyDegraded ? 'degraded' : 'healthy'));
+
+    return html`<div class="settings-page">
+        <div class="settings-section" style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
+            <div style="display:flex;flex-direction:column;gap:6px;min-width:0;">
+                <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+                    <span style="font-size:18px;font-weight:700;color:var(--text);">${nodeLabel}</span>
+                    ${pill(nodeTone, nodePillText)}
+                </div>
+                <div style="font-size:12px;color:var(--text-muted);">${chain?.chain_id || '--'} · ${chain?.moniker || 'this node'}</div>
+            </div>
+            <div style="flex:1"></div>
+            <div style="display:flex;gap:24px;flex-wrap:wrap;">
+                <div style="text-align:right;">
+                    <div style="font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--text-muted);">SAGE</div>
+                    <div style="font-size:15px;font-weight:600;color:var(--text);">${SAGE_VERSION}</div>
+                </div>
+                <div style="text-align:right;">
+                    <div style="font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--text-muted);">Uptime</div>
+                    <div style="font-size:15px;font-weight:600;color:var(--text);font-variant-numeric:tabular-nums;">${uptimeDisplay}</div>
+                </div>
+            </div>
+        </div>
+
+        ${sectionCard('Chain health',
+            'BFT consensus status. Blocks are minted about every 5 seconds while there is activity; an idle chain stops minting empty blocks, so a long gap is normal, not a stall.',
+            pill(chainTone, chainTone === 'degraded' ? 'degraded' : (chainTone === 'healthy' ? 'healthy' : 'no data')),
+            failed.health,
+            html`<div class="chain-stats-grid">${chainTiles}</div>`)}
+
+        ${sectionCard('Quorum and nodes',
+            'Validators forming this node consensus set and the peers it is connected to. A solo node with no peers is a normal single-node deployment, not a fault.',
+            pill(quorumTone, quorumLabel),
+            failed.validators,
+            html`<div class="chain-stats-grid">${quorumTiles}</div>`)}
+
+        ${sectionCard('Agents',
+            'This node own agents - the identities that read and write its memories. Online means seen in the last 5 minutes.',
+            pill(agentTone, agents.length ? `${online} online` : 'no agents'),
+            failed.agents,
+            html`<div class="chain-stats-grid">${agentTiles}</div>
+                ${topAgents.length ? html`<div style="margin-top:12px;">${topAgents.map(a => html`<div key=${a.agent_id} style="display:flex;align-items:center;gap:10px;padding:8px 4px;border-top:1px solid var(--border);font-size:13px;">
+                    <span style=${`width:8px;height:8px;border-radius:50%;flex:none;background:${dotColor(a)};`}></span>
+                    <span style="font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${a.name || (a.agent_id || '').slice(0, 8)}</span>
+                    <span style="color:var(--text-muted);">${(a.memory_count || 0).toLocaleString()} mem</span>
+                    <span style="color:var(--text-muted);min-width:64px;text-align:right;">${a.last_seen ? timeAgo(a.last_seen) : 'never'}</span>
+                </div>`)}</div>` : html`<div style="margin-top:12px;color:var(--text-muted);font-size:13px;">No agents registered on this node yet.</div>`}`)}
+
+        ${sectionCard('Federation',
+            'Other SAGE nodes this one is connected to. Federation links two separate brains; it is not the same as adding an agent to this node.',
+            pill(fedTone, connections.length ? `${activeCount} active` : 'no links'),
+            failed.fed && fedEverRef.current,
+            html`<div class="chain-stats-grid">${fedTiles}</div>
+                ${connections.length ? html`<div style="margin-top:12px;">${connections.map(c => html`<div key=${c.remote_chain_id} style="display:flex;align-items:center;gap:10px;padding:8px 4px;border-top:1px solid var(--border);font-size:13px;">
+                    <span style="font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${c.remote_chain_id}</span>
+                    ${pill(connTone(c), c.expired ? 'expired' : c.status)}
+                </div>`)}</div>` : html`<div style="margin-top:12px;color:var(--text-muted);font-size:13px;">No federated nodes yet.</div>`}`)}
+
+        ${sectionCard('Embeddings',
+            'The embedding provider that turns memories into vectors for semantic recall, and the optional reranker that reorders recall candidates.',
+            pill(embTone, embTone === 'healthy' ? 'healthy' : (embTone === 'degraded' ? 'degraded' : 'checking')),
+            failed.health,
+            html`<div class="chain-stats-grid">${embTiles}</div>`)}
+    </div>`;
+}
+
+// ============================================================================
 // Root App
 // ============================================================================
 
@@ -7257,7 +7550,8 @@ function App() {
         // Hash routing
         function onHash() {
             const hash = window.location.hash.slice(1) || '/';
-            if (hash === '/search') setPage('search');
+            if (hash === '/overview') setPage('overview');
+            else if (hash === '/search') setPage('search');
             else if (hash === '/tasks') setPage('tasks');
             else if (hash === '/settings') setPage('settings');
             else if (hash === '/import') setPage('import');
@@ -7313,6 +7607,9 @@ function App() {
         <${ToastContainer} />
         <div class="sidebar">
             <div class="sidebar-logo">S</div>
+            <button class="sidebar-btn ${page === 'overview' ? 'active' : ''}" onClick=${() => navigate('overview')} title="Overview - node control board" aria-label="Overview - node control board">
+                ${icons.overview}
+            </button>
             <button class="sidebar-btn ${page === 'brain' ? 'active' : ''}" onClick=${() => navigate('brain')} title="Cerebrum - your brain home" aria-label="Cerebrum - your brain home">
                 ${icons.brain}
             </button>
@@ -7371,6 +7668,7 @@ function App() {
             <${HealthBar} />
             <${ChainActivityLog} sse=${sseRef.current} />
 
+            ${page === 'overview' && html`<${OverviewPage} sse=${sseRef.current} />`}
             ${page === 'brain' && html`
                 <div class="brain-mode-toggle">
                     <button class=${brainMode === 'mri' ? 'active' : ''} onClick=${() => changeBrainMode('mri')} title="3D MRI brain view">⬡ MRI</button>
@@ -7986,6 +8284,7 @@ function FederationPage() {
 // h1 aria-label, so the header orients the user instead of always reading
 // "CEREBRUM". Keyed by the same page ids used by navigate()/the sidebar.
 const PAGE_LABELS = {
+    overview: 'Overview',
     brain: 'Home',
     search: 'Search',
     tasks: 'Tasks',

@@ -107,6 +107,18 @@ func (s *SQLiteStore) SetReranker(r embedding.Reranker, oversample int) {
 	s.rerankerOversample = oversample
 }
 
+// RerankerInfo reports the optional reranker configuration to
+// /v1/dashboard/health. enabled is true whenever a reranker is attached; when
+// it is the HTTP flavour we also surface the configured model + upstream URL.
+// The reranker field is wired once at startup via SetReranker (no mutex, same
+// as SetVault), so no locking is required here.
+func (s *SQLiteStore) RerankerInfo() (bool, string, string) {
+	if hr, ok := s.reranker.(*embedding.HTTPReranker); ok {
+		return true, hr.Model(), hr.URL()
+	}
+	return s.reranker != nil, "", ""
+}
+
 // VaultActive reports whether content is encrypted at rest by an attached
 // vault. When true, FTS5 text search is unavailable (encrypted content can't
 // be text-indexed) and callers MUST use semantic similarity search instead.

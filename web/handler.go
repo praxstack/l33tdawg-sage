@@ -63,6 +63,13 @@ type embedderProvider interface {
 	Semantic() bool
 }
 
+// rerankerInfoProvider is implemented by SQLiteStore to expose optional
+// reranker config to /health. handleHealth type-asserts h.store to this
+// interface so stores without a reranker simply omit the key.
+type rerankerInfoProvider interface {
+	RerankerInfo() (enabled bool, model string, url string)
+}
+
 // DashboardHandler serves the CEREBRUM dashboard UI and its API endpoints.
 type DashboardHandler struct {
 	store     store.MemoryStore
@@ -279,6 +286,8 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 
 		// Health is public (needed by CLI status command).
 		r.Get("/v1/dashboard/health", h.handleHealth)
+		// Validator set is public chain data — same publicness as /health.
+		r.Get("/v1/dashboard/chain/validators", h.handleChainValidators)
 
 		// MCP config — public so AI agents can self-configure.
 		r.Get("/v1/mcp-config", h.handleMCPConfig)
@@ -1916,6 +1925,16 @@ func (h *DashboardHandler) handleHealth(w http.ResponseWriter, r *http.Request) 
 		embedderInfo["provider"] = "none"
 		embedderInfo["online"] = false
 	}
+	// Optional reranker config — present only when the store implements
+	// rerankerInfoProvider (SQLiteStore). A live online-ping is deferred; the
+	// operator reads "enabled" as the status.
+	if rp, ok := h.store.(rerankerInfoProvider); ok {
+		en, m, _ := rp.RerankerInfo()
+		// url intentionally omitted: /health is public (CLI status), so we do
+		// not expose the internal reranker upstream endpoint here. An authed
+		// settings surface can fetch the URL separately when it needs it.
+		embedderInfo["reranker"] = map[string]any{"enabled": en, "model": m}
+	}
 	health["embedder"] = embedderInfo
 
 	// Get memory stats
@@ -1939,12 +1958,16 @@ func (h *DashboardHandler) handleHealth(w http.ResponseWriter, r *http.Request) 
 		var cometStatus struct {
 			Result struct {
 				NodeInfo struct {
-					Network string `json:"network"`
-					Moniker string `json:"moniker"`
+					Network         string `json:"network"`
+					Moniker         string `json:"moniker"`
+					ProtocolVersion struct {
+						App string `json:"app"`
+					} `json:"protocol_version"`
 				} `json:"node_info"`
 				SyncInfo struct {
 					LatestBlockHeight string `json:"latest_block_height"`
 					LatestBlockTime   string `json:"latest_block_time"`
+					LatestAppHash     string `json:"latest_app_hash"`
 					CatchingUp        bool   `json:"catching_up"`
 				} `json:"sync_info"`
 				ValidatorInfo struct {
@@ -1959,6 +1982,24 @@ func (h *DashboardHandler) handleHealth(w http.ResponseWriter, r *http.Request) 
 			chain["chain_id"] = cometStatus.Result.NodeInfo.Network
 			chain["moniker"] = cometStatus.Result.NodeInfo.Moniker
 			chain["voting_power"] = cometStatus.Result.ValidatorInfo.VotingPower
+			chain["app_version"] = cometStatus.Result.NodeInfo.ProtocolVersion.App
+			chain["app_hash"] = cometStatus.Result.SyncInfo.LatestAppHash
+		}
+	}
+	// Mempool stats — unconfirmed tx count + total bytes. Same dial/timeout
+	// style as /status and /net_info: guard each step, close body on success.
+	mempoolReq, _ := http.NewRequestWithContext(r.Context(), "GET", cometRPC+"/num_unconfirmed_txs", nil)
+	if mempoolResp, mempoolErr := cometClient.Do(mempoolReq); mempoolErr == nil {
+		defer mempoolResp.Body.Close()
+		var mempool struct {
+			Result struct {
+				NTxs       string `json:"n_txs"`
+				TotalBytes string `json:"total_bytes"`
+			} `json:"result"`
+		}
+		if decErr := json.NewDecoder(mempoolResp.Body).Decode(&mempool); decErr == nil {
+			chain["mempool_txs"] = mempool.Result.NTxs
+			chain["mempool_bytes"] = mempool.Result.TotalBytes
 		}
 	}
 	// Peer details
@@ -2010,6 +2051,95 @@ func (h *DashboardHandler) handleHealth(w http.ResponseWriter, r *http.Request) 
 	}
 
 	writeJSONResp(w, http.StatusOK, health)
+}
+
+// handleChainValidators proxies the CometBFT validator set for the dashboard.
+// The validator set is public chain data (same publicness as /health). On any
+// RPC or decode failure it still returns 200 with an empty set + an error
+// string so the UI degrades to "--" instead of hard-failing.
+func (h *DashboardHandler) handleChainValidators(w http.ResponseWriter, r *http.Request) {
+	cometRPC := h.CometBFTRPC
+	if cometRPC == "" {
+		cometRPC = "http://127.0.0.1:26657"
+	}
+	fail := func(msg string) {
+		writeJSONResp(w, http.StatusOK, map[string]any{
+			"count":              0,
+			"total_voting_power": "0",
+			"validators":         []map[string]any{},
+			"error":              msg,
+		})
+	}
+
+	cometClient := &http.Client{Timeout: 2 * time.Second}
+	type cometVal struct {
+		Address          string `json:"address"`
+		VotingPower      string `json:"voting_power"`
+		ProposerPriority string `json:"proposer_priority"`
+	}
+	// Page through /validators (CometBFT caps per_page at 100). Without the
+	// loop, count and total_voting_power silently truncate past 100 validators.
+	// Bounded to 50 pages (5000 validators) so a misbehaving RPC can't loop us.
+	var collected []cometVal
+	total := -1
+	for page := 1; page <= 50; page++ {
+		url := cometRPC + "/validators?per_page=100&page=" + strconv.Itoa(page)
+		req, _ := http.NewRequestWithContext(r.Context(), "GET", url, nil)
+		resp, err := cometClient.Do(req)
+		if err != nil {
+			if page == 1 {
+				fail(err.Error())
+				return
+			}
+			break // earlier pages already gave us partial data; better than none
+		}
+		var payload struct {
+			Result struct {
+				Validators []cometVal `json:"validators"`
+				Total      string     `json:"total"`
+			} `json:"result"`
+		}
+		decErr := json.NewDecoder(resp.Body).Decode(&payload)
+		resp.Body.Close()
+		if decErr != nil {
+			if page == 1 {
+				fail(decErr.Error())
+				return
+			}
+			break
+		}
+		if total < 0 {
+			if t, perr := strconv.Atoi(payload.Result.Total); perr == nil {
+				total = t
+			}
+		}
+		if len(payload.Result.Validators) == 0 {
+			break
+		}
+		collected = append(collected, payload.Result.Validators...)
+		if total >= 0 && len(collected) >= total {
+			break
+		}
+	}
+
+	var totalVP int64
+	validators := make([]map[string]any, 0, len(collected))
+	for _, v := range collected {
+		if vp, perr := strconv.ParseInt(v.VotingPower, 10, 64); perr == nil {
+			totalVP += vp
+		}
+		validators = append(validators, map[string]any{
+			"address":           v.Address,
+			"voting_power":      v.VotingPower,
+			"proposer_priority": v.ProposerPriority,
+		})
+	}
+
+	writeJSONResp(w, http.StatusOK, map[string]any{
+		"count":              len(validators),
+		"total_voting_power": strconv.FormatInt(totalVP, 10),
+		"validators":         validators,
+	})
 }
 
 var startTime = time.Now()

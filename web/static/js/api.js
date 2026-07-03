@@ -75,6 +75,12 @@ export async function fetchHealth() {
     return res.json();
 }
 
+export async function fetchValidators() {
+    const res = await fetch(`${API_BASE}/v1/dashboard/chain/validators`);
+    if (!res.ok) throw new Error('validators fetch failed');
+    return res.json();
+}
+
 export async function deleteMemory(id) {
     const res = await fetch(`${API_BASE}/v1/dashboard/memory/${id}`, { method: 'DELETE' });
     return res.json();
