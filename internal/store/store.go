@@ -111,6 +111,14 @@ type TimelineBucket struct {
 type MemoryStore interface {
 	InsertMemory(ctx context.Context, record *memory.MemoryRecord) error
 	GetMemory(ctx context.Context, memoryID string) (*memory.MemoryRecord, error)
+	// UpdateMemoryEmbedding replaces a memory's embedding vector + provider tag
+	// (off-chain, local search index — no consensus). Used by re-embedding.
+	UpdateMemoryEmbedding(ctx context.Context, memoryID string, emb []float32, provider string) error
+	// CountMemoriesByProvider returns memory counts keyed by embedding provider.
+	CountMemoriesByProvider(ctx context.Context) (map[string]int, error)
+	// ListMemoriesForReembed pages memories (id + decrypted content + current
+	// embedding_provider) for the re-embed engine.
+	ListMemoriesForReembed(ctx context.Context, limit, offset int) ([]ReembedItem, error)
 	UpdateStatus(ctx context.Context, memoryID string, status memory.MemoryStatus, now time.Time) error
 	QuerySimilar(ctx context.Context, embedding []float32, opts QueryOptions) ([]*memory.MemoryRecord, error)
 	SearchByText(ctx context.Context, query string, opts QueryOptions) ([]*memory.MemoryRecord, error)

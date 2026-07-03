@@ -247,6 +247,18 @@ func (s *PostgresStore) InsertMemory(ctx context.Context, record *memory.MemoryR
 	return nil
 }
 
+func (s *PostgresStore) UpdateMemoryEmbedding(_ context.Context, _ string, _ []float32, _ string) error {
+	return fmt.Errorf("UpdateMemoryEmbedding not implemented for PostgresStore")
+}
+
+func (s *PostgresStore) CountMemoriesByProvider(_ context.Context) (map[string]int, error) {
+	return nil, fmt.Errorf("CountMemoriesByProvider not implemented for PostgresStore")
+}
+
+func (s *PostgresStore) ListMemoriesForReembed(_ context.Context, _, _ int) ([]ReembedItem, error) {
+	return nil, fmt.Errorf("ListMemoriesForReembed not implemented for PostgresStore")
+}
+
 func (s *PostgresStore) GetMemory(ctx context.Context, memoryID string) (*memory.MemoryRecord, error) {
 	row := s.db.QueryRow(ctx,
 		`SELECT memory_id, submitting_agent, content, content_hash, embedding, embedding_hash,

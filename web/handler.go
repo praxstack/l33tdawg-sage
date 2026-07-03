@@ -160,6 +160,10 @@ type DashboardHandler struct {
 	// the LAN). A personal node binds P2P to loopback, so it must switch to
 	// network mode before it can accept a joining peer.
 	QuorumEnabled bool
+	// SetEmbeddingOllama persists the embedding provider switch to Ollama +
+	// nomic-embed-text in config.yaml (the node re-reads it on the next restart).
+	// Wired in cmd/sage-gui. nil disables the enable endpoint.
+	SetEmbeddingOllama func() error
 	// ValidatorCountFn returns the live consensus validator count. When set it is
 	// the authoritative signal for whether an agent op needs a full chain
 	// redeploy (count > 1) or can be applied instantly (count <= 1) — more
@@ -362,6 +366,10 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 			r.Get("/v1/dashboard/memory/timeline", h.handleTimeline)
 			r.Get("/v1/dashboard/memory/graph", h.handleGraph)
 			r.Get("/v1/dashboard/stats", h.handleStats)
+
+			// Embeddings setup — turn on the bundled semantic embedder + re-embed.
+			h.RegisterEmbeddingsRoutes(r)
+
 			r.Delete("/v1/dashboard/memory/{id}", h.handleDeleteMemory)
 			r.Patch("/v1/dashboard/memory/{id}", h.handleUpdateMemory)
 			r.Post("/v1/dashboard/memory/bulk", h.handleBulkUpdateMemories)

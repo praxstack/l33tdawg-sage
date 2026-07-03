@@ -569,6 +569,11 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 	s.migrateTaskSupport(ctx)
 	s.migrateTaskAssignee(ctx)
 
+	// Migration: add embedding_provider column. MUST run AFTER migrateTaskSupport,
+	// which recreates the memories table from a fixed schema (and would otherwise
+	// drop a column added before it).
+	s.migrateEmbeddingProvider(ctx)
+
 	// Schema migrations — add columns to network_agents that didn't exist in earlier versions.
 	agentMigrations := []string{
 		"ALTER TABLE network_agents ADD COLUMN on_chain_height INTEGER DEFAULT 0",
@@ -641,6 +646,21 @@ func (s *SQLiteStore) migrateProvider(ctx context.Context) {
 	}
 	_, _ = s.writeExecContext(ctx, `ALTER TABLE memories ADD COLUMN provider TEXT NOT NULL DEFAULT ''`)
 	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memories_provider ON memories(provider)`)
+}
+
+// migrateEmbeddingProvider adds a SEPARATE column tracking which embedder
+// produced each memory's vector. This MUST be distinct from `provider` (which is
+// the submitting AGENT's LLM identity, used for recall scoping) — re-embedding
+// must never touch `provider`. Empty = not yet tagged (treated as needing
+// re-embed when migrating to a semantic model).
+func (s *SQLiteStore) migrateEmbeddingProvider(ctx context.Context) {
+	row := s.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name='embedding_provider'`)
+	var count int
+	if err := row.Scan(&count); err != nil || count > 0 {
+		return // already exists or error checking
+	}
+	_, _ = s.writeExecContext(ctx, `ALTER TABLE memories ADD COLUMN embedding_provider TEXT NOT NULL DEFAULT ''`)
+	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memories_embedding_provider ON memories(embedding_provider)`)
 }
 
 // migrateTaskAssignee adds the assignee column to memories so tasks can be
@@ -869,6 +889,89 @@ func (s *SQLiteStore) InsertMemory(ctx context.Context, record *memory.MemoryRec
 	}
 
 	return nil
+}
+
+// UpdateMemoryEmbedding replaces a memory's stored embedding vector and records
+// which EMBEDDER produced it (the embedding_provider column — NOT the `provider`
+// column, which is the submitting agent's LLM identity used for recall scoping).
+// This is an OFF-CHAIN, per-node search-index operation — the embedding is not
+// part of consensus/AppHash, so re-embedding (e.g. migrating hash pseudo-vectors
+// to a real semantic model) is a local SQLite update with no transaction/
+// redeploy. The vector is encoded + encrypted exactly like the insert path
+// (requires the vault unlocked when encryption is on).
+func (s *SQLiteStore) UpdateMemoryEmbedding(ctx context.Context, memoryID string, emb []float32, embeddingProvider string) error {
+	encEmb, err := s.encryptEmbedding(encodeEmbedding(emb))
+	if err != nil {
+		return fmt.Errorf("encrypt embedding: %w", err)
+	}
+	res, err := s.writeExecContext(ctx,
+		`UPDATE memories SET embedding = ?, embedding_provider = ? WHERE memory_id = ?`,
+		encEmb, embeddingProvider, memoryID)
+	if err != nil {
+		return fmt.Errorf("update embedding: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("memory %s not found", memoryID)
+	}
+	return nil
+}
+
+// CountMemoriesByProvider returns how many memories carry each EMBEDDING provider
+// tag (embedding_provider column; empty string = not yet tagged / needs
+// re-embedding). Used by the embeddings-setup status.
+func (s *SQLiteStore) CountMemoriesByProvider(ctx context.Context) (map[string]int, error) {
+	rows, err := s.conn.QueryContext(ctx, `SELECT COALESCE(embedding_provider, ''), COUNT(*) FROM memories GROUP BY embedding_provider`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]int)
+	for rows.Next() {
+		var provider string
+		var n int
+		if scanErr := rows.Scan(&provider, &n); scanErr != nil {
+			return nil, scanErr
+		}
+		out[provider] = n
+	}
+	return out, rows.Err()
+}
+
+// ReembedItem is one memory to (re-)embed: its id, decrypted content, and the
+// embedder that last produced its vector (empty = never tagged).
+type ReembedItem struct {
+	MemoryID          string
+	Content           string
+	EmbeddingProvider string
+}
+
+// ListMemoriesForReembed pages memories (id + decrypted content + current
+// embedding_provider) ordered by creation, for the re-embed engine. Offset paging
+// over ALL rows is stable because updating embedding_provider changes neither the
+// row set nor the created_at ordering — so no rows are skipped or double-visited.
+func (s *SQLiteStore) ListMemoriesForReembed(ctx context.Context, limit, offset int) ([]ReembedItem, error) {
+	rows, err := s.conn.QueryContext(ctx,
+		`SELECT memory_id, content, COALESCE(embedding_provider, '') FROM memories ORDER BY created_at ASC, memory_id ASC LIMIT ? OFFSET ?`,
+		limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ReembedItem
+	for rows.Next() {
+		var it ReembedItem
+		var content string
+		if scanErr := rows.Scan(&it.MemoryID, &content, &it.EmbeddingProvider); scanErr != nil {
+			return nil, scanErr
+		}
+		dec, decErr := s.decryptContent(content)
+		if decErr != nil {
+			return nil, fmt.Errorf("decrypt content for %s: %w", it.MemoryID, decErr)
+		}
+		it.Content = dec
+		out = append(out, it)
+	}
+	return out, rows.Err()
 }
 
 func (s *SQLiteStore) GetMemory(ctx context.Context, memoryID string) (*memory.MemoryRecord, error) {

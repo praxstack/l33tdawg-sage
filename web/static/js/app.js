@@ -1,6 +1,7 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
 import { fetchStats, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, fetchValidators, fetchMcpConfig, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchReranker, saveReranker, testReranker, fetchTasks, updateTaskStatus, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken, connectProvider, connectRemoteUrl,
+embeddingsStatus, checkOllamaEmbed, pullEmbedModel, reembedMemories, enableSemanticEmbeddings,
 joinHostInterfaces, enableNetworkMode, joinHostStart, joinHostStatus, joinHostApprove, joinHostAbort,
 joinGuestStart, joinGuestStatus, joinGuestCancel, joinGuestRestart,
 fedConnections, fedRevoke, fedPeerStatus, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestConfirm } from './api.js';
@@ -3350,6 +3351,176 @@ function CleanupSettings() {
 // Settings Page
 // ============================================================================
 
+// EmbeddingsSetupModal — turn on SAGE's bundled semantic memory (Ollama +
+// nomic-embed-text). Walks a non-technical operator through: detect Ollama →
+// download the model if missing → re-embed existing memories (progress) → switch
+// the node to the semantic embedder (a brief restart). The embedder is LOCKED to
+// Ollama + nomic-embed-text — this only turns the bundled one on, it's not a
+// "pick your embedder" screen.
+function EmbeddingsSetupModal({ onClose, onDone }) {
+    const [status, setStatus] = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [step, setStep] = useState('intro'); // intro | need-ollama | pull | reembed | enable | done
+    const [err, setErr] = useState(null);
+    const [pullLog, setPullLog] = useState('');
+    const [pulling, setPulling] = useState(false);
+    const [prog, setProg] = useState(null); // { done, total }
+    const [reembedding, setReembedding] = useState(false);
+    const [enabling, setEnabling] = useState(false);
+    const [warn, setWarn] = useState(null); // non-blocking notice (e.g. partial re-embed failures)
+    const busy = pulling || reembedding || enabling;
+
+    useEffect(() => {
+        embeddingsStatus().then(s => {
+            setStatus(s);
+            if (s.is_semantic && s.need_reembed === 0) setStep('done');
+            else if (!s.ollama_running) setStep('need-ollama');
+            else if (!s.model_available) setStep('pull');
+            else setStep('intro');
+        }).catch(e => setErr(e.message)).finally(() => setLoading(false));
+    }, []);
+
+    // Read a text/plain "key: value\n" stream, dispatching each line.
+    const readStream = async (res, onLine) => {
+        const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = '';
+        for (;;) {
+            const { value, done } = await reader.read(); if (done) break;
+            buf += dec.decode(value, { stream: true });
+            let i; while ((i = buf.indexOf('\n')) >= 0) {
+                const l = buf.slice(0, i); buf = buf.slice(i + 1);
+                const c = l.indexOf(':'); if (c > 0) onLine(l.slice(0, c).trim(), l.slice(c + 1).trim());
+            }
+        }
+    };
+
+    const doPull = async () => {
+        setPulling(true); setErr(null); setPullLog('starting…');
+        let streamErr = null;
+        try {
+            const res = await pullEmbedModel();
+            await readStream(res, (k, v) => {
+                if (k === 'status') setPullLog(v);
+                if (k === 'error') { streamErr = v; setErr(v); }
+            });
+            const s = await checkOllamaEmbed();
+            if (s.model_available) setStep('reembed');
+            else if (!streamErr) setErr('The model download did not finish. Try again.');
+        } catch (e) { setErr(e.message || String(e)); }
+        setPulling(false);
+    };
+
+    const doReembed = async () => {
+        setReembedding(true); setErr(null); setWarn(null); setProg({ done: 0, total: status?.need_reembed || 0 });
+        // Track error/warn in LOCAL vars — a setErr() inside the stream can't be
+        // read back from the stale `err` closure, so we can't gate on it.
+        let streamErr = null, streamWarn = null;
+        try {
+            const res = await reembedMemories();
+            if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || `HTTP ${res.status}`); }
+            await readStream(res, (k, v) => {
+                if (k === 'total') setProg({ done: 0, total: parseInt(v, 10) || 0 });
+                if (k === 'progress') { const p = v.split('/'); setProg({ done: parseInt(p[0], 10) || 0, total: parseInt(p[1], 10) || 0 }); }
+                if (k === 'error') { streamErr = v; setErr(v); }
+                if (k === 'warn') { streamWarn = v; setWarn(v); }
+            });
+            if (!streamErr) { if (streamWarn) setWarn(streamWarn); setStep('enable'); } // only advance on a clean run
+        } catch (e) { setErr(e.message || String(e)); }
+        setReembedding(false);
+    };
+
+    const doEnable = async () => {
+        setEnabling(true); setErr(null);
+        try { await enableSemanticEmbeddings(); setStep('done'); }
+        catch (e) { setErr(e.message); setEnabling(false); }
+    };
+
+    const pct = prog && prog.total > 0 ? Math.round((prog.done / prog.total) * 100) : 0;
+
+    return html`
+        <div class="wizard-overlay" onClick=${e => { if (e.target === e.currentTarget && !pulling && !reembedding && !enabling) onClose(); }}>
+            <div class="wizard-modal" style="max-width:560px;max-height:85vh;display:flex;flex-direction:column;">
+                <div class="wizard-header">
+                    <h2>Turn on smart memory</h2>
+                    <button class="detail-close" onClick=${() => { if (!busy) onClose(); }} disabled=${busy} title=${busy ? 'Please wait — a task is running' : 'Close'}>×</button>
+                </div>
+                <div class="wizard-body" style="overflow-y:auto;flex:1;padding:20px;line-height:1.55;">
+                    ${loading && html`<p style="color:var(--text-dim);text-align:center;padding:24px;">Checking…</p>`}
+
+                    ${!loading && step === 'intro' && html`
+                        <p>Right now SAGE finds memories by matching <strong>keywords</strong>. Smart memory lets it find them by <strong>meaning</strong> — so "what did I decide about pricing" also surfaces notes that never used those exact words.</p>
+                        <p style="color:var(--text-dim);font-size:13px;">It runs entirely on your machine using the bundled model (Ollama + nomic-embed-text). Nothing leaves your computer.</p>
+                        <div class="summary-card" style="padding:14px;margin:14px 0;">
+                            <div style="font-size:13px;">To switch on, SAGE will re-read your <strong>${status?.need_reembed ?? status?.total_memories ?? 0} memories</strong> once (a few minutes), then restart briefly. Your memories aren't changed or deleted.</div>
+                        </div>
+                        <button class="btn btn-primary" style="width:100%;padding:12px;" onClick=${() => setStep('reembed')}>Turn on smart memory</button>
+                    `}
+
+                    ${!loading && step === 'need-ollama' && html`
+                        <div class="warning-banner" style="margin-bottom:12px;">Ollama isn't running yet.</div>
+                        <p>SAGE's smart memory needs <strong>Ollama</strong> — a small free app that runs the AI model locally.</p>
+                        <ol style="color:var(--text-dim);font-size:13px;line-height:1.8;">
+                            <li>Install it from <a href="https://ollama.com/download" target="_blank" rel="noopener" style="color:var(--accent);">ollama.com/download</a> and open it.</li>
+                            <li>Come back here and click <em>Check again</em>.</li>
+                        </ol>
+                        <button class="btn btn-primary" onClick=${async () => {
+                            try {
+                                const s = await checkOllamaEmbed();
+                                if (!s.ollama_running) setErr('Still can\'t reach Ollama — make sure the app is open.');
+                                else { setErr(null); setStep(s.model_available ? 'reembed' : 'pull'); }
+                            } catch (e) { setErr('Could not check Ollama: ' + (e.message || e)); }
+                        }}>Check again</button>
+                    `}
+
+                    ${!loading && step === 'pull' && html`
+                        <p>SAGE needs to download its memory model <code>nomic-embed-text</code> once (~275 MB). This is a one-time download.</p>
+                        ${pulling
+                            ? html`<div style="display:flex;align-items:center;gap:8px;color:var(--accent);margin:12px 0;"><span class="spinner" style="width:14px;height:14px;"></span> ${pullLog || 'Downloading…'}</div>`
+                            : html`<button class="btn btn-primary" onClick=${doPull}>Download the model</button>`}
+                    `}
+
+                    ${!loading && step === 'reembed' && html`
+                        ${!reembedding && (!prog || prog.done === 0) && html`
+                            <p>Re-reading your <strong>${status?.need_reembed ?? 0} memories</strong> so SAGE understands their meaning. This takes a few minutes.</p>
+                            <div style="font-size:12px;color:var(--text-muted);margin-bottom:14px;">Search results may be incomplete while this runs — it's briefly upgrading. Keep this window open.</div>
+                            <button class="btn btn-primary" style="width:100%;padding:12px;" onClick=${doReembed}>Start</button>
+                        `}
+                        ${(reembedding || (prog && prog.done > 0)) && html`
+                            <p style="margin-top:0;">${reembedding ? 'Re-reading your memories…' : 'Done re-reading.'}</p>
+                            <div style="background:var(--bg-elev);border-radius:8px;height:12px;overflow:hidden;margin:10px 0;">
+                                <div style="height:100%;width:${pct}%;background:var(--accent);transition:width .3s;"></div>
+                            </div>
+                            <div style="font-size:12px;color:var(--text-muted);text-align:center;">${prog ? `${prog.done} / ${prog.total}` : ''} ${pct ? `(${pct}%)` : ''}</div>
+                        `}
+                    `}
+
+                    ${!loading && step === 'enable' && html`
+                        <div style="text-align:center;">
+                            <div style="font-size:34px;margin-bottom:6px;">✓</div>
+                            <h3 style="margin:0 0 8px;color:var(--accent-green);">Memories re-read</h3>
+                            <p style="color:var(--text-dim);">Last step: switch SAGE over to smart memory. It restarts briefly (about 10-20s) — unlock the vault when it's back.</p>
+                            <button class="btn btn-primary" onClick=${doEnable} disabled=${enabling}>${enabling ? 'Switching…' : 'Finish & restart'}</button>
+                        </div>
+                    `}
+
+                    ${!loading && step === 'done' && html`
+                        <div style="text-align:center;padding:12px 0;">
+                            <div style="font-size:38px;margin-bottom:8px;">🧠</div>
+                            <h3 style="margin:0 0 8px;color:var(--accent-green);">Smart memory is ${enabling ? 'turning on' : 'on'}</h3>
+                            <p style="color:var(--text-dim);">${status?.is_semantic ? 'This node is already using semantic search.' : 'SAGE is restarting to finish. Unlock the vault when it returns, and semantic search will be live.'}</p>
+                        </div>
+                    `}
+
+                    ${warn && html`<div class="warning-banner" style="margin-top:14px;">${warn}</div>`}
+                    ${err && html`<div class="import-error" style="margin-top:14px;">${err}</div>`}
+                </div>
+                <div class="wizard-footer">
+                    <button class="btn" onClick=${() => { if (busy) return; if (onDone) onDone(); onClose(); }} disabled=${busy}>${step === 'done' ? 'Done' : 'Close'}</button>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
 // RerankerControl - a real on/off toggle + URL/model config + Test for the
 // optional cross-encoder reranker. Applied live (no restart) and persisted.
 // The reranker is a bring-your-own add-on (not the bundled embedder), so unlike
@@ -3446,6 +3617,10 @@ function SettingsPage() {
     const [settingsTab, setSettingsTab] = useState('overview');
     const [stats, setStats] = useState(null);
     const [health, setHealth] = useState(null);
+    const [showEmbedSetup, setShowEmbedSetup] = useState(false); // semantic-memory setup modal
+    const [embStatus, setEmbStatus] = useState(null);            // GET /embeddings/status (need_reembed etc)
+    const refreshEmb = useCallback(() => { embeddingsStatus().then(setEmbStatus).catch(() => {}); }, []);
+    useEffect(() => { refreshEmb(); }, [refreshEmb]);
     const [updateAvailable, setUpdateAvailable] = useState(false);
     const [mcpConfig, setMcpConfig] = useState(null);      // GET /v1/mcp-config - copy-paste block
     const [mcpConfigErr, setMcpConfigErr] = useState(false);
@@ -3575,6 +3750,7 @@ function SettingsPage() {
 
     return html`
         <div class="settings-page">
+            ${showEmbedSetup && html`<${EmbeddingsSetupModal} onClose=${() => setShowEmbedSetup(false)} onDone=${() => { fetchHealth().then(setHealth).catch(() => {}); refreshEmb(); }} />`}
             <div class="settings-tabs">
                 ${tabs.map(t => html`
                     <button class="settings-tab ${settingsTab === t.id ? 'active' : ''}"
@@ -3637,6 +3813,14 @@ function SettingsPage() {
                             <h3>System Status</h3>
                             <div class="settings-row"><span class="label">${statusDot(true)} SAGE</span><span class="value" style="color:#10b981">Running</span></div>
                             <div class="settings-row"><span class="label">${statusDot(embedderStatus.online)} ${embedderStatus.displayName}</span><span class="value" style="color: ${embedderStatus.online ? '#10b981' : '#6b7280'}" title="${embedderStatus.detail || ''}">${embedderStatus.online ? (embedderStatus.detail ? embedderStatus.detail : 'Connected') : 'Offline'}</span></div>
+                            ${(embedderStatus.provider === 'hash' || (embStatus && embStatus.need_reembed > 0)) && html`
+                                <div class="settings-row" style="align-items:center;">
+                                    <span class="label" style="color:var(--text-dim);font-size:12px;">${embedderStatus.provider === 'hash'
+                                        ? 'Only keyword matching is on — turn on semantic (meaning-based) search.'
+                                        : `${embStatus.need_reembed} memor${embStatus.need_reembed === 1 ? 'y' : 'ies'} still need re-reading to be searchable by meaning.`}</span>
+                                    <button class="btn btn-primary" style="padding:6px 14px;font-size:12px;" onClick=${() => setShowEmbedSetup(true)}>${embedderStatus.provider === 'hash' ? 'Turn on smart memory →' : 'Finish setup →'}</button>
+                                </div>
+                            `}
                             <div class="settings-row"><span class="label">${statusDot(encrypted)} Synaptic Ledger Encryption</span><span class="value" style="color: ${encrypted ? '#10b981' : '#6b7280'}">${encrypted ? 'AES-256-GCM' : 'Off'}</span></div>
                             <div class="settings-row"><span class="label">Version</span><span class="value">${ver}</span></div>
                             <div class="settings-row"><span class="label">Uptime</span><span class="value">${uptime}</span></div>

@@ -1250,3 +1250,44 @@ func TestBackfillFTS_IndexesGapIdempotentAndSkipsDeprecated(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, res, "backfilled rows must be findable via FTS")
 }
+
+// TestUpdateMemoryEmbedding_PreservesAgentProvider is the regression guard for
+// the embeddings re-embed feature: re-embedding must write the embedding_provider
+// column and NEVER touch `provider` (the submitting agent's LLM identity used for
+// recall scoping). Conflating the two would irreversibly corrupt attribution.
+func TestUpdateMemoryEmbedding_PreservesAgentProvider(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	rec := testMemory("m1", "agent1", "pricing decision notes", "general")
+	rec.Provider = "claude-code" // agent LLM provider — must survive re-embedding
+	require.NoError(t, s.InsertMemory(ctx, rec))
+
+	// Re-embed: new vector, embedding provider "ollama".
+	emb := make([]float32, 768)
+	for i := range emb {
+		emb[i] = float32(i) / 768.0
+	}
+	require.NoError(t, s.UpdateMemoryEmbedding(ctx, "m1", emb, "ollama"))
+
+	// The agent provider column is untouched.
+	got, err := s.GetMemory(ctx, "m1")
+	require.NoError(t, err)
+	require.Equal(t, "claude-code", got.Provider, "agent provider must NOT be clobbered by re-embedding")
+
+	// Embedding-provider accounting reflects the re-embed.
+	counts, err := s.CountMemoriesByProvider(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, counts["ollama"], "memory should count under embedding provider ollama")
+	require.Equal(t, 0, counts["claude-code"], "counts must be keyed on embedding_provider, not agent provider")
+
+	// Re-embed iteration surfaces the current embedding provider.
+	items, err := s.ListMemoriesForReembed(ctx, 100, 0)
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+	require.Equal(t, "ollama", items[0].EmbeddingProvider)
+	require.Equal(t, "pricing decision notes", items[0].Content, "content decrypts for embedding")
+
+	// Missing memory errors rather than silently no-op'ing.
+	require.Error(t, s.UpdateMemoryEmbedding(ctx, "nope", emb, "ollama"))
+}

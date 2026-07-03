@@ -583,6 +583,15 @@ func runServe() (rerr error) {
 	}
 	dashboard.QuorumEnabled = cfg.Quorum.Enabled
 	dashboard.ValidatorCountFn = app.ValidatorCount // authoritative single-validator check for agent ops
+	// Embeddings setup: flip the config to the bundled Ollama + nomic-embed-text
+	// provider (the node re-reads it on restart). The embedder is locked to this.
+	dashboard.SetEmbeddingOllama = func() error {
+		cfg.Embedding.Provider = "ollama"
+		cfg.Embedding.BaseURL = "http://localhost:11434"
+		cfg.Embedding.Model = "nomic-embed-text"
+		cfg.Embedding.Dimension = 768
+		return SaveConfig(cfg)
+	}
 	dashboard.SetNetworkMode = func(enabled bool) error {
 		cfg.Quorum.Enabled = enabled
 		return SaveConfig(cfg)

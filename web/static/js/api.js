@@ -631,6 +631,29 @@ export async function connectRemoteUrl() {
     return res.json();
 }
 
+// ─── Embeddings setup (turn on the bundled semantic embedder + re-embed) ───
+export async function embeddingsStatus() {
+    const res = await fetch(`${API_BASE}/v1/dashboard/embeddings/status`);
+    if (!res.ok) throw new Error(`embeddings status failed (HTTP ${res.status})`);
+    return res.json();
+}
+export async function checkOllamaEmbed() {
+    const res = await fetch(`${API_BASE}/v1/dashboard/embeddings/check-ollama`, { method: 'POST' });
+    return res.json();
+}
+// Streaming endpoints — return the Response so the caller reads .body progressively
+// (each line is "key: value\n"; final line is "done: 0|1").
+export function pullEmbedModel() {
+    return fetch(`${API_BASE}/v1/dashboard/embeddings/pull-model`, { method: 'POST' });
+}
+export function reembedMemories() {
+    return fetch(`${API_BASE}/v1/dashboard/embeddings/reembed`, { method: 'POST' });
+}
+export async function enableSemanticEmbeddings() {
+    const res = await fetch(`${API_BASE}/v1/dashboard/embeddings/enable`, { method: 'POST' });
+    return res.json();
+}
+
 // ─── LAN node-join ceremony (Phase 5b-3, Flow 3) ───
 // Host side: add another computer to your SAGE network as a non-validator peer.
 async function njFetch(path, opts) {
