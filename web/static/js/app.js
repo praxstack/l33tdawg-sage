@@ -2012,6 +2012,7 @@ function SearchPage({ onSelectMemory }) {
     const [domains, setDomains] = useState([]);
     const [tagFilter, setTagFilter] = useState('');
     const [allTags, setAllTags] = useState([]);
+    const [statusFilter, setStatusFilter] = useState('');
     const searchTimer = useRef(null);
 
     useEffect(() => {
@@ -2021,7 +2022,7 @@ function SearchPage({ onSelectMemory }) {
         fetchTags().then(data => setAllTags(data.tags || [])).catch(() => {});
     }, []);
 
-    async function loadMemories(search, agent, domain, tag) {
+    async function loadMemories(search, agent, domain, tag, status = statusFilter) {
         setLoading(true);
         setError(null);
         try {
@@ -2029,6 +2030,7 @@ function SearchPage({ onSelectMemory }) {
             if (agent) params.agent = agent;
             if (domain) params.domain = domain;
             if (tag) params.tag = tag;
+            if (status) params.status = status;
             if (search) params.q = search; // real server-side FTS/keyword search over the whole base
             const data = await fetchMemories(params);
             const memories = data.memories || [];
@@ -2067,6 +2069,12 @@ function SearchPage({ onSelectMemory }) {
         loadMemories(query, agentFilter, domainFilter, v);
     }
 
+    function handleStatusFilter(e) {
+        const v = e.target.value;
+        setStatusFilter(v);
+        loadMemories(query, agentFilter, domainFilter, tagFilter, v);
+    }
+
     return html`
         <div class="search-page">
             <input class="search-page-input" type="text" placeholder="Search memories..."
@@ -2077,6 +2085,12 @@ function SearchPage({ onSelectMemory }) {
                 <select class="filter-select" value=${domainFilter} onChange=${handleDomainFilter}>
                     <option value="">All domains</option>
                     ${domains.map(d => html`<option value=${d}>${d}</option>`)}
+                </select>
+                <select class="filter-select" value=${statusFilter} onChange=${handleStatusFilter} title="Filter by memory lifecycle status">
+                    <option value="">All statuses</option>
+                    <option value="committed">Committed</option>
+                    <option value="proposed">Proposed</option>
+                    <option value="deprecated">Deprecated</option>
                 </select>
                 ${allTags.length > 0 && html`
                     <select class="filter-select" value=${tagFilter} onChange=${handleTagFilter}>
