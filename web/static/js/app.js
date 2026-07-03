@@ -2013,7 +2013,38 @@ function SearchPage({ onSelectMemory }) {
     const [tagFilter, setTagFilter] = useState('');
     const [allTags, setAllTags] = useState([]);
     const [statusFilter, setStatusFilter] = useState('');
+    const [selected, setSelected] = useState(() => new Set());
+    const [bulkDomain, setBulkDomain] = useState('');
+    const [bulkTag, setBulkTag] = useState('');
+    const [bulkBusy, setBulkBusy] = useState(false);
     const searchTimer = useRef(null);
+
+    const toggleSelect = (id, e) => {
+        if (e) e.stopPropagation();
+        setSelected(prev => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id); else next.add(id);
+            return next;
+        });
+    };
+    const clearSelection = () => setSelected(new Set());
+
+    async function runBulk(fn, okMsg) {
+        const ids = Array.from(selected);
+        if (!ids.length) return;
+        setBulkBusy(true);
+        try {
+            await fn(ids);
+            showToast(okMsg.replace('%n', ids.length), 'success');
+            clearSelection();
+            setBulkDomain(''); setBulkTag('');
+            loadMemories(query, agentFilter, domainFilter, tagFilter);
+        } catch (e) { showToast('Bulk action failed: ' + (e.message || e), 'error'); }
+        setBulkBusy(false);
+    }
+    const bulkMoveDomain = () => { const d = bulkDomain.trim(); if (!d) return; runBulk(ids => bulkUpdateMemories(ids, { domain: d }), `Moved %n memories to ${d}`); };
+    const bulkAddTag = () => { const t = bulkTag.trim(); if (!t) return; runBulk(ids => bulkUpdateMemories(ids, { addTags: [t] }), `Tagged %n memories "${t}"`); };
+    const bulkDeprecate = () => { if (!window.confirm(`Deprecate ${selected.size} selected memories? They stay on-chain but are marked deprecated.`)) return; runBulk(ids => Promise.all(ids.map(id => deleteMemory(id))), 'Deprecated %n memories'); };
 
     useEffect(() => {
         loadMemories();
@@ -2113,8 +2144,20 @@ function SearchPage({ onSelectMemory }) {
                         <button class="btn" onClick=${() => loadMemories(query, agentFilter, domainFilter, tagFilter)}>Retry</button>
                     </div>
                 `}
-                ${results.map(m => html`
-                    <div class="memory-card" onClick=${() => onSelectMemory({
+                ${selected.size > 0 && html`
+                    <div style="position:sticky;top:0;z-index:5;display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:var(--bg-elevated);border:1px solid var(--primary);border-radius:8px;padding:10px 12px;margin-bottom:12px;">
+                        <span style="font-weight:700;color:var(--primary);white-space:nowrap;">${selected.size} selected</span>
+                        <input list="bulk-domain-list" class="filter-select" style="min-width:130px;" placeholder="Move to domain..." value=${bulkDomain} onInput=${e => setBulkDomain(e.target.value)} onKeyDown=${e => { if (e.key === 'Enter') bulkMoveDomain(); }} />
+                        <datalist id="bulk-domain-list">${domains.map(d => html`<option value=${d}></option>`)}</datalist>
+                        <button class="btn" disabled=${bulkBusy || !bulkDomain.trim()} onClick=${bulkMoveDomain}>Move</button>
+                        <input class="filter-select" style="min-width:110px;" placeholder="Add tag..." value=${bulkTag} onInput=${e => setBulkTag(e.target.value)} onKeyDown=${e => { if (e.key === 'Enter') bulkAddTag(); }} />
+                        <button class="btn" disabled=${bulkBusy || !bulkTag.trim()} onClick=${bulkAddTag}>Tag</button>
+                        <button class="btn btn-danger" disabled=${bulkBusy} onClick=${bulkDeprecate}>Deprecate</button>
+                        <button class="btn btn-secondary" style="margin-left:auto;" onClick=${clearSelection}>Clear</button>
+                    </div>
+                `}
+                ${results.map(m => { const mid = m.memory_id; const isSel = selected.has(mid); return html`
+                    <div class="memory-card" style=${isSel ? 'outline:2px solid var(--primary);outline-offset:-1px;' : ''} onClick=${() => onSelectMemory({
                         id: m.memory_id,
                         content: m.content,
                         domain: m.domain_tag,
@@ -2123,12 +2166,17 @@ function SearchPage({ onSelectMemory }) {
                         memory_type: m.memory_type,
                         created_at: m.created_at,
                         agent: m.submitting_agent,
+                        corroboration_count: m.corroboration_count,
+                        content_hash: m.content_hash,
+                        committed_at: m.committed_at,
+                        provider: m.provider,
                     })}>
                         <div class="memory-card-header">
+                            <input type="checkbox" style="cursor:pointer;width:15px;height:15px;flex:none;" checked=${isSel} onClick=${e => toggleSelect(mid, e)} title="Select for bulk actions" />
                             <span class="domain-badge" style="background: ${getDomainColor(m.domain_tag)}20; color: ${getDomainColor(m.domain_tag)};">
                                 ${m.domain_tag}
                             </span>
-                            <span style="font-size: 12px; font-weight: 600; color: ${confidenceColor(m.confidence_score)};">
+                            <span style="font-size: 12px; font-weight: 600; color: ${confidenceColor(m.confidence_score)};margin-left:auto;">
                                 ${(m.confidence_score * 100).toFixed(0)}%
                             </span>
                         </div>
@@ -2138,14 +2186,14 @@ function SearchPage({ onSelectMemory }) {
                             <span>${m.created_at ? timeAgo(m.created_at) : ''}</span>
                         </div>
                     </div>
-                `)}
+                `; })}
                 ${results.length === 0 && !loading && !error && html`
                     ${(query || agentFilter || domainFilter || tagFilter)
                         ? html`<${EmptyState} icon="search"
                             headline="No memories match"
-                            hint="Search is an exact text match on content and domain (case-insensitive), newest first. Try a shorter or different term, or clear the filters."
+                            hint="Full-text search across your whole memory base by content or domain. Try a shorter or different term, or clear the filters."
                             actionLabel="Clear search"
-                            onAction=${() => { setQuery(''); setAgentFilter(''); setDomainFilter(''); setTagFilter(''); loadMemories('', '', '', ''); }} />`
+                            onAction=${() => { setQuery(''); setAgentFilter(''); setDomainFilter(''); setTagFilter(''); setStatusFilter(''); clearSelection(); loadMemories('', '', '', '', ''); }} />`
                         : html`<${EmptyState} icon="brain"
                             headline="No memories yet"
                             hint="Your brain is empty. Import an existing memory export or connect an agent over MCP, and committed memories will show up here to search."
