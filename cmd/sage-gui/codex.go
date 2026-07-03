@@ -100,7 +100,7 @@ func installCodexConfig(projectDir, sageHome, execPath string) ([]web.ConnectFil
 	hooksAction := fileAction(hooksPath)
 	hooksConfig := map[string]any{"hooks": sageHooksConfig(hookDir)}
 	hooksData, _ := json.MarshalIndent(hooksConfig, "", "  ")
-	if writeErr := os.WriteFile(hooksPath, append(hooksData, '\n'), 0600); writeErr != nil {
+	if writeErr := safeWriteFile(hooksPath, append(hooksData, '\n'), 0600); writeErr != nil {
 		return files, fmt.Errorf("write hooks.json: %w", writeErr)
 	}
 	files = append(files, web.ConnectFile{Path: hooksPath, Action: hooksAction})
@@ -109,7 +109,7 @@ func installCodexConfig(projectDir, sageHome, execPath string) ([]web.ConnectFil
 	for name, tpl := range hookScriptSet() {
 		content := strings.ReplaceAll(tpl, "__SAGE_GUI_BIN__", execPath)
 		path := filepath.Join(hookDir, name)
-		if writeErr := os.WriteFile(path, []byte(content), 0755); writeErr != nil { //nolint:gosec // hook scripts must be executable
+		if writeErr := safeWriteFile(path, []byte(content), 0755); writeErr != nil { //nolint:gosec // hook scripts must be executable
 			return files, fmt.Errorf("write %s: %w", name, writeErr)
 		}
 	}
@@ -164,7 +164,7 @@ func mergeCodexConfig(path, binPath, sageHome string) (string, error) {
 	existing, err := os.ReadFile(path) //nolint:gosec // path composed from project dir, not remote input
 	if err != nil {
 		if os.IsNotExist(err) {
-			if writeErr := os.WriteFile(path, []byte(sageBlock), 0600); writeErr != nil { //nolint:gosec // project-dir path
+			if writeErr := safeWriteFile(path, []byte(sageBlock), 0600); writeErr != nil {
 				return "", fmt.Errorf("write codex config: %w", writeErr)
 			}
 			return "created", nil
@@ -173,14 +173,19 @@ func mergeCodexConfig(path, binPath, sageHome string) (string, error) {
 	}
 
 	// Keep every line except the ones inside a sage section. A TOML section
-	// header is "[...]"; a line "[mcp_servers.sage]" / "[mcp_servers.sage.env]"
-	// opens a sage section we drop, any other header closes it.
+	// header line starts with "["; it may carry a trailing inline comment
+	// ("[mcp_servers.other] # my server" is valid TOML), so match the header up
+	// to its first "]" rather than requiring the whole trimmed line to end in
+	// "]" (which would miss commented headers and silently drop that section).
 	var kept []string
 	inSage := false
 	for _, line := range strings.Split(string(existing), "\n") {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
-			inSage = trimmed == "[mcp_servers.sage]" || strings.HasPrefix(trimmed, "[mcp_servers.sage.")
+		if strings.HasPrefix(trimmed, "[") {
+			if end := strings.Index(trimmed, "]"); end >= 0 {
+				header := trimmed[:end+1] // e.g. "[mcp_servers.sage]" without any inline comment
+				inSage = header == "[mcp_servers.sage]" || strings.HasPrefix(header, "[mcp_servers.sage.")
+			}
 		}
 		if !inSage {
 			kept = append(kept, line)
@@ -191,7 +196,7 @@ func mergeCodexConfig(path, binPath, sageHome string) (string, error) {
 	if body != "" {
 		out = body + "\n\n" + sageBlock
 	}
-	if writeErr := os.WriteFile(path, []byte(out), 0600); writeErr != nil { //nolint:gosec // project-dir path
+	if writeErr := safeWriteFile(path, []byte(out), 0600); writeErr != nil {
 		return "", fmt.Errorf("write codex config: %w", writeErr)
 	}
 	return "merged", nil

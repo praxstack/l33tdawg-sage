@@ -151,16 +151,23 @@ func mergeMCPServerConfig(path, execPath, sageHome, provider string) (string, er
 	if err != nil {
 		return "", fmt.Errorf("marshal config: %w", err)
 	}
-	// Refuse to write through a symlink: the target sits under an operator-
-	// supplied directory, so a pre-planted symlink at this fixed config path
-	// would otherwise let a write land on an arbitrary file it points at.
-	if fi, lerr := os.Lstat(path); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
-		return "", fmt.Errorf("refusing to write config through a symlink: %s", path)
-	}
-	if writeErr := os.WriteFile(path, append(data, '\n'), 0600); writeErr != nil {
+	if writeErr := safeWriteFile(path, append(data, '\n'), 0600); writeErr != nil {
 		return "", fmt.Errorf("write %s: %w", path, writeErr)
 	}
 	return action, nil
+}
+
+// safeWriteFile writes data to path with perm, but refuses to write THROUGH a
+// symlink at the final path component. The target sits under an operator-
+// supplied directory, so a pre-planted symlink at a fixed config path could
+// otherwise redirect the write onto an arbitrary file it points at. Best-
+// effort: it does not chase intermediate directory symlinks (same-machine,
+// authenticated threat model keeps that residual low).
+func safeWriteFile(path string, data []byte, perm os.FileMode) error {
+	if fi, lerr := os.Lstat(path); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to write through a symlink: %s", path)
+	}
+	return os.WriteFile(path, data, perm) //nolint:gosec // caller-composed local path; symlink refused above
 }
 
 // fileAction reports "merged" when path already exists (an existing config is
