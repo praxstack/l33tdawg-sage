@@ -1,6 +1,6 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
-import { fetchStats, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchTasks, updateTaskStatus, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken,
+import { fetchStats, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchTasks, updateTaskStatus, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken,
 fedConnections, fedRevoke, fedPeerStatus, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestConfirm } from './api.js';
 
 import { mountMriBrain } from './mri-brain.js';
@@ -6892,6 +6892,29 @@ function PipelinePage() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
     const [expanded, setExpanded] = useState(null);
+    const [agentList, setAgentList] = useState([]);
+    const [showCompose, setShowCompose] = useState(false);
+    const [composeTo, setComposeTo] = useState('');
+    const [composeIntent, setComposeIntent] = useState('');
+    const [composeMsg, setComposeMsg] = useState('');
+    const [sending, setSending] = useState(false);
+
+    useEffect(() => { fetchAgents().then(d => setAgentList(d.agents || [])).catch(() => {}); }, []);
+
+    async function doSendNote() {
+        if (!composeTo || !composeMsg.trim()) return;
+        setSending(true);
+        try {
+            const res = await sendPipelineNote(composeTo, composeMsg.trim(), composeIntent.trim() || 'note');
+            if (res && res.error) { showToast('Could not send: ' + res.error, 'error'); }
+            else {
+                showToast('Note delivered to the agent inbox', 'success');
+                setComposeMsg(''); setComposeIntent(''); setShowCompose(false);
+                loadData();
+            }
+        } catch (e) { showToast('Could not send note: ' + (e.message || e), 'error'); }
+        setSending(false);
+    }
 
     const loadData = useCallback(async () => {
         setLoading(true);
@@ -6945,12 +6968,32 @@ function PipelinePage() {
 
     return html`
         <div class="tasks-page" style="padding:24px;">
-            <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px;">
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px;flex-wrap:wrap;">
                 <h2 style="margin:0;font-size:20px;">Pipeline</h2>
-                <span style="color:var(--text-muted);font-size:13px;">Agent-to-Agent Message Bus</span>
+                <span style="color:var(--text-muted);font-size:13px;">Agent message bus - what agents ask each other to do, and notes you send them.</span>
                 <div style="flex:1"></div>
+                ${agentList.length > 0 && html`<button class="btn btn-primary" onClick=${() => setShowCompose(v => !v)}>\u2709 Send note to agent</button>`}
                 <button class="btn" onClick=${loadData}>\u21BB Refresh</button>
             </div>
+            ${showCompose && html`
+                <div style="background:var(--card-bg);border:1px solid var(--primary);border-radius:10px;padding:16px;margin-bottom:20px;">
+                    <div style="font-weight:700;margin-bottom:4px;">Send a note to an agent</div>
+                    <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;">It lands in that agent's inbox (sage_inbox) and surfaces on its next turn - no need to impersonate another agent.</div>
+                    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px;">
+                        <select class="filter-select" value=${composeTo} onChange=${e => setComposeTo(e.target.value)} style="min-width:180px;">
+                            <option value="">Choose an agent...</option>
+                            ${agentList.map(a => html`<option value=${a.agent_id}>${a.name}</option>`)}
+                        </select>
+                        <input class="filter-select" placeholder="intent (optional, e.g. review, fix)" value=${composeIntent} onInput=${e => setComposeIntent(e.target.value)} style="flex:1;min-width:160px;" />
+                    </div>
+                    <textarea placeholder="Your note or instruction for the agent..." value=${composeMsg} onInput=${e => setComposeMsg(e.target.value)}
+                        style="width:100%;min-height:70px;padding:10px;background:var(--bg-secondary);color:var(--text);border:1px solid var(--border);border-radius:8px;font-family:inherit;font-size:13px;resize:vertical;box-sizing:border-box;"></textarea>
+                    <div style="display:flex;gap:8px;margin-top:10px;justify-content:flex-end;">
+                        <button class="btn btn-secondary" onClick=${() => setShowCompose(false)} disabled=${sending}>Cancel</button>
+                        <button class="btn btn-primary" onClick=${doSendNote} disabled=${sending || !composeTo || !composeMsg.trim()}>${sending ? 'Sending...' : 'Send note'}</button>
+                    </div>
+                </div>
+            `}
 
             <div style="display:flex;gap:10px;margin-bottom:24px;flex-wrap:wrap;align-items:center;">
                 ${['pending', 'claimed', 'completed', 'expired', 'failed'].map(s => html`

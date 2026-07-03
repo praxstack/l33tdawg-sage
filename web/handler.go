@@ -353,6 +353,7 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 			// Pipeline — agent-to-agent message bus
 			r.Get("/v1/dashboard/pipeline", h.handlePipelineList)
 			r.Get("/v1/dashboard/pipeline/stats", h.handlePipelineStats)
+			r.Post("/v1/dashboard/pipeline/send", h.handlePipelineSend)
 
 			// Network agent management routes
 			h.RegisterNetworkRoutes(r)

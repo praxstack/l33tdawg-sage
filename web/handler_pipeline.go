@@ -5,9 +5,68 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/l33tdawg/sage/internal/store"
 )
+
+// handlePipelineSend lets a HUMAN operator send a note/instruction to a specific
+// agent through the pipe bus. The agent-side POST /v1/pipe/send stamps the sender
+// from a bearer token, so there was no human path at all. Session-authed; the note
+// is stamped from a friendly "operator" origin so it renders cleanly in the
+// agent's inbox (sage_inbox / sage_turn) and never trips the FromAgent[:16] slice.
+func (h *DashboardHandler) handlePipelineSend(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ToAgent string `json:"to_agent"`
+		Intent  string `json:"intent"`
+		Payload string `json:"payload"`
+		TTLMin  int    `json:"ttl_minutes"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if req.ToAgent == "" {
+		writeError(w, http.StatusBadRequest, "to_agent is required")
+		return
+	}
+	if req.Payload == "" {
+		writeError(w, http.StatusBadRequest, "payload (the note) is required")
+		return
+	}
+	if req.Intent == "" {
+		req.Intent = "note"
+	}
+	ttl := req.TTLMin
+	if ttl <= 0 {
+		ttl = 1440 // 24h default
+	}
+	pipeStore, ok := h.store.(store.PipelineStore)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "pipeline not available on this store")
+		return
+	}
+	now := time.Now().UTC()
+	msg := &store.PipelineMessage{
+		PipeID:       "pipe-" + uuid.New().String(),
+		FromAgent:    "operator",
+		FromProvider: "operator",
+		ToAgent:      req.ToAgent,
+		Intent:       req.Intent,
+		Payload:      req.Payload,
+		Status:       "pending",
+		CreatedAt:    now,
+		ExpiresAt:    now.Add(time.Duration(ttl) * time.Minute),
+	}
+	if err := pipeStore.InsertPipeline(r.Context(), msg); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSONResp(w, http.StatusCreated, map[string]any{"pipe_id": msg.PipeID, "to_agent": req.ToAgent, "status": "pending"})
+}
 
 // pipelineItemView is the enriched view of a pipeline message for the dashboard.
 type pipelineItemView struct {

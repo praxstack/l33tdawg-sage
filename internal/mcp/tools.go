@@ -1814,7 +1814,13 @@ func (s *Server) toolInbox(ctx context.Context, params map[string]any) (any, err
 	for _, item := range resp.Items {
 		from := item.FromProvider
 		if from == "" {
-			from = item.FromAgent[:16] + "..."
+			// Guard the slice: a human/operator note or a short id would panic on
+			// FromAgent[:16]. Truncate only when it is actually longer.
+			if len(item.FromAgent) > 16 {
+				from = item.FromAgent[:16] + "..."
+			} else {
+				from = item.FromAgent
+			}
 		}
 		items = append(items, map[string]any{
 			"pipe_id":    item.PipeID,

@@ -102,6 +102,15 @@ export async function bulkUpdateMemories(ids, { domain, addTags, agent } = {}) {
     return res.json();
 }
 
+export async function sendPipelineNote(toAgent, payload, intent) {
+    const res = await fetch(`${API_BASE}/v1/dashboard/pipeline/send`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to_agent: toAgent, payload, intent: intent || 'note' }),
+    });
+    return res.json();
+}
+
 export async function assignTask(id, assignee) {
     const res = await fetch(`${API_BASE}/v1/dashboard/tasks/${id}/assign`, {
         method: 'PUT',
