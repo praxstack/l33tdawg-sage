@@ -1593,6 +1593,7 @@ function MemoryDetail({ memory, onClose, onDelete, onNavigate }) {
 
     // Keep last memory data for closing animation
     useEffect(() => {
+        setConfirming(false); // never carry an armed delete across to a different memory
         if (memory) {
             setLastMemory(memory);
             // Double-rAF: first frame renders the element off-screen, second triggers transition
@@ -3764,6 +3765,15 @@ function ImportPage({ sse }) {
                         </button>
                         <button class="btn btn-secondary" onClick=${handleCancelImport}>Cancel</button>
                     </div>
+                </div>
+            `}
+
+            ${(importing && !progress) && html`
+                <div class="import-progress fade-in">
+                    <div class="import-progress-header">
+                        <span><span class="deploy-spinner" style="width:12px;height:12px;border-width:1.5px;margin-right:8px;vertical-align:middle;"></span>Starting import...</span>
+                    </div>
+                    <div class="import-progress-hint">Preparing to commit each memory through BFT consensus. This begins in a moment.</div>
                 </div>
             `}
 
