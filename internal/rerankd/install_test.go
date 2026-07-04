@@ -82,6 +82,7 @@ func TestInstallEngine_TarGzFlattensAndVerifies(t *testing.T) {
 	}
 	assert.True(t, names[serverBinaryName()])
 	assert.True(t, names["libggml.dylib"])
+	assert.False(t, names["evil.txt"], "traversal entries must be dropped")
 	assert.False(t, names["link"], "hostile symlink must be dropped")
 	_, err = os.Stat(filepath.Join(m.dataDir, "..", "evil.txt"))
 	assert.True(t, os.IsNotExist(err), "traversal must not escape")
@@ -158,4 +159,16 @@ func TestInstallEngine_MissingServerBinaryRefuses(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "did not contain")
 	assert.False(t, m.EngineInstalled())
+}
+
+func TestSafeArchivePathRejectsEscapes(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"../evil", "/tmp/evil", ".hidden", ""} {
+		if _, err := safeArchivePath(dir, name); err == nil {
+			t.Fatalf("safeArchivePath accepted %q", name)
+		}
+	}
+	path, err := safeArchivePath(dir, "llama-server")
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(dir, "llama-server"), path)
 }

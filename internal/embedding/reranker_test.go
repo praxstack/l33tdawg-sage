@@ -211,3 +211,10 @@ func TestHTTPReranker_UnknownKindFallsBackToTEI(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, out, 1)
 }
+
+func TestHTTPReranker_RejectsPublicEndpoint(t *testing.T) {
+	rk := NewHTTPReranker("https://8.8.8.8:443", "m", time.Second)
+	_, err := rk.Rerank(context.Background(), "q", []string{"a"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid reranker url")
+}

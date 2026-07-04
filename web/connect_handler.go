@@ -3,9 +3,11 @@ package web
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -80,19 +82,25 @@ func (h *DashboardHandler) handleConnectProvider(w http.ResponseWriter, r *http.
 			writeError(w, http.StatusBadRequest, "path is required for "+provider+" (the absolute project directory)")
 			return
 		}
-		info, err := os.Stat(path)
+		cleanPath, cleanErr := cleanConnectDirectory(path)
+		if cleanErr != nil {
+			writeError(w, http.StatusBadRequest, cleanErr.Error())
+			return
+		}
+		info, err := os.Stat(cleanPath)
 		if err != nil {
 			if os.IsNotExist(err) {
-				writeError(w, http.StatusBadRequest, "path does not exist: "+path)
+				writeError(w, http.StatusBadRequest, "path does not exist: "+cleanPath)
 				return
 			}
 			writeError(w, http.StatusBadRequest, "cannot access path: "+err.Error())
 			return
 		}
 		if !info.IsDir() {
-			writeError(w, http.StatusBadRequest, "path is not a directory: "+path)
+			writeError(w, http.StatusBadRequest, "path is not a directory: "+cleanPath)
 			return
 		}
+		path = cleanPath
 	} else {
 		// App-scoped providers ignore path — never pass a caller-supplied path
 		// to the writer for these.
@@ -118,4 +126,19 @@ func (h *DashboardHandler) handleConnectProvider(w http.ResponseWriter, r *http.
 		"files":    files,
 		"provider": provider,
 	})
+}
+
+func cleanConnectDirectory(path string) (string, error) {
+	if path == "" || strings.Contains(path, "\x00") {
+		return "", fmt.Errorf("path is required")
+	}
+	if !filepath.IsAbs(path) {
+		return "", fmt.Errorf("path must be absolute")
+	}
+	clean := filepath.Clean(path)
+	resolved, err := filepath.EvalSymlinks(clean)
+	if err != nil {
+		return clean, nil
+	}
+	return resolved, nil
 }

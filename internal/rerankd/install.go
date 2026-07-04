@@ -235,8 +235,8 @@ func extractTarGzFlat(r io.Reader, dst string) error {
 		if err != nil {
 			return err
 		}
-		name := filepath.Base(filepath.Clean(hdr.Name))
-		if name == "." || name == ".." || name == "" || strings.HasPrefix(name, ".") {
+		name, ok := safeFlatArchiveName(hdr.Name)
+		if !ok {
 			continue
 		}
 		switch hdr.Typeflag {
@@ -249,12 +249,16 @@ func extractTarGzFlat(r io.Reader, dst string) error {
 			if hdr.FileInfo().Mode()&0o111 != 0 {
 				mode = 0o755
 			}
-			if err := writeLimitedFile(filepath.Join(dst, name), tr, hdr.Size, mode); err != nil {
+			path, pErr := safeArchivePath(dst, name)
+			if pErr != nil {
+				return pErr
+			}
+			if err := writeLimitedFile(path, tr, hdr.Size, mode); err != nil {
 				return err
 			}
 		case tar.TypeSymlink, tar.TypeLink:
-			target := filepath.Base(filepath.Clean(hdr.Linkname))
-			if target == "." || target == ".." || target == "" || target == name {
+			target, ok := safeFlatArchiveName(hdr.Linkname)
+			if !ok || target == name {
 				continue
 			}
 			links[name] = target
@@ -280,14 +284,21 @@ func extractTarGzFlat(r io.Reader, dst string) error {
 		if target == "" || target == name {
 			continue
 		}
-		st, err := os.Stat(filepath.Join(dst, target))
+		targetPath, pErr := safeArchivePath(dst, target)
+		if pErr != nil {
+			return pErr
+		}
+		st, err := os.Stat(targetPath)
 		if err != nil || !st.Mode().IsRegular() {
 			continue // dangling or hostile - drop it
 		}
-		linkPath := filepath.Join(dst, name)
+		linkPath, pErr := safeArchivePath(dst, name)
+		if pErr != nil {
+			return pErr
+		}
 		if os.Symlink(target, linkPath) != nil {
 			// Filesystem without symlinks: copy the bytes instead.
-			data, rerr := os.ReadFile(filepath.Join(dst, target))
+			data, rerr := os.ReadFile(targetPath)
 			if rerr != nil {
 				return rerr
 			}
@@ -311,8 +322,8 @@ func extractZipFlat(data []byte, dst string) error {
 		if f.FileInfo().IsDir() || !f.Mode().IsRegular() {
 			continue
 		}
-		name := filepath.Base(filepath.Clean(f.Name))
-		if name == "." || name == ".." || name == "" || strings.HasPrefix(name, ".") {
+		name, ok := safeFlatArchiveName(f.Name)
+		if !ok {
 			continue
 		}
 		total += int64(f.UncompressedSize64)
@@ -327,13 +338,45 @@ func extractZipFlat(data []byte, dst string) error {
 		if f.Mode()&0o111 != 0 || strings.HasSuffix(name, ".exe") {
 			mode = 0o755
 		}
-		werr := writeLimitedFile(filepath.Join(dst, name), rc, int64(f.UncompressedSize64), mode)
+		path, pErr := safeArchivePath(dst, name)
+		if pErr != nil {
+			_ = rc.Close()
+			return pErr
+		}
+		werr := writeLimitedFile(path, rc, int64(f.UncompressedSize64), mode)
 		_ = rc.Close()
 		if werr != nil {
 			return werr
 		}
 	}
 	return nil
+}
+
+func safeFlatArchiveName(raw string) (string, bool) {
+	clean := filepath.Clean(raw)
+	if clean == "." || clean == ".." || filepath.IsAbs(clean) ||
+		strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	name := filepath.Base(clean)
+	if name == "." || name == ".." || name == "" || strings.HasPrefix(name, ".") {
+		return "", false
+	}
+	return name, true
+}
+
+func safeArchivePath(dst, name string) (string, error) {
+	if _, ok := safeFlatArchiveName(name); !ok {
+		return "", fmt.Errorf("unsafe archive entry %q", name)
+	}
+	root := filepath.Clean(dst)
+	path := filepath.Join(root, name)
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == ".." || filepath.IsAbs(rel) ||
+		strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("archive entry escapes destination: %s", name)
+	}
+	return path, nil
 }
 
 // writeLimitedFile copies exactly up to size+1 bytes (catching lying

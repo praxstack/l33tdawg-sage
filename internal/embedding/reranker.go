@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/l33tdawg/sage/internal/netguard"
 )
 
 // Reranker scores how well each candidate text answers a query. Used after
@@ -50,6 +52,7 @@ const (
 // SAGE-specific adapter.
 type HTTPReranker struct {
 	baseURL string
+	urlErr  error
 	model   string
 	kind    string
 	timeout time.Duration
@@ -70,8 +73,13 @@ func NewHTTPRerankerKind(baseURL, model, kind string, timeout time.Duration) *HT
 	if kind != RerankKindLlamaCpp {
 		kind = RerankKindTEI
 	}
+	base, err := netguard.LocalLANHTTPBase(baseURL, "http", "https")
+	if err != nil {
+		base = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	}
 	return &HTTPReranker{
-		baseURL: strings.TrimRight(baseURL, "/"),
+		baseURL: base,
+		urlErr:  err,
 		model:   model,
 		kind:    kind,
 		timeout: timeout,
@@ -121,6 +129,9 @@ func (r *HTTPReranker) Rerank(ctx context.Context, query string, texts []string)
 	if len(texts) == 0 {
 		return nil, nil
 	}
+	if r.urlErr != nil {
+		return nil, fmt.Errorf("invalid reranker url: %w", r.urlErr)
+	}
 
 	path := "/rerank"
 	var payload any = tEIRerankRequest{Query: query, Texts: texts}
@@ -140,7 +151,11 @@ func (r *HTTPReranker) Rerank(ctx context.Context, query string, texts []string)
 		defer cancel()
 	}
 
-	req, err := http.NewRequestWithContext(reqCtx, "POST", r.baseURL+path, bytes.NewReader(body))
+	endpoint, err := netguard.JoinPath(r.baseURL, path)
+	if err != nil {
+		return nil, fmt.Errorf("build rerank endpoint: %w", err)
+	}
+	req, err := http.NewRequestWithContext(reqCtx, "POST", endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("build rerank request: %w", err)
 	}

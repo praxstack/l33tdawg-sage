@@ -24,6 +24,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/l33tdawg/sage/internal/netguard"
 	"github.com/l33tdawg/sage/internal/tlsca"
 	"github.com/l33tdawg/sage/internal/totp"
 	"github.com/l33tdawg/sage/internal/tx"
@@ -1006,7 +1007,15 @@ func (m *Manager) fetchHostCA(ctx context.Context, hostEndpoint, sessionID strin
 	if err != nil {
 		return nil, err
 	}
-	u := strings.TrimRight(hostEndpoint, "/") + "/fed/v1/join/ca?session_id=" + url.QueryEscape(sessionID)
+	base, err := netguard.LocalLANHTTPBase(hostEndpoint, "https")
+	if err != nil {
+		return nil, err
+	}
+	u, err := netguard.JoinPath(base, "/fed/v1/join/ca")
+	if err != nil {
+		return nil, err
+	}
+	u += "?session_id=" + url.QueryEscape(sessionID)
 	reqCtx, cancel := context.WithTimeout(ctx, joinCAFetchTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, u, nil)
@@ -1046,7 +1055,14 @@ func (m *Manager) guestCall(ctx context.Context, d *guestDraft, method, path str
 	}
 	reqCtx, cancel := context.WithTimeout(ctx, joinCallTimeout)
 	defer cancel()
-	u := strings.TrimRight(d.hostEndpoint, "/") + path
+	base, err := netguard.LocalLANHTTPBase(d.hostEndpoint, "https")
+	if err != nil {
+		return err
+	}
+	u, err := netguard.JoinPath(base, path)
+	if err != nil {
+		return err
+	}
 	var reqBody io.Reader = http.NoBody
 	if body != nil {
 		payload, mErr := json.Marshal(body)
@@ -1134,9 +1150,11 @@ func (m *Manager) ownCAPEM() ([]byte, error) {
 // REST builder uses (a path/query would mis-route and mis-pin).
 func validateJoinEndpoint(endpoint string) error {
 	u, err := url.Parse(endpoint)
-	if err != nil || u.Scheme != "https" || u.Host == "" ||
-		(u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+	if err != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
 		return fmt.Errorf("endpoint must be an https://host[:port] URL with no path, query, or fragment")
+	}
+	if _, err := netguard.LocalLANHTTPBase(endpoint, "https"); err != nil {
+		return err
 	}
 	return nil
 }

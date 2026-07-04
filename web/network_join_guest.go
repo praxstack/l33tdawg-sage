@@ -22,6 +22,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/l33tdawg/sage/internal/netguard"
 	"github.com/l33tdawg/sage/internal/pairing"
 )
 
@@ -115,7 +116,12 @@ func (h *DashboardHandler) handleGuestJoinStart(w http.ResponseWriter, r *http.R
 	guestName, _ := os.Hostname()
 
 	// hello (synchronous) — obtain the SAS to show the operator immediately.
-	base := "http://" + tok.Addr
+	addr, addrErr := netguard.LocalLANHostPort(tok.Addr)
+	if addrErr != nil {
+		writeError(w, http.StatusBadRequest, "pairing code address is not a local/LAN endpoint")
+		return
+	}
+	base := "http://" + addr
 	helloBody, _ := json.Marshal(map[string]string{
 		"session_id":    tok.SessionID,
 		"guest_node_id": nodeID,
@@ -302,9 +308,13 @@ func (h *DashboardHandler) handleGuestJoinRestart(w http.ResponseWriter, r *http
 
 // guestPost POSTs JSON to the host pairing listener and decodes the response.
 func guestPost(url string, body []byte, out any) (int, error) {
+	endpoint, err := netguard.LocalLANHTTPBase(url, "http")
+	if err != nil {
+		return 0, err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return 0, err
 	}

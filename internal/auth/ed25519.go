@@ -181,7 +181,11 @@ func v3StepFromTS(timestamp int64) int64 { return timestamp / 30 }
 func buildRequestMessageV3(kTOTP []byte, senderChainID, receiverChainID, method, path string, body []byte, timestamp int64, nonce []byte) []byte {
 	ch := chainBindingHash(senderChainID, receiverChainID)
 	factor := TOTPFactor(kTOTP, senderChainID, receiverChainID, v3StepFromTS(timestamp))
-	msg := make([]byte, 0, 64+len(body)+64)
+	capHint := 128
+	if len(body) <= int(^uint(0)>>1)-capHint {
+		capHint += len(body)
+	}
+	msg := make([]byte, 0, capHint)
 	msg = append(msg, ch[:]...)
 	msg = append(msg, factor[:]...)
 	msg = append(msg, buildRequestMessage(method, path, body, timestamp, nonce)...)
