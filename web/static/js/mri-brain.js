@@ -87,6 +87,32 @@ function makeBrainGeometry() {
   return g;
 }
 
+function makeFocusRingTexture() {
+  const c = document.createElement('canvas');
+  c.width = 256; c.height = 256;
+  const ctx = c.getContext('2d');
+  ctx.clearRect(0, 0, 256, 256);
+  ctx.save();
+  ctx.translate(128, 128);
+  ctx.shadowColor = 'rgba(57,208,255,0.95)';
+  ctx.shadowBlur = 16;
+  ctx.strokeStyle = 'rgba(255,255,255,0.98)';
+  ctx.lineWidth = 12;
+  ctx.beginPath();
+  ctx.arc(0, 0, 82, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = 'rgba(57,208,255,0.70)';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(0, 0, 104, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+  const tex = new THREE.CanvasTexture(c);
+  tex.needsUpdate = true;
+  return tex;
+}
+
 const STYLE = `
 .mrib{position:absolute;inset:0;overflow:hidden;background:radial-gradient(1200px 800px at 70% 18%,#0a1426 0%,#05070d 60%);
   font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#cfe3ff}
@@ -124,11 +150,19 @@ const STYLE = `
 .mrib .tip .chip{font-size:10px;padding:1px 6px;border-radius:6px;background:#0e1b30;color:#aecbf0;margin-right:4px}
 .mrib .flag{position:absolute;bottom:16px;right:16px;color:#3a4a66;font-size:10px;letter-spacing:1px}
 .mrib .boot{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#5d7395;letter-spacing:2px;font-size:12px}
-.mrib .explore{display:none;left:16px;right:306px;bottom:14px;height:47%;min-height:250px;flex-direction:column;padding:0;overflow:hidden}
+.mrib .explore{--ex-font:12px;display:none;left:16px;right:306px;bottom:14px;height:47%;min-height:210px;max-height:72%;flex-direction:column;padding:0;overflow:hidden}
+.mrib .explore .ex-resize{position:absolute;top:0;left:12px;right:12px;height:10px;cursor:ns-resize;z-index:2}
+.mrib .explore .ex-resize:before{content:'';position:absolute;top:3px;left:50%;width:52px;height:3px;transform:translateX(-50%);border-radius:3px;background:#263b5e}
+.mrib .explore .ex-resize:hover:before{background:#dceaff}
 .mrib .explore .ex-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:12px 16px;border-bottom:1px solid #15233b}
 .mrib .explore .ex-head-l{min-width:0}
 .mrib .explore .ex-title{color:#39d0ff;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:5px}
 .mrib .explore .ex-src{color:#dceaff;font-size:12px;line-height:1.45;max-height:36px;overflow:hidden}
+.mrib .explore .ex-actions{display:flex;align-items:center;gap:8px;flex:none}
+.mrib .explore .ex-font{display:flex;align-items:center;gap:3px;border:1px solid #15233b;border-radius:8px;padding:2px}
+.mrib .explore .ex-font button{cursor:pointer;border:0;background:transparent;color:#9fb6d8;font:700 11px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;padding:4px 7px;border-radius:6px}
+.mrib .explore .ex-font button:hover:not(:disabled){background:#0e1b30;color:#eaf4ff}
+.mrib .explore .ex-font button:disabled{cursor:not-allowed;color:#33445f}
 .mrib .explore .ex-back{flex:none;color:#39d0ff;font-size:11px;cursor:pointer;border:1px solid #15233b;border-radius:8px;padding:6px 11px;user-select:none;white-space:nowrap}
 .mrib .explore .ex-back:hover{background:#0e1b30}
 .mrib .explore .ex-board{flex:1;min-height:0;display:flex;gap:10px;padding:12px}
@@ -143,7 +177,7 @@ const STYLE = `
 .mrib .explore .ex-col-list{flex:1;min-height:0;overflow:auto;padding:7px}
 .mrib .explore .ex-card{padding:8px 9px;border-radius:8px;cursor:pointer;margin-bottom:6px;background:rgba(14,27,48,.5);border:1px solid transparent}
 .mrib .explore .ex-card:hover{background:#12213a;border-color:#1e3252}
-.mrib .explore .ex-c{color:#dceaff;font-size:12px;line-height:1.38;max-height:60px;overflow:hidden}
+.mrib .explore .ex-c{color:#dceaff;font-size:var(--ex-font);line-height:1.38;max-height:calc(var(--ex-font) * 5.2);overflow:hidden}
 .mrib .explore .ex-m{margin-top:5px;font-size:10px;color:#5d7395;display:flex;gap:6px;align-items:center}
 .mrib .explore .ex-m .dot{width:8px;height:8px;flex:none}
 .mrib .explore .ex-cc{color:#7f93b5;margin-left:auto}
@@ -296,6 +330,7 @@ export function mountMriBrain(container, opts = {}) {
 
   let Graph = null, controls = null, disposed = false, flow = true, scanning = true;
   let hullMat = null, brainMat = null, surfMat = null, curOpacity = 0.08;
+  let focusMarker = null, focusRingTexture = null;
   let currentDomain = null;                 // drill-down lobe (null = overview)
   const baseUrl = fetchUrl;
   const urlFor = () => baseUrl + (currentDomain ? '&domain=' + encodeURIComponent(currentDomain) : '');
@@ -305,6 +340,38 @@ export function mountMriBrain(container, opts = {}) {
     curOpacity = o;
     if (brainMat) { brainMat.opacity = o; if (surfMat) surfMat.opacity = o * 0.5; if (hullMat) hullMat.opacity = 0; }
     else if (hullMat) { hullMat.opacity = o; }
+  }
+
+  function ensureFocusMarker(){
+    if (!Graph) return null;
+    if (!focusMarker) {
+      focusRingTexture = focusRingTexture || makeFocusRingTexture();
+      focusMarker = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: focusRingTexture,
+        color: 0xffffff,
+        transparent: true,
+        opacity: 0.96,
+        depthTest: false,
+        depthWrite: false,
+      }));
+      focusMarker.renderOrder = 999;
+      focusMarker.visible = false;
+      Graph.scene().add(focusMarker);
+    }
+    return focusMarker;
+  }
+
+  function setFocusMarkerNode(n){
+    const m = ensureFocusMarker();
+    if (!m || !n) return;
+    m.position.set(n.x || 0, n.y || 0, n.z || 0);
+    const s = Math.max(30, Math.min(48, 28 + nodeVal(n) * 2.4));
+    m.scale.set(s, s, 1);
+    m.visible = true;
+  }
+
+  function clearFocusMarker(){
+    if (focusMarker) focusMarker.visible = false;
   }
 
   function refreshCounts(d){
@@ -362,7 +429,7 @@ export function mountMriBrain(container, opts = {}) {
   // keeps existing nodes put; no re-heat.
   function load(){
     // A drill / reload leaves focus mode.
-    focusId = null; focusSet = null; hideExplorePanel();
+    focusId = null; focusSet = null; hideExplorePanel(); clearFocusMarker();
     loadGraph(urlFor()).then(d => {
       if (disposed || !Graph) return;
       placeNodes(d.nodes);
@@ -399,6 +466,7 @@ export function mountMriBrain(container, opts = {}) {
   function exitFocus(){
     if (!focusId) return;
     focusId = null; focusSet = null;
+    clearFocusMarker();
     if (Graph) {
       const gd = Graph.graphData();
       gd.nodes = gd.nodes.filter(n => !n._added);
@@ -464,6 +532,7 @@ export function mountMriBrain(container, opts = {}) {
     });
     Graph.graphData(gd);
     Graph.nodeColor(nodeColorRGBA);
+    setFocusMarkerNode(n);
     renderExplorePanel(data, related);
     // Frame the whole train of thought at a fixed, reliable distance (the
     // constellation spans ~110 units around the clicked node): pull the camera
@@ -479,6 +548,64 @@ export function mountMriBrain(container, opts = {}) {
     { key: 'observation', label: 'Observations', glyph: '◉' },
     { key: 'note',        label: 'Notes',        glyph: '▪' },
   ];
+  const EX_FONT_KEY = 'sage-mri-explore-font';
+  const EX_HEIGHT_KEY = 'sage-mri-explore-height';
+  const EX_FONT_MIN = 12, EX_FONT_MAX = 18;
+  let exploreFont = EX_FONT_MIN;
+  try {
+    const saved = parseInt(localStorage.getItem(EX_FONT_KEY) || '', 10);
+    if (Number.isFinite(saved)) exploreFont = Math.max(EX_FONT_MIN, Math.min(EX_FONT_MAX, saved));
+  } catch(e){}
+
+  function applyExplorePrefs(p){
+    p.style.setProperty('--ex-font', exploreFont + 'px');
+    try {
+      const savedHeight = parseInt(localStorage.getItem(EX_HEIGHT_KEY) || '', 10);
+      if (Number.isFinite(savedHeight) && savedHeight > 0) {
+        const maxH = Math.max(230, Math.round(root.clientHeight * 0.72));
+        p.style.height = Math.max(210, Math.min(maxH, savedHeight)) + 'px';
+      }
+    } catch(e){}
+    p.querySelectorAll('[data-font]').forEach(btn => {
+      const dir = btn.getAttribute('data-font');
+      btn.disabled = (dir === 'down' && exploreFont <= EX_FONT_MIN) || (dir === 'up' && exploreFont >= EX_FONT_MAX);
+    });
+  }
+
+  function changeExploreFont(delta){
+    exploreFont = Math.max(EX_FONT_MIN, Math.min(EX_FONT_MAX, exploreFont + delta));
+    try { localStorage.setItem(EX_FONT_KEY, String(exploreFont)); } catch(e){}
+    const p = $('.explore');
+    if (p) applyExplorePrefs(p);
+  }
+
+  function wireExploreResize(p){
+    const handle = p.querySelector('.ex-resize');
+    if (!handle) return;
+    handle.onpointerdown = ev => {
+      ev.preventDefault();
+      handle.setPointerCapture(ev.pointerId);
+      const startY = ev.clientY;
+      const startH = p.getBoundingClientRect().height;
+      const maxH = Math.max(230, Math.round(root.clientHeight * 0.72));
+      const minH = 210;
+      const move = e => {
+        const h = Math.max(minH, Math.min(maxH, startH + (startY - e.clientY)));
+        p.style.height = Math.round(h) + 'px';
+      };
+      const up = e => {
+        handle.releasePointerCapture(e.pointerId);
+        handle.removeEventListener('pointermove', move);
+        handle.removeEventListener('pointerup', up);
+        handle.removeEventListener('pointercancel', up);
+        try { localStorage.setItem(EX_HEIGHT_KEY, String(Math.round(p.getBoundingClientRect().height))); } catch(err){}
+      };
+      handle.addEventListener('pointermove', move);
+      handle.addEventListener('pointerup', up);
+      handle.addEventListener('pointercancel', up);
+    };
+  }
+
   function renderExplorePanel(data, related){
     let p = $('.explore');
     if (!p) { p = document.createElement('div'); p.className = 'panel explore'; root.appendChild(p); }
@@ -498,15 +625,26 @@ export function mountMriBrain(container, opts = {}) {
       </div>`;
     }).join('');
     p.innerHTML = `
+      <div class="ex-resize" title="Resize panel"></div>
       <div class="ex-head">
         <div class="ex-head-l">
           <div class="ex-title">◉ Train of thought</div>
           <div class="ex-src">${escapeHtml(cleanContent(data.content) || '')}</div>
         </div>
-        <div class="ex-back">← back to full brain</div>
+        <div class="ex-actions">
+          <div class="ex-font" aria-label="Note font size">
+            <button type="button" data-font="down" title="Decrease note font size">A-</button>
+            <button type="button" data-font="up" title="Increase note font size">A+</button>
+          </div>
+          <div class="ex-back">← back to full brain</div>
+        </div>
       </div>
       ${related.length ? `<div class="ex-board">${columns}</div>` : '<div class="ex-empty ex-empty-big">No related memories in this lobe or its neighbours.</div>'}`;
+    applyExplorePrefs(p);
+    wireExploreResize(p);
     p.querySelector('.ex-back').onclick = exitFocus;
+    p.querySelector('[data-font="down"]').onclick = () => changeExploreFont(-1);
+    p.querySelector('[data-font="up"]').onclick = () => changeExploreFont(1);
     p.querySelectorAll('.ex-card').forEach(el => {
       el.onclick = () => {
         const rid = el.getAttribute('data-id');
@@ -698,13 +836,18 @@ export function mountMriBrain(container, opts = {}) {
     tip.style.left=(e.clientX-r.left+14)+'px'; tip.style.top=(e.clientY-r.top+14)+'px'; } }
   root.addEventListener('mousemove', onMove);
   $('.b-rot').onclick=function(){ scanning=!scanning; if(controls) controls.autoRotate=scanning; this.textContent=scanning?'⏸ pause':'▶ scan'; };
-  $('.b-flow').onclick=function(){ flow=!flow; if(Graph) Graph.linkDirectionalParticles(l=>flow&&(LINK_TYPES[l.link_type]||{}).typed?2:0); this.textContent=flow?'⚡ flow: on':'⚡ flow: off'; };
+  $('.b-flow').onclick=function(){ flow=!flow; if(Graph) Graph.linkDirectionalParticles(l=>l.link_type==='focus'?3:(flow&&(LINK_TYPES[l.link_type]||{}).typed?2:0)); this.textContent=flow?'⚡ flow: on':'⚡ flow: off'; };
   $('.b-op').oninput=function(){ setHullOpacity(this.value/100); };
 
   return function cleanup(){
     disposed = true;
     subs.forEach(u => { try { u && u(); } catch(e){ /* noop */ } });
     root.removeEventListener('mousemove', onMove);
+    try {
+      if (focusMarker && focusMarker.parent) focusMarker.parent.remove(focusMarker);
+      if (focusMarker && focusMarker.material) focusMarker.material.dispose();
+      if (focusRingTexture) focusRingTexture.dispose();
+    } catch(e){ /* noop */ }
     try { if (Graph && Graph._destructor) Graph._destructor(); } catch(e){ /* noop */ }
     if (root.parentNode) root.parentNode.removeChild(root);
   };

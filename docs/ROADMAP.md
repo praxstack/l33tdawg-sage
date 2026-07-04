@@ -31,7 +31,7 @@ v11 is the "zero-terminal, sovereign" release. It takes SAGE from "works if you 
 
 ### CEREBRUM (the dashboard)
 
-- **MRI 3D brain is the default view** (three.js + 3d-force-graph bundled locally, so it renders fully offline); a 2D force-graph remains a toggle away and the choice is remembered.
+- **MRI 3D brain is the default view** (three.js + 3d-force-graph bundled locally, so it renders fully offline); the 2D force-graph remains as a legacy toggle for operators who need the flat graph/timeline.
 - **Click-a-memory "train of thought"** board (Do's / Don'ts / Observations / Notes), computed from lineage, tags, content overlap, and same-lobe signals; hop card to card to walk the connectome.
 - **Reading panel** collapses to the domain lobes by default (newest 30, most-recently-active first) with an expandable "how to read".
 - **Live task board** with agent-vs-human authorship and atomic claim/ownership; the agent message bus merged in as a Messages tab.

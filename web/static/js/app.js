@@ -5306,7 +5306,7 @@ function HelpOverlay({ onClose, initialSection }) {
                 <div class="guide-steps">
                     <div class="guide-step"><span class="guide-step-num">1</span><div><strong>Connect your AI assistant</strong> — Add the MCP config from Settings to Claude Code, Cursor, or any MCP-compatible client. Your assistant will automatically call <code>sage_inception</code> on startup to load its memory.</div></div>
                     <div class="guide-step"><span class="guide-step-num">2</span><div><strong>Start a conversation</strong> — As you work with your assistant, it stores observations, facts, and inferences. Each memory goes through consensus validation before being committed.</div></div>
-                    <div class="guide-step"><span class="guide-step-num">3</span><div><strong>Explore your brain</strong> — Open the Cerebrum view (brain icon) to see your memories inside the 3D MRI brain (drag to orbit, click a memory to focus it) - or flip the toggle for the 2D bubble map, where size reflects confidence and color the knowledge domain.</div></div>
+                    <div class="guide-step"><span class="guide-step-num">3</span><div><strong>Explore your brain</strong> — Open the Cerebrum view (brain icon) to see your memories inside the 3D MRI brain. Drag to orbit, click a memory to mark it with a white focus ring, and walk its related notes.</div></div>
                 </div>
             `,
         },
@@ -5314,20 +5314,20 @@ function HelpOverlay({ onClose, initialSection }) {
             key: 'cerebrum-view',
             title: 'Cerebrum View',
             icon: html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a7 7 0 0 0-7 7c0 2.38 1.19 4.47 3 5.74V17a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-2.26c1.81-1.27 3-3.36 3-5.74a7 7 0 0 0-7-7z"/></svg>`,
-            summary: 'Two brain views: the 3D MRI brain (default) and the 2D bubble map.',
+            summary: 'The 3D MRI brain, with a legacy 2D map available when needed.',
             content: html`
-                <p>The Cerebrum view is your brain's neural map, with two modes switched by the toggle at the top: the <strong>3D MRI brain</strong> (the default) renders memories as glowing points inside a translucent brain, and the <strong>2D bubble map</strong> is a force-directed graph where each bubble is a committed memory.</p>
+                <p>The Cerebrum view is your brain's neural map. The <strong>3D MRI brain</strong> is the default and renders memories as glowing points inside a translucent brain. A <strong>legacy 2D map</strong> remains available from the toggle for a flat force-directed graph and timeline.</p>
                 <div class="guide-detail-grid">
                     <div class="guide-detail-item">
                         <div class="guide-detail-label">MRI: navigate</div>
-                        <div class="guide-detail-desc">Drag to orbit, scroll to zoom. Click a memory point to focus it and light up its related constellation. The lobe legend drills into a domain.</div>
+                        <div class="guide-detail-desc">Drag to orbit, scroll to zoom. Click a memory point to mark it with a white focus ring, light up its related constellation, and open the related notes board. The lobe legend drills into a domain.</div>
                     </div>
                     <div class="guide-detail-item">
                         <div class="guide-detail-label">MRI: scan & flow</div>
                         <div class="guide-detail-desc">"Scan" toggles a slow auto-rotate; "flow" animates particles along memory links so you can watch knowledge pathways. Corroborated memories glow brighter and larger.</div>
                     </div>
                 </div>
-                <p style="margin-top:10px;"><strong>2D bubble map</strong> — the classic force-directed view:</p>
+                <p style="margin-top:10px;"><strong>Legacy 2D map</strong> — the classic force-directed view:</p>
                 <div class="guide-detail-grid">
                     <div class="guide-detail-item">
                         <div class="guide-detail-label">Bubble size</div>
@@ -9298,10 +9298,11 @@ function App() {
     const [authState, setAuthState] = useState('loading'); // loading | login | ready
     const [isEncrypted, setIsEncrypted] = useState(false);
     const [page, setPage] = useState('brain');
-    // Brain view mode: 'mri' (3D MRI, the DEFAULT) | '2d' (canvas). Persisted so
-    // a user who prefers 2D keeps it across reloads; new users land on the MRI.
+    // Brain view mode: MRI is the v11 default even if an older dashboard saved
+    // the 2D preference. The legacy 2D map remains an explicit manual toggle.
     const [brainMode, setBrainMode] = useState(() => {
-        try { return localStorage.getItem('sage-brain-mode') || 'mri'; } catch (e) { return 'mri'; }
+        try { localStorage.setItem('sage-brain-mode', 'mri'); } catch (e) {}
+        return 'mri';
     });
     const changeBrainMode = (mode) => {
         setBrainMode(mode);
@@ -9578,7 +9579,7 @@ function App() {
             ${page === 'brain' && html`
                 <div class="brain-mode-toggle">
                     <button class=${brainMode === 'mri' ? 'active' : ''} onClick=${() => changeBrainMode('mri')} title="3D MRI brain view">⬡ MRI</button>
-                    <button class=${brainMode === '2d' ? 'active' : ''} onClick=${() => changeBrainMode('2d')}>2D</button>
+                    <button class=${brainMode === '2d' ? 'active' : ''} onClick=${() => changeBrainMode('2d')} title="Legacy 2D map">2D legacy</button>
                 </div>
                 ${brainMode === '2d'
                     ? html`
@@ -10145,7 +10146,7 @@ function FederationPage() {
     return html`<div class="page fed-page">
         <div class="fed-landing">
             <h1>Federation</h1>
-            <p class="fed-landing-sub muted">Connect your <strong>whole SAGE</strong> to <strong>another SAGE</strong> - across the internet or your network. This is not the same as adding an agent to your own SAGE (do that under <strong>Agents</strong>), or the validator quorum your own agents form (also under Agents). Federation links two separate brains.</p>
+            <p class="fed-landing-sub muted">Connect your <strong>whole SAGE</strong> to <strong>another SAGE</strong> on the same LAN, VPN, or a reachable route you provide. Built-in internet/NAT traversal is planned for v11.5. This is not the same as adding an agent to your own SAGE (do that under <strong>Agents</strong>), or the validator quorum your own agents form (also under Agents). Federation links two separate brains.</p>
             <${FedGreenRail} />
             ${err && html`<div class="fed-err">Couldn't load connections: ${err}</div>`}
             <div class="fed-roles">

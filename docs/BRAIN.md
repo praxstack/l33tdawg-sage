@@ -17,12 +17,13 @@ Top-right of the brain page is a two-button toggle:
 - **⬡ MRI** - the 3D brain (the default). A brain-shaped wireframe with your
   memories placed inside it by domain and how settled they are. New users land
   here.
-- **2D** - the flat force-directed bubble graph, with a timeline bar underneath
-  for filtering by hour.
+- **2D legacy** - the flat force-directed bubble graph, with a timeline bar
+  underneath for filtering by hour.
 
-Your choice is remembered across reloads (stored locally as `sage-brain-mode`),
-so if you prefer the 2D graph it stays put. The rest of this guide describes the
-MRI, since that is the default and the richer view.
+MRI is the launch default and wins on reload, including for dashboards that
+previously saved `sage-brain-mode=2d`. The 2D map stays available as a manual
+legacy toggle for operators who need the flat graph/timeline. The rest of this
+guide describes the MRI, since that is the default and the richer view.
 
 ---
 
@@ -154,7 +155,7 @@ back in.
 
 ## In short
 
-- **MRI is the default**; 2D is a toggle away and remembered.
+- **MRI is the default**; 2D is a legacy toggle away when you need the flat graph.
 - **The reading panel** collapses to just your domain lobes (newest 30, most
   recently active first); **▾ how to read** expands the full legend, and the
   choice sticks. Click a lobe to drill in.

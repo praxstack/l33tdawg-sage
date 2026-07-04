@@ -38,14 +38,14 @@ Full deployment guide (multi-agent networks, RBAC, federation, monitoring): **[A
 
 ## CEREBRUM Dashboard
 
-![CEREBRUM Overview — node health, quorum, agents, federation, and embeddings](docs/screen-overview.png)
+![CEREBRUM MRI brain — memories mapped inside a 3D brain with focused related notes](docs/screen-brain.png)
 
-`http://localhost:8080/ui/` — a dashboard-native operator console for chain health, agents, federation, semantic memory, recall tuning, vault recovery, tasks, imports, updates, and the 3D MRI memory brain. Every major workflow is available from the browser; the CLI stays there for automation and recovery.
+`http://localhost:8080/ui/` — a dashboard-native operator console centered on the 3D MRI memory brain, with chain health, agents, federation, semantic memory, recall tuning, vault recovery, tasks, imports, and updates around it. Every major workflow is available from the browser; the CLI stays there for automation and recovery.
 
-| Federation | Recall Engine |
-|:---:|:---:|
-| ![Federation join dashboard](docs/screen-network.png) | ![Recall engine settings](docs/screen-config.png) |
-| LAN-first, human-verified joins between separate SAGE brains, scoped and revocable | Smart-memory setup, managed reranker install, and recall-depth tuning |
+| Control Board | Federation | Recall Engine |
+|:---:|:---:|:---:|
+| ![CEREBRUM overview dashboard](docs/screen-overview.png) | ![Federation join dashboard](docs/screen-network.png) | ![Recall engine settings](docs/screen-config.png) |
+| Chain health, quorum, agents, federation, and embeddings | LAN-first, human-verified joins between separate SAGE brains, scoped and revocable | Smart-memory setup, managed reranker install, and recall-depth tuning |
 
 The dashboard also includes agent management, domain permissions, key rotation, import/export, software updates, and encryption controls.
 
