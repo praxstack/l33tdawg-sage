@@ -36,6 +36,7 @@ import (
 	sageabci "github.com/l33tdawg/sage/internal/abci"
 	"github.com/l33tdawg/sage/internal/auth"
 	"github.com/l33tdawg/sage/internal/embedding"
+	"github.com/l33tdawg/sage/internal/rerankd"
 	"github.com/l33tdawg/sage/internal/federation"
 	"github.com/l33tdawg/sage/internal/mcp"
 	"github.com/l33tdawg/sage/internal/memory"
@@ -180,6 +181,10 @@ func runServe() (rerr error) {
 				Msg("hybrid recall reranker enabled")
 		}
 	}
+	// Manager for the optional llama.cpp reranker sidecar (guided setup from
+	// the dashboard; adopt-or-spawn on boot when the operator enabled it).
+	rerankdMgr := rerankd.New(SageHome())
+
 	// Persisted reranker intent (Settings > Engine toggle) overrides the env
 	// config so an operator's dashboard on/off choice survives restart without
 	// needing SAGE_RERANK_* env vars. A stored "0" explicitly turns it off.
@@ -198,6 +203,22 @@ func runServe() (rerr error) {
 			}
 			sqliteStore.SetReranker(embedding.BuildReranker(cfg), cfg.Oversample)
 			logger.Info().Bool("enabled", cfg.Enabled).Str("url", cfg.URL).Msg("reranker applied from saved preferences")
+		}
+		// Managed sidecar: re-establish the llama.cpp reranker this operator
+		// enabled through the guided setup. Adopt-or-spawn runs in the
+		// background - recalls degrade gracefully (RRF ordering) until the
+		// sidecar answers, so boot is never blocked on it.
+		if prefs["reranker_managed"] == "1" {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+				defer cancel()
+				url, err := rerankdMgr.Start(ctx)
+				if err != nil {
+					logger.Warn().Err(err).Msg("managed reranker sidecar did not start; recall continues without reranking")
+					return
+				}
+				logger.Info().Str("url", url).Msg("managed reranker sidecar ready")
+			}()
 		}
 	}
 
@@ -542,6 +563,7 @@ func runServe() (rerr error) {
 
 	// Create dashboard handler
 	dashboard := web.NewDashboardHandler(sqliteStore, version)
+	dashboard.Rerankd = rerankdMgr            // managed reranker sidecar (guided setup)
 	dashboard.BadgerStore = badgerStore       // Wire on-chain RBAC for agent isolation
 	dashboard.PostV8ForkFn = app.IsPostV8Fork // v8.0: ancestor-walk grants on post-fork dashboards
 

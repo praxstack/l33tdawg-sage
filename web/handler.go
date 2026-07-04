@@ -167,6 +167,10 @@ type DashboardHandler struct {
 	// nomic-embed-text in config.yaml (the node re-reads it on the next restart).
 	// Wired in cmd/sage-gui. nil disables the enable endpoint.
 	SetEmbeddingOllama func() error
+	// Rerankd manages the optional llama.cpp reranker sidecar (guided setup,
+	// pinned model download, spawn/adopt/stop). Wired in cmd/sage-gui; nil
+	// disables the /v1/dashboard/reranker/setup/* endpoints.
+	Rerankd RerankdManager
 	// ValidatorCountFn returns the live consensus validator count. When set it is
 	// the authoritative signal for whether an agent op needs a full chain
 	// redeploy (count > 1) or can be applied instantly (count <= 1) — more
@@ -372,6 +376,7 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 
 			// Embeddings setup — turn on the bundled semantic embedder + re-embed.
 			h.RegisterEmbeddingsRoutes(r)
+			h.RegisterRerankerSetupRoutes(r)
 
 			r.Delete("/v1/dashboard/memory/{id}", h.handleDeleteMemory)
 			r.Patch("/v1/dashboard/memory/{id}", h.handleUpdateMemory)

@@ -118,6 +118,9 @@ func (h *DashboardHandler) handleSaveReranker(w http.ResponseWriter, r *http.Req
 		_ = h.prefStore.SetPreference(r.Context(), "reranker_url", req.URL)
 		_ = h.prefStore.SetPreference(r.Context(), "reranker_model", cfg.Model)
 		_ = h.prefStore.SetPreference(r.Context(), "reranker_kind", cfg.Kind)
+		// A manual save is the operator taking over from the managed sidecar
+		// flow - stop auto-starting it on boot so the two configs can't fight.
+		_ = h.prefStore.SetPreference(r.Context(), "reranker_managed", "0")
 	}
 
 	writeJSONResp(w, http.StatusOK, rerankerSettingsView{Enabled: req.Enabled, URL: req.URL, Model: cfg.Model, Kind: cfg.Kind})

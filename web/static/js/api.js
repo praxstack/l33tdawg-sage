@@ -782,3 +782,26 @@ export function fedGuestScan(uri, endpoint) { return fedPost('/v1/dashboard/fede
 export function fedGuestRequest(body) { return fedPost('/v1/dashboard/federation/join/guest/request', body); }
 export function fedGuestStatus(sessionId) { return fedFetch(`/v1/dashboard/federation/join/guest/${encodeURIComponent(sessionId)}/status`); }
 export function fedGuestConfirm(body) { return fedPost('/v1/dashboard/federation/join/guest/confirm', body); }
+
+// Managed reranker sidecar (guided setup: detect llama-server, download the
+// pinned model, spawn + enable).
+export async function rerankerSetupStatus() {
+    const res = await fetch(`${API_BASE}/v1/dashboard/reranker/setup/status`);
+    if (!res.ok) throw new Error(`reranker setup status failed (HTTP ${res.status})`);
+    return res.json();
+}
+// Streaming: returns the Response; each line is "key: value\n" with
+// "progress: <done> <total>" updates and a final "done: 0|1".
+export function rerankerSetupDownload() {
+    return fetch(`${API_BASE}/v1/dashboard/reranker/setup/download`, { method: 'POST' });
+}
+export async function rerankerSetupStart() {
+    const res = await fetch(`${API_BASE}/v1/dashboard/reranker/setup/start`, { method: 'POST' });
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || `HTTP ${res.status}`); }
+    return res.json();
+}
+export async function rerankerSetupStop() {
+    const res = await fetch(`${API_BASE}/v1/dashboard/reranker/setup/stop`, { method: 'POST' });
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || `HTTP ${res.status}`); }
+    return res.json();
+}

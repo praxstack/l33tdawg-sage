@@ -1,6 +1,7 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
-import { fetchStats, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, fetchValidators, fetchMcpConfig, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchReranker, saveReranker, testReranker, detectReranker, fetchOnboarding, saveOnboarding, fetchTasks, updateTaskStatus, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken, connectProvider, connectRemoteUrl,
+import { fetchStats, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, fetchValidators, fetchMcpConfig, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchReranker, saveReranker, testReranker, detectReranker, fetchOnboarding, saveOnboarding,
+rerankerSetupStatus, rerankerSetupDownload, rerankerSetupStart, rerankerSetupStop, fetchTasks, updateTaskStatus, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken, connectProvider, connectRemoteUrl,
 embeddingsStatus, checkOllamaEmbed, pullEmbedModel, reembedMemories, reembedProgress, enableSemanticEmbeddings,
 deprecateUnreadable, getRecoveryKey, recoverOrphansPreview, recoverOrphans,
 joinHostInterfaces, enableNetworkMode, joinHostStart, joinHostStatus, joinHostApprove, joinHostAbort,
@@ -3753,9 +3754,12 @@ function RerankerControl() {
     const [testResult, setTestResult] = useState(null);
     const [msg, setMsg] = useState('');
     const [detected, setDetected] = useState(null);
+    const [setup, setSetup] = useState(null);      // managed-sidecar status (null on old binaries)
+    const [showSetup, setShowSetup] = useState(false);
     const urlDirty = useRef(false); // operator typed - a late detect probe must not clobber it
     const [, bumpRender] = useState(0); // force the controlled toggle to resync even when a guard bails
     useEffect(() => {
+        rerankerSetupStatus().then(setSetup).catch(() => {});
         fetchReranker().then(c => {
             setCfg(c); setUrl(c.url || ''); setModel(c.model || '');
             // Nothing configured yet: probe the conventional local port and
@@ -3768,6 +3772,17 @@ function RerankerControl() {
             }
         }).catch(() => setCfg({ enabled: false, url: '', model: '' }));
     }, []);
+    const reload = () => {
+        fetchReranker().then(c => { setCfg(c); setUrl(c.url || ''); setModel(c.model || ''); }).catch(() => {});
+        rerankerSetupStatus().then(setSetup).catch(() => {});
+    };
+    const managed = !!(setup && setup.managed && cfg && cfg.enabled);
+    const doStopManaged = async () => {
+        setBusy(true); setMsg('');
+        try { await rerankerSetupStop(); setMsg('Reranker off - sidecar stopped.'); reload(); }
+        catch (e) { setMsg('Could not stop: ' + (e.message || 'error')); }
+        setBusy(false);
+    };
     const inputStyle = 'background:var(--bg-elev);border:1px solid var(--border);border-radius:4px;padding:6px 8px;color:var(--text);font-size:12px;width:100%;';
     if (!cfg) return html`<div class="settings-row"><span class="label">Reranker</span><span class="value" style="color:var(--text-muted)">Loading...</span></div>`;
     const save = async (enabled) => {
@@ -3794,12 +3809,29 @@ function RerankerControl() {
                 <span class="value" style="display:flex;align-items:center;gap:8px;">
                     <span style="color:${cfg.enabled ? '#10b981' : '#6b7280'};font-size:12px;">${cfg.enabled ? 'On' : 'Off'}</span>
                     <label class="toggle-switch" onClick=${(e) => e.stopPropagation()}>
-                        <input type="checkbox" checked=${cfg.enabled} disabled=${busy} onChange=${(e) => save(e.target.checked)} />
+                        <input type="checkbox" checked=${cfg.enabled} disabled=${busy}
+                            onChange=${(e) => (managed && !e.target.checked) ? doStopManaged() : save(e.target.checked)} />
                         <span class="toggle-slider"></span>
                     </label>
                 </span>
             </div>
+            ${managed ? html`
+                <div style="margin-top:10px;max-width:560px;">
+                    <div style="font-size:12px;color:var(--text-dim);">Managed by SAGE - a local llama.cpp sidecar serving <strong>${cfg.model}</strong> at ${cfg.url}. It starts with the node; nothing leaves this machine.</div>
+                    <div style="display:flex;gap:8px;margin-top:8px;align-items:center;">
+                        <button class="btn" disabled=${busy} onClick=${doStopManaged}>Turn off & stop the sidecar</button>
+                        ${msg ? html`<span style="font-size:12px;color:var(--text-muted);">${msg}</span>` : ''}
+                    </div>
+                </div>
+            ` : html`
             <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px;max-width:560px;">
+                ${!cfg.enabled && setup && setup.available ? html`
+                    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+                        <button class="btn btn-primary" disabled=${busy} onClick=${() => setShowSetup(true)}>Set up for me (recommended)</button>
+                        <span style="font-size:11px;color:var(--text-muted);">SAGE guides the one-time install, downloads the model, and runs it locally.</span>
+                    </div>
+                    <div style="font-size:11px;color:var(--text-muted);">Or point at your own TEI-compatible server:</div>
+                ` : ''}
                 <input style=${inputStyle} placeholder="Reranker URL (e.g. http://localhost:8081)" value=${url} onInput=${e => { urlDirty.current = true; setUrl(e.target.value); }} />
                 <input style=${inputStyle} placeholder="Model (default BAAI/bge-reranker-v2-m3)" value=${model} onInput=${e => setModel(e.target.value)} />
                 <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
@@ -3811,8 +3843,10 @@ function RerankerControl() {
                 ${detected && !cfg.enabled ? html`
                     <div style="font-size:12px;color:#10b981;">Found a reranker running at ${detected} - the URL was filled in for you. Click Save & enable to start using it (the connection is verified on save).</div>
                 ` : ''}
-                <div style="font-size:11px;color:var(--text-muted);">Optional. Point at a TEI-compatible reranker server to re-score recall results for sharper relevance. Off by default; the bundled embedder works fine without it.</div>
+                <div style="font-size:11px;color:var(--text-muted);">Optional. Re-scores recall results for sharper relevance. Off by default; the bundled embedder works fine without it.</div>
             </div>
+            `}
+            ${showSetup && html`<${RerankerSetupModal} onClose=${() => { setShowSetup(false); reload(); }} onDone=${reload} />`}
         </div>
     `;
 }
@@ -3844,6 +3878,154 @@ function RestartNodeButton() {
             </span>
         </div>
         ${arming ? html`<div style="font-size:11px;color:#f59e0b;margin-top:4px;">Restarting re-locks the vault - you will need to unlock again. The node is briefly offline.</div>` : ''}
+    `;
+}
+
+// RerankerSetupModal - the guided "set it up for me" flow: the same
+// detect > guide > download > run treatment the Ollama embedder gets. The
+// runtime is llama.cpp's llama-server (Ollama itself has no rerank endpoint);
+// SAGE downloads a pinned, checksum-verified bge-reranker-v2-m3 GGUF once,
+// then spawns and manages the sidecar on loopback.
+function RerankerSetupModal({ onClose, onDone }) {
+    const [st, setSt] = useState(null);
+    const [step, setStep] = useState('check'); // check | unavailable | binary | model | start | done
+    const [err, setErr] = useState(null);
+    const [dl, setDl] = useState(null); // { done, total }
+    const [downloading, setDownloading] = useState(false);
+    const [starting, setStarting] = useState(false);
+    const [copied, setCopied] = useState(false);
+    const busy = downloading || starting;
+
+    const decide = (s) => {
+        if (!s || !s.available) return 'unavailable';
+        if (s.running && s.managed) return 'done';
+        if (!s.binary_found) return 'binary';
+        if (!s.model_ready) return 'model';
+        return 'start';
+    };
+    const refresh = async () => {
+        try { const s = await rerankerSetupStatus(); setSt(s); setErr(null); return s; }
+        catch (e) { setErr(e.message || String(e)); return null; }
+    };
+
+    const doStart = async () => {
+        setStarting(true); setErr(null);
+        try {
+            await rerankerSetupStart();
+            await refresh();
+            setStep('done');
+            if (onDone) onDone();
+        } catch (e) { setErr(e.message || String(e)); }
+        setStarting(false);
+    };
+
+    useEffect(() => {
+        (async () => {
+            const s = await refresh();
+            const next = decide(s);
+            setStep(next);
+            if (next === 'start') doStart(); // binary + model already there: just run it
+        })();
+    }, []);
+
+    // Read a text/plain "key: value\n" stream, dispatching each line.
+    const readLines = async (res, onLine) => {
+        const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = '';
+        for (;;) {
+            const { value, done } = await reader.read(); if (done) break;
+            buf += dec.decode(value, { stream: true });
+            let i; while ((i = buf.indexOf('\n')) >= 0) {
+                const l = buf.slice(0, i); buf = buf.slice(i + 1);
+                const c = l.indexOf(': ');
+                if (c > 0) onLine(l.slice(0, c), l.slice(c + 2));
+            }
+        }
+    };
+
+    const doDownload = async () => {
+        setDownloading(true); setErr(null); setDl({ done: 0, total: (st && st.model_bytes) || 0 });
+        try {
+            const res = await rerankerSetupDownload();
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            let failed = null;
+            await readLines(res, (k, v) => {
+                if (k === 'progress') { const parts = v.split(' '); setDl({ done: Number(parts[0]) || 0, total: Number(parts[1]) || 0 }); }
+                if (k === 'error') failed = v;
+            });
+            if (failed) throw new Error(failed);
+            await refresh();
+            setStep('start');
+            setDownloading(false);
+            doStart();
+        } catch (e) { setErr(e.message || String(e)); setDownloading(false); }
+    };
+
+    const recheck = async () => { const s = await refresh(); const next = decide(s); setStep(next); if (next === 'start') doStart(); };
+
+    const installCmd = st && st.os === 'windows' ? 'winget install llama.cpp' : 'brew install llama.cpp';
+    const copyCmd = () => { try { navigator.clipboard.writeText(installCmd); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch (e) {} };
+    const mb = (n) => (n / (1024 * 1024)).toFixed(0);
+    const pct = dl && dl.total > 0 ? Math.round((dl.done / dl.total) * 100) : 0;
+
+    return html`
+        <div class="wizard-overlay" onClick=${e => { if (e.target === e.currentTarget && !busy) onClose(); }}>
+            <div class="wizard-modal" style="max-width:540px;">
+                <div class="wizard-header">
+                    <h2>Set up the reranker</h2>
+                    <button class="detail-close" onClick=${() => { if (!busy) onClose(); }} disabled=${busy} title=${busy ? 'Please wait' : 'Close'}>×</button>
+                </div>
+                <div class="wizard-body" style="padding:20px;line-height:1.55;">
+                    ${step === 'check' && html`<p style="color:var(--text-dim);text-align:center;padding:20px;">Checking what's already in place…</p>`}
+                    ${step === 'unavailable' && html`<p style="color:var(--text-dim);">The managed reranker isn't available on this node build. You can still point SAGE at your own TEI-compatible server from Settings.</p>`}
+                    ${step === 'binary' && html`
+                        <p style="margin-top:0;">The reranker runs on <strong>llama.cpp</strong> - a small, free local inference server. One install, then SAGE handles everything else.</p>
+                        <div style="display:flex;gap:8px;align-items:center;margin:12px 0;">
+                            <code style="background:var(--code-bg);border:1px solid var(--border);border-radius:6px;padding:8px 12px;font-size:13px;flex:1;">${installCmd}</code>
+                            <button class="btn" onClick=${copyCmd}>${copied ? 'Copied' : 'Copy'}</button>
+                        </div>
+                        ${st && st.os !== 'darwin' && st.os !== 'windows' && html`<p style="color:var(--text-dim);font-size:12px;">No Homebrew? Grab a release from github.com/ggml-org/llama.cpp/releases and put llama-server on your PATH.</p>`}
+                        <p style="color:var(--text-dim);font-size:12px;">Run that in a terminal, then come back here.</p>
+                        <div style="display:flex;justify-content:flex-end;margin-top:16px;">
+                            <button class="btn btn-primary" onClick=${recheck}>I've installed it - check again</button>
+                        </div>
+                    `}
+                    ${step === 'model' && html`
+                        <p style="margin-top:0;">One-time download: <strong>${(st && st.model_name) || 'the reranker model'}</strong> (${st ? mb(st.model_bytes) : '~610'} MB), checksum-verified and stored under <code>~/.sage/models</code>. It runs entirely on this machine.</p>
+                        ${downloading ? html`
+                            <div style="margin:14px 0;">
+                                <div style="height:8px;background:var(--bg-elev);border-radius:4px;overflow:hidden;">
+                                    <div style="height:100%;width:${pct}%;background:var(--primary);transition:width 0.3s;"></div>
+                                </div>
+                                <div style="font-size:12px;color:var(--text-dim);margin-top:6px;">${dl ? mb(dl.done) : 0} / ${dl ? mb(dl.total) : 0} MB (${pct}%)</div>
+                            </div>
+                        ` : html`
+                            <div style="display:flex;justify-content:flex-end;margin-top:16px;">
+                                <button class="btn btn-primary" onClick=${doDownload}>Download the model</button>
+                            </div>
+                        `}
+                    `}
+                    ${step === 'start' && html`
+                        <p style="color:var(--text-dim);text-align:center;padding:20px;">${starting ? 'Starting the reranker - the first model load takes a few seconds…' : 'Ready to start.'}</p>
+                        ${!starting && html`
+                            <div style="display:flex;justify-content:flex-end;">
+                                <button class="btn btn-primary" onClick=${doStart}>Start the reranker</button>
+                            </div>
+                        `}
+                    `}
+                    ${step === 'done' && html`
+                        <div style="text-align:center;padding:8px 0;">
+                            <div style="font-size:34px;margin-bottom:8px;">🎯</div>
+                            <h3 style="margin:0 0 8px;color:var(--accent-green);">Reranker is on</h3>
+                            <p style="color:var(--text-dim);">Recall results are now re-scored by a cross-encoder for sharper relevance. SAGE manages the process - it starts with the node and you can turn it off any time in Settings.</p>
+                        </div>
+                    `}
+                    ${err && html`<div class="import-error" style="margin-top:14px;">${err}</div>`}
+                </div>
+                <div class="wizard-footer">
+                    <button class="btn" onClick=${() => { if (!busy) onClose(); }} disabled=${busy}>${step === 'done' ? 'Done' : 'Close'}</button>
+                </div>
+            </div>
+        </div>
     `;
 }
 
@@ -8251,13 +8433,16 @@ function OnboardingWizard({ onClose, onNavigate, onOpenGuide }) {
     const [emb, setEmb] = useState(null);
     const [agents, setAgents] = useState([]);
     const [showEmbedSetup, setShowEmbedSetup] = useState(false);
+    const [showRerankSetup, setShowRerankSetup] = useState(false);
+    const [rerankOn, setRerankOn] = useState(false);
     const [showConnect, setShowConnect] = useState(false);
     const [showChatGPT, setShowChatGPT] = useState(false);
     const [chatGPTTarget, setChatGPTTarget] = useState('chatgpt');
 
     const refreshEmb = () => embeddingsStatus().then(setEmb).catch(() => setEmb(null));
     const refreshAgents = () => fetchAgents().then(d => setAgents(d.agents || [])).catch(() => {});
-    useEffect(() => { refreshEmb(); refreshAgents(); }, []);
+    const refreshRerank = () => rerankerSetupStatus().then(s => setRerankOn(!!(s && s.managed && s.running))).catch(() => {});
+    useEffect(() => { refreshEmb(); refreshAgents(); refreshRerank(); }, []);
 
     const finish = () => { saveOnboarding(true).catch(() => {}); onClose(); };
 
@@ -8291,6 +8476,17 @@ function OnboardingWizard({ onClose, onNavigate, onOpenGuide }) {
                                 <span style="color:#10b981;font-size:18px;">✓</span>
                                 <div style="font-size:13px;">Semantic memory is <strong>on</strong> - your agents recall by meaning (Ollama + nomic-embed-text).</div>
                             </div>
+                            ${rerankOn ? html`
+                                <div style="display:flex;align-items:center;gap:10px;margin-top:10px;background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.35);border-radius:8px;padding:12px 14px;">
+                                    <span style="color:#10b981;font-size:18px;">✓</span>
+                                    <div style="font-size:13px;">The <strong>reranker</strong> is on too - recall results get re-scored for sharper relevance.</div>
+                                </div>
+                            ` : html`
+                                <div style="margin-top:12px;">
+                                    <div style="font-size:13px;color:var(--text-dim);">Optional extra: the <strong>reranker</strong> re-scores recall results for sharper relevance. One-time ~610 MB download; runs locally, managed by SAGE.</div>
+                                    <button class="btn" style="margin-top:8px;" onClick=${() => setShowRerankSetup(true)}>Set up the reranker</button>
+                                </div>
+                            `}
                         ` : html`
                             <p style="margin-top:0;">Out of the box SAGE recalls by <strong>keywords</strong>. Turning on the bundled semantic embedder lets your agents find memories by <strong>meaning</strong> - the single biggest recall upgrade.</p>
                             ${ollamaUp
@@ -8330,6 +8526,7 @@ function OnboardingWizard({ onClose, onNavigate, onOpenGuide }) {
             </div>
         </div>
         ${showEmbedSetup && html`<${EmbeddingsSetupModal} onClose=${() => { setShowEmbedSetup(false); refreshEmb(); }} onDone=${refreshEmb} />`}
+        ${showRerankSetup && html`<${RerankerSetupModal} onClose=${() => { setShowRerankSetup(false); refreshRerank(); }} onDone=${refreshRerank} />`}
         ${showConnect && html`<${ConnectToolModal} agents=${agents}
             onOpenChatGPT=${(t) => { setChatGPTTarget(t || 'chatgpt'); setShowConnect(false); setShowChatGPT(true); }}
             onClose=${() => { setShowConnect(false); refreshAgents(); }} />`}

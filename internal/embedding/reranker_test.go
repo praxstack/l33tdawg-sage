@@ -167,3 +167,47 @@ func TestEnvTrue(t *testing.T) {
 		assert.Equal(t, want, envTrue("SAGE_TEST_TRUTHY"), "value=%q", v)
 	}
 }
+
+func TestHTTPReranker_LlamaCppDialect(t *testing.T) {
+	// llama.cpp llama-server: POST /v1/rerank {model, query, documents} ->
+	// {results: [{index, relevance_score}]}. Verify both the request shape
+	// and the response mapping.
+	var gotPath string
+	var gotBody llamaCppRerankRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"results": []map[string]any{
+				{"index": 1, "relevance_score": 0.87},
+				{"index": 0, "relevance_score": 0.12},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	rk := NewHTTPRerankerKind(srv.URL, "bge-reranker-v2-m3", RerankKindLlamaCpp, 2*time.Second)
+	out, err := rk.Rerank(context.Background(), "q", []string{"a", "b"})
+	require.NoError(t, err)
+	assert.Equal(t, "/v1/rerank", gotPath)
+	assert.Equal(t, "q", gotBody.Query)
+	assert.Equal(t, []string{"a", "b"}, gotBody.Documents)
+	require.Len(t, out, 2)
+	assert.Equal(t, 1, out[0].Index)
+	assert.InDelta(t, 0.87, out[0].Score, 0.001)
+	assert.Equal(t, 0, out[1].Index)
+}
+
+func TestHTTPReranker_UnknownKindFallsBackToTEI(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/rerank", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]tEIRerankResponse{{Index: 0, Score: 1}})
+	}))
+	defer srv.Close()
+	rk := NewHTTPRerankerKind(srv.URL, "m", "bogus-kind", 2*time.Second)
+	out, err := rk.Rerank(context.Background(), "q", []string{"a"})
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+}
