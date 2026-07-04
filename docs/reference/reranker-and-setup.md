@@ -1,4 +1,4 @@
-<!-- Verified against code at SAGE v11 (branch v11-dev, commit c568c7f). Cite file:line when behavior is non-obvious. -->
+<!-- Verified against code at SAGE v11.0.0 (release commit 8cb40f9). Cite file:line when behavior is non-obvious. -->
 
 # SAGE Local Engines and First-Run Setup Reference (v11)
 
@@ -361,7 +361,7 @@ this column.
 time via `SupplementaryData.EmbeddingProvider` (`internal/memory/model.go:92-96`).
 Without it, every new memory would land at `embedding_provider = ''` and the dashboard
 would forever count it as "needs re-embed" even though its vector is already semantic
-(commit `c568c7f`).
+(v11.0.0 release behavior).
 
 - **Where the stamp is computed:** `Server.embedderStampFor(emb)` returns the semantic
   embedder's `Named` id (e.g. `"ollama"`) when one is active and the submission carries

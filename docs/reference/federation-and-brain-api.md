@@ -1,8 +1,8 @@
-<!-- Verified against code on branch v11-dev (v11.0). Cite file:line when behavior is non-obvious. This doc covers the NEW v11 surface only; the v8.1.1-pinned rest-api.md still governs the core /v1/* endpoints. -->
+<!-- Verified against code at SAGE v11.0.0 (release commit 8cb40f9). Cite file:line when behavior is non-obvious. This doc covers the NEW v11 surface only; the v8.1.1-pinned rest-api.md still governs the core /v1/* endpoints. -->
 
 # SAGE Federation and Brain HTTP API Reference (v11)
 
-v11 adds two independent HTTP surfaces:
+v11 adds two independent HTTP surfaces. The v11.0 federation transport assumes the two nodes are reachable by address - normally the same LAN, a VPN, or a tunnel the operator controls. Built-in internet/NAT traversal is planned for v11.5, not provided by the v11.0 listener.
 
 1. **Cross-network federation** - a read-only recall exchange between two independent SAGE chains, plus a guided TOTP JOIN ceremony to establish the agreement. This spans three listeners: a dedicated peer-facing mTLS listener (`/fed/v1/*`), the node operator's REST control surface (`/v1/federation/*`), and a cookie-authed dashboard proxy (`/v1/dashboard/federation/*`).
 2. **The brain as a tool** - the memory "train of thought" endpoint (`GET /v1/dashboard/memory/{id}/related`) that powers the MRI click-to-explore board.

@@ -1,4 +1,4 @@
-Verified against SDK source at SAGE v11.0.0 (branch v11-dev, commit 904263c). Package: sage-agent-sdk.
+Verified against SDK source at SAGE v11.0.0 (release commit 8cb40f9). Package: sage-agent-sdk.
 
 # SAGE Python SDK Reference
 

@@ -1,4 +1,4 @@
-<!-- Verified against code at SAGE v8.1.1 (commit 2ca50ba). EXCEPTION: concepts/consensus-confidence-decay.md re-verified at v8.4.0 (PoE weight system through the app-v2…app-v5 forks). The REST/SDK/MCP surface was unchanged across v8.2–v8.5; the v8.1.1 pin reflects their last full re-verification, not stale behavior. v8.5/app-v6 added upgrade-machinery propose/revert guards only — no PoE or REST/SDK change. v8.6.0 added three additive, backward-compatible fields to GET /v1/agent/me and the AgentProfile model — `corr_count`, `domain_expertise`, and an on-chain-sourced `accuracy` — now reflected in rest-api.md, python-sdk.md, and openapi.yaml. (rest-api.md GET /health corrected at v8.5.0: no `version` field — intentionally omitted to avoid version-fingerprinting.) v11 (branch v11-dev, commit c568c7f) added two v11-scoped docs verified against that tree: `federation-and-brain-api.md` (federation + brain) and `reranker-and-setup.md` (managed reranker, onboarding, recall clamps, `embedding_provider` stamping); `environment-variables.md` gained `SAGE_RERANK_KIND` and refreshed the `SAGE_RERANK_*` line citations. The v8.1.1 pin still governs the pre-v11 REST/SDK/MCP surface, which v11 did not change. -->
+<!-- Reference index reconciled for SAGE v11.0.0 (release commit 8cb40f9). Core legacy REST/MCP/concepts references retain their last full code-verification headers (mostly v8.1.1, with PoE rechecks at v8.5.0) when those surfaces did not change. v11.0.0 adds/re-verifies `python-sdk.md`, `federation-and-brain-api.md`, and `reranker-and-setup.md`; `environment-variables.md` carries the v11 reranker additions. -->
 
 
 # SAGE Reference — Agent Integration Index
@@ -80,11 +80,11 @@ All authenticated REST endpoints use an Ed25519 signed-request scheme. The signe
 
 ---
 
-## Related docs (reconciled to v8.1.1)
+## Related docs (reconciled through v11.0.0)
 
 These were stale earlier in v8 and have now been reconciled against the code. Where any of them still disagrees with this reference, this reference wins.
 
-- **`api/openapi.yaml`** — the machine-readable spec, now reconciled to v8.1.1 (70 operations matching `server.go`; `classification` added to `MemorySubmitRequest`; `MemoryType` gained `task`; `VoteResponse` uses `tx_hash`; clearance-0 labeled PUBLIC; `/v1/agent/register` documents 201-new / 200-idempotent). [`rest-api.md`](rest-api.md) remains the human-readable narrative. *(A few org/federation/dept GET responses are typed as generic objects — their store models live outside the REST package; fill in later if needed.)*
+- **`api/openapi.yaml`** — the machine-readable spec, reconciled to the core REST surface (70 operations matching `server.go`; `classification` added to `MemorySubmitRequest`; `MemoryType` gained `task`; `VoteResponse` uses `tx_hash`; clearance-0 labeled PUBLIC; `/v1/agent/register` documents 201-new / 200-idempotent). [`rest-api.md`](rest-api.md) remains the human-readable narrative. *(A few org/federation/dept GET responses are typed as generic objects — their store models live outside the REST package; fill in later if needed.)*
 - **`docs/ARCHITECTURE.md`** — accurate: it documents *both* the operational and data-classification meanings of the 0–4 integer, and treats BadgerDB as authoritative with SQLite as legacy fallback. Documents PoE-weighted quorum (Phase 2, live since v8.2/`app-v3` and complete through v8.4/`app-v5`): post-fork blocks weight each vote by the validator's demonstrated PoE track record; the equal-weight (1.0) branch is retained only for pre-fork byte-identical replay. For precise per-record gate logic with file:line, prefer [`concepts/`](concepts/).
 - **`sdk/python/README.md`** — reconciled: signing docs now include the nonce/`X-Nonce`, `propose()` documents `classification`, and `hybrid()`/`forget()`/`list_orgs_by_name()` are in the tables. [`python-sdk.md`](python-sdk.md) is the fuller reference.
 
@@ -92,6 +92,7 @@ These were stale earlier in v8 and have now been reconciled against the code. Wh
 
 ## How this reference stays honest
 
-Each file carries a `Verified against … v8.1.1 (commit 2ca50ba)` header. The documents are derived
+Each file carries its own `Verified against …` header. Some stable legacy surfaces intentionally
+retain older verification pins; v11-specific files carry v11 headers. The documents are derived
 from — and cite — the actual code, not aspirational design. When the code changes, re-verify the
 affected file and bump its header. **Never document a feature that isn't in the code yet.**
