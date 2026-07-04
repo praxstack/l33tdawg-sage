@@ -668,6 +668,24 @@ export async function deprecateUnreadable() {
     if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || `HTTP ${res.status}`); }
     return res.json();
 }
+// recoverOrphansPreview: how many unreadable memories the given OLD recovery key
+// can decrypt (dry run, no mutation). recoverOrphans: actually re-key them.
+export async function recoverOrphansPreview(recoveryKey) {
+    const res = await fetch(`${API_BASE}/v1/dashboard/embeddings/recover-preview`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ recovery_key: recoveryKey }),
+    });
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || `HTTP ${res.status}`); }
+    return res.json();
+}
+export async function recoverOrphans(recoveryKey) {
+    const res = await fetch(`${API_BASE}/v1/dashboard/embeddings/recover`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ recovery_key: recoveryKey }),
+    });
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || `HTTP ${res.status}`); }
+    return res.json();
+}
 // getRecoveryKey re-displays the vault recovery key after re-verifying the passphrase
 // (the "back up my recovery key" path). Passphrase never stored; sent once per view.
 export async function getRecoveryKey(passphrase) {

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/l33tdawg/sage/internal/memory"
+	"github.com/l33tdawg/sage/internal/vault"
 )
 
 // ValidationVote represents a validator's vote on a memory.
@@ -127,6 +128,9 @@ type MemoryStore interface {
 	MarkMemoryEmbeddingError(ctx context.Context, memoryID string) error
 	// DeprecateUnreadableMemories soft-deprecates all unreadable ('skipped') memories.
 	DeprecateUnreadableMemories(ctx context.Context) (int, error)
+	// RekeyUnreadableMemories decrypts unreadable memories with an old vault and
+	// re-encrypts them under the live vault in place (dryRun counts only).
+	RekeyUnreadableMemories(ctx context.Context, oldVault *vault.Vault, dryRun bool) (int, error)
 	// ResetErroredEmbeddings clears the 'error' tag back to '' so failed embeds retry.
 	ResetErroredEmbeddings(ctx context.Context) (int, error)
 	UpdateStatus(ctx context.Context, memoryID string, status memory.MemoryStatus, now time.Time) error

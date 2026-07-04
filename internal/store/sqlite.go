@@ -925,7 +925,10 @@ func (s *SQLiteStore) UpdateMemoryEmbedding(ctx context.Context, memoryID string
 // tag (embedding_provider column; empty string = not yet tagged / needs
 // re-embedding). Used by the embeddings-setup status.
 func (s *SQLiteStore) CountMemoriesByProvider(ctx context.Context) (map[string]int, error) {
-	rows, err := s.conn.QueryContext(ctx, `SELECT COALESCE(embedding_provider, ''), COUNT(*) FROM memories GROUP BY embedding_provider`)
+	// Exclude deprecated memories — they're hidden from all of CEREBRUM (audit-only
+	// in the DB), so they must never inflate the embeddings accounting (needs
+	// re-embed / unreadable / on-ollama).
+	rows, err := s.conn.QueryContext(ctx, `SELECT COALESCE(embedding_provider, ''), COUNT(*) FROM memories WHERE status != 'deprecated' GROUP BY embedding_provider`)
 	if err != nil {
 		return nil, err
 	}
@@ -960,8 +963,12 @@ type ReembedItem struct {
 // failure is tolerated (Decryptable=false), never fatal, matching every other
 // list path in this store.
 func (s *SQLiteStore) ListMemoriesForReembed(ctx context.Context, limit int) ([]ReembedItem, error) {
+	// Skip deprecated memories: they're hidden from every view and never
+	// searched, so embedding them is wasted work (and would keep failing on
+	// undecryptable-but-deprecated rows). They stay untagged; the status counts
+	// below also exclude them so they never inflate "needs re-embedding".
 	rows, err := s.conn.QueryContext(ctx,
-		`SELECT memory_id, content FROM memories WHERE COALESCE(embedding_provider, '') = '' ORDER BY created_at ASC, memory_id ASC LIMIT ?`,
+		`SELECT memory_id, content FROM memories WHERE COALESCE(embedding_provider, '') = '' AND status != 'deprecated' ORDER BY created_at ASC, memory_id ASC LIMIT ?`,
 		limit)
 	if err != nil {
 		return nil, err
@@ -1025,6 +1032,71 @@ func (s *SQLiteStore) MarkMemoryEmbeddingError(ctx context.Context, memoryID str
 	_, err := s.writeExecContext(ctx,
 		`UPDATE memories SET embedding_provider = 'error' WHERE memory_id = ?`, memoryID)
 	return err
+}
+
+// RekeyUnreadableMemories recovers memories orphaned by a past vault re-init. It
+// walks the unreadable ('skipped') set, decrypts each memory's content with the
+// supplied OLD vault (built in-memory from an old recovery key), and — unless
+// dryRun — re-encrypts it with the LIVE vault in place and clears embedding_provider
+// so it re-embeds. Only content changes; content_hash is plaintext-derived so it
+// (and the on-chain hash) stays identical, and agent/domain/timestamps are
+// untouched. Memories the old key can't decrypt are left as-is (try another key).
+// Returns how many were (or would be) recovered. Requires the live vault unlocked.
+func (s *SQLiteStore) RekeyUnreadableMemories(ctx context.Context, oldVault *vault.Vault, dryRun bool) (int, error) {
+	if s.vault == nil {
+		return 0, fmt.Errorf("live vault is locked — unlock before recovering")
+	}
+	// Snapshot the candidate rows first (don't UPDATE while a query is open on the
+	// same connection).
+	// Only recover VISIBLE unreadable memories — deprecated ones are audit-only and
+	// staying hidden, so re-keying them would be pointless (they'd remain hidden).
+	rows, err := s.conn.QueryContext(ctx, `SELECT memory_id, content FROM memories WHERE embedding_provider = 'skipped' AND status != 'deprecated'`)
+	if err != nil {
+		return 0, err
+	}
+	type cand struct{ id, content string }
+	var cands []cand
+	for rows.Next() {
+		var c cand
+		if scanErr := rows.Scan(&c.id, &c.content); scanErr != nil {
+			rows.Close()
+			return 0, scanErr
+		}
+		cands = append(cands, c)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	recovered := 0
+	for _, c := range cands {
+		if !strings.HasPrefix(c.content, encPrefix) {
+			continue // not encrypted — nothing an old key can do
+		}
+		raw, decErr := base64.StdEncoding.DecodeString(strings.TrimPrefix(c.content, encPrefix))
+		if decErr != nil {
+			continue
+		}
+		plaintext, dErr := oldVault.DecryptString(raw)
+		if dErr != nil {
+			continue // this old key does not decrypt this memory — leave for another key
+		}
+		recovered++
+		if dryRun {
+			continue
+		}
+		reEnc, encErr := s.encryptContent(plaintext) // re-encrypt under the LIVE vault
+		if encErr != nil {
+			return recovered, encErr
+		}
+		if _, upErr := s.writeExecContext(ctx,
+			`UPDATE memories SET content = ?, embedding_provider = '' WHERE memory_id = ?`,
+			reEnc, c.id); upErr != nil {
+			return recovered, upErr
+		}
+	}
+	return recovered, nil
 }
 
 // DeprecateUnreadableMemories soft-deprecates every memory tagged unreadable
@@ -1271,7 +1343,9 @@ func (s *SQLiteStore) SearchByText(ctx context.Context, query string, opts Query
 		sqlStr += " AND m.confidence_score >= ?"
 		args = append(args, opts.MinConfidence)
 	}
-	if opts.StatusFilter != "" {
+	if opts.StatusFilter == "active" {
+		sqlStr += " AND m.status != 'deprecated'" // audit-only deprecated memories never surface in search
+	} else if opts.StatusFilter != "" {
 		sqlStr += " AND m.status = ?"
 		args = append(args, opts.StatusFilter)
 	}
@@ -1656,7 +1730,15 @@ func (s *SQLiteStore) ListMemories(ctx context.Context, opts ListOptions) ([]*me
 		countQuery += filter
 		args = append(args, opts.Provider)
 	}
-	if opts.Status != "" {
+	switch {
+	case opts.Status == "active":
+		// "active" = everything EXCEPT deprecated. Deprecated memories are
+		// audit-only and must not surface in normal CEREBRUM browse/search. This
+		// is opt-IN (only the human browse UI passes it), so internal callers with
+		// an empty Status — export/backup, counts, dedup — still see all statuses.
+		query += " AND status != 'deprecated'"
+		countQuery += " AND status != 'deprecated'"
+	case opts.Status != "":
 		filter := " AND status = ?"
 		query += filter
 		countQuery += filter

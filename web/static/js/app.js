@@ -2,7 +2,7 @@
 import { SSEClient } from './sse.js';
 import { fetchStats, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, fetchValidators, fetchMcpConfig, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchReranker, saveReranker, testReranker, fetchTasks, updateTaskStatus, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken, connectProvider, connectRemoteUrl,
 embeddingsStatus, checkOllamaEmbed, pullEmbedModel, reembedMemories, reembedProgress, enableSemanticEmbeddings,
-deprecateUnreadable, getRecoveryKey,
+deprecateUnreadable, getRecoveryKey, recoverOrphansPreview, recoverOrphans,
 joinHostInterfaces, enableNetworkMode, joinHostStart, joinHostStatus, joinHostApprove, joinHostAbort,
 joinGuestStart, joinGuestStatus, joinGuestCancel, joinGuestRestart,
 fedConnections, fedRevoke, fedPeerStatus, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestConfirm } from './api.js';
@@ -2089,7 +2089,7 @@ function SearchPage({ onSelectMemory }) {
     const [domains, setDomains] = useState([]);
     const [tagFilter, setTagFilter] = useState('');
     const [allTags, setAllTags] = useState([]);
-    const [statusFilter, setStatusFilter] = useState('');
+    const [statusFilter, setStatusFilter] = useState('active'); // 'active' hides deprecated (audit-only) by default
     const [selected, setSelected] = useState(() => new Set());
     const [bulkDomain, setBulkDomain] = useState('');
     const [bulkTag, setBulkTag] = useState('');
@@ -2196,10 +2196,10 @@ function SearchPage({ onSelectMemory }) {
                     ${domains.map(d => html`<option value=${d}>${d}</option>`)}
                 </select>
                 <select class="filter-select" value=${statusFilter} onChange=${handleStatusFilter} title="Filter by memory lifecycle status">
-                    <option value="">All statuses</option>
+                    <option value="active">All (active)</option>
                     <option value="committed">Committed</option>
                     <option value="proposed">Proposed</option>
-                    <option value="deprecated">Deprecated</option>
+                    <option value="deprecated">Deprecated (audit)</option>
                 </select>
                 ${allTags.length > 0 && html`
                     <select class="filter-select" value=${tagFilter} onChange=${handleTagFilter}>
@@ -2271,7 +2271,7 @@ function SearchPage({ onSelectMemory }) {
                             headline="No memories match"
                             hint="Full-text search across your whole memory base by content or domain. Try a shorter or different term, or clear the filters."
                             actionLabel="Clear search"
-                            onAction=${() => { setQuery(''); setAgentFilter(''); setDomainFilter(''); setTagFilter(''); setStatusFilter(''); clearSelection(); loadMemories('', '', '', '', ''); }} />`
+                            onAction=${() => { setQuery(''); setAgentFilter(''); setDomainFilter(''); setTagFilter(''); setStatusFilter('active'); clearSelection(); loadMemories('', '', '', '', 'active'); }} />`
                         : html`<${EmptyState} icon="brain"
                             headline="No memories yet"
                             hint="Your brain is empty. Import an existing memory export or connect an agent over MCP, and committed memories will show up here to search."
@@ -3405,6 +3405,87 @@ function CleanupSettings() {
 // Settings Page
 // ============================================================================
 
+// UnreadableMemoriesPanel — manage memories that couldn't be read (encrypted with
+// a PREVIOUS vault key). Two paths: RECOVER (re-key in place with an old recovery
+// key — keeps everything, best when you have the key) or DEPRECATE (hide them).
+// One key per recover pass; re-run with another key for whatever remains. Renders
+// nothing when there's nothing unreadable and no action was taken.
+function UnreadableMemoriesPanel({ status, onChange, onBusy }) {
+    const [mode, setMode] = useState('actions'); // actions | recover
+    const [recoveryKey, setRecoveryKey] = useState('');
+    const [preview, setPreview] = useState(null); // { decryptable }
+    const [busy, setBusy] = useState(false);
+    const [err, setErr] = useState(null);
+    const [result, setResult] = useState(null); // { recovered, remaining } | { deprecated }
+
+    // Surface busy to the parent so it can block a concurrent Finish & restart
+    // (which would truncate an in-flight recover).
+    useEffect(() => { if (onBusy) onBusy(busy); }, [busy]);
+
+    const unreadable = status?.unreadable || 0;
+    // Prefer the server's authoritative post-action count once an action has run.
+    const remaining = result && result.remaining !== undefined ? result.remaining : unreadable;
+    if (unreadable === 0 && !result) return null;
+
+    const doPreview = async () => {
+        if (!recoveryKey.trim()) { setErr('Paste an old recovery key first.'); return; }
+        setBusy(true); setErr(null); setPreview(null);
+        try { setPreview(await recoverOrphansPreview(recoveryKey.trim())); }
+        catch (e) { setErr(e.message || String(e)); }
+        setBusy(false);
+    };
+    const doRecover = async () => {
+        setBusy(true); setErr(null);
+        try {
+            const r = await recoverOrphans(recoveryKey.trim());
+            setResult({ recovered: r.recovered, remaining: r.remaining_unreadable }); // authoritative server count
+            setRecoveryKey(''); setPreview(null); setMode('actions');
+            if (onChange) onChange();
+        } catch (e) { setErr(e.message || String(e)); }
+        setBusy(false);
+    };
+    const doDeprecate = async () => {
+        setBusy(true); setErr(null);
+        try {
+            const r = await deprecateUnreadable();
+            setResult({ deprecated: r.deprecated, remaining: 0 }); // deprecating hides the whole unreadable set
+            if (onChange) onChange();
+        } catch (e) { setErr(e.message || String(e)); }
+        setBusy(false);
+    };
+
+    return html`
+        <div class="warning-banner" style="margin:10px 0;font-size:12px;text-align:left;">
+            ${result ? html`
+                <div style="color:var(--text-dim);">
+                    ${result.recovered !== undefined
+                        ? `✓ Recovered ${result.recovered} memor${result.recovered === 1 ? 'y' : 'ies'} — re-encrypted with your current key and queued for re-embedding.${remaining > 0 ? ` ${remaining} still unreadable — re-run with another old key.` : ''}`
+                        : `✓ Deprecated ${result.deprecated} unreadable memor${result.deprecated === 1 ? 'y' : 'ies'} — hidden from view.`}
+                    ${remaining > 0 && html`<button class="btn" style="font-size:11px;padding:4px 10px;margin-top:8px;" onClick=${() => { setResult(null); setMode('actions'); }}>Handle the remaining ${remaining} →</button>`}
+                </div>
+            ` : mode === 'actions' ? html`
+                <div style="margin-bottom:8px;"><strong>${unreadable} memor${unreadable === 1 ? 'y' : 'ies'} couldn't be read.</strong> ${unreadable === 1 ? 'It was' : 'They were'} encrypted with a <em>previous</em> vault key.</div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <button class="btn btn-primary" style="font-size:12px;padding:6px 12px;" onClick=${() => { setMode('recover'); setErr(null); }}>Recover with an old key</button>
+                    <button class="btn" style="font-size:12px;padding:6px 12px;" onClick=${doDeprecate} disabled=${busy}>${busy ? 'Working…' : 'Deprecate (hide)'}</button>
+                </div>
+                <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">Recover re-reads them with an old recovery key and keeps everything (agent, dates, links). Deprecate just hides them — reversible, but the content stays unreadable.</div>
+            ` : html`
+                <div style="margin-bottom:6px;">Paste an <strong>old recovery key</strong> from a previous vault. SAGE re-reads every memory it can decrypt, re-encrypts them with your current key, and re-embeds them. One key at a time.</div>
+                <textarea class="wizard-input" style="width:100%;font-family:monospace;font-size:11px;min-height:52px;" placeholder="base64 recovery key" value=${recoveryKey} disabled=${busy} onInput=${e => { setRecoveryKey(e.target.value); setPreview(null); }}></textarea>
+                ${preview && html`<div style="font-size:12px;color:var(--accent);margin:6px 0;">This key can recover <strong>${preview.decryptable}</strong> of ${unreadable}.</div>`}
+                <div style="display:flex;gap:8px;margin-top:6px;">
+                    ${!preview
+                        ? html`<button class="btn btn-primary" style="font-size:12px;padding:6px 12px;" onClick=${doPreview} disabled=${busy || !recoveryKey.trim()}>${busy ? 'Checking…' : 'Check this key'}</button>`
+                        : html`<button class="btn btn-primary" style="font-size:12px;padding:6px 12px;" onClick=${doRecover} disabled=${busy || preview.decryptable === 0}>${busy ? 'Recovering…' : `Recover ${preview.decryptable}`}</button>`}
+                    <button class="btn" style="font-size:12px;padding:6px 12px;" onClick=${() => { setMode('actions'); setPreview(null); setRecoveryKey(''); setErr(null); }}>Cancel</button>
+                </div>
+            `}
+            ${err && html`<div class="import-error" style="margin-top:8px;">${err}</div>`}
+        </div>
+    `;
+}
+
 // EmbeddingsSetupModal — turn on SAGE's bundled semantic memory (Ollama +
 // nomic-embed-text). Walks a non-technical operator through: detect Ollama →
 // download the model if missing → re-embed existing memories (progress) → switch
@@ -3423,9 +3504,9 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
     const [enabling, setEnabling] = useState(false);
     const [warn, setWarn] = useState(null); // non-blocking notice (e.g. partial re-embed failures)
     const [skipped, setSkipped] = useState(0); // memories that couldn't be read/embedded (this run)
-    const [deprecating, setDeprecating] = useState(false);
-    const [deprecatedCount, setDeprecatedCount] = useState(null); // set after a deprecate action
-    const busy = pulling || reembedding || enabling || deprecating;
+    const [panelBusy, setPanelBusy] = useState(false); // UnreadableMemoriesPanel recover/deprecate in flight
+    const busy = pulling || reembedding || enabling;
+    const refreshStatus = () => { embeddingsStatus().then(setStatus).catch(() => {}); };
 
     useEffect(() => {
         (async () => {
@@ -3519,17 +3600,6 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
         catch (e) { setErr(e.message); setEnabling(false); }
     };
 
-    const doDeprecate = async () => {
-        setDeprecating(true); setErr(null);
-        try {
-            const r = await deprecateUnreadable();
-            setDeprecatedCount(r.deprecated || 0);
-            const s = await embeddingsStatus().catch(() => null); // refresh: unreadable -> 0
-            if (s) setStatus(s);
-        } catch (e) { setErr(e.message || String(e)); }
-        setDeprecating(false);
-    };
-
     const pct = prog && prog.total > 0 ? Math.round((prog.done / prog.total) * 100) : 0;
 
     return html`
@@ -3594,20 +3664,23 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
                             <div style="font-size:34px;margin-bottom:6px;">✓</div>
                             <h3 style="margin:0 0 8px;color:var(--accent-green);">Memories re-read</h3>
                             <p style="color:var(--text-dim);">Last step: switch SAGE over to smart memory. It restarts briefly (about 10-20s) — unlock the vault when it's back.</p>
-                            ${status?.unreadable > 0 && deprecatedCount === null && html`<div class="warning-banner" style="margin:10px 0;font-size:12px;text-align:left;">
-                                <div style="margin-bottom:8px;"><strong>${status.unreadable} memor${status.unreadable === 1 ? 'y' : 'ies'} couldn't be read.</strong> ${status.unreadable === 1 ? 'It was' : 'They were'} encrypted with a <em>previous</em> vault key (from before your encryption was re-initialised), so ${status.unreadable === 1 ? "it can't" : "they can't"} be decrypted with your current key — no embedder can fix that. Recovering the old key would only strand your current memories instead, so the practical cleanup is to deprecate ${status.unreadable === 1 ? 'it' : 'them'} (hidden from view, not hard-deleted — reversible).</div>
-                                <button class="btn" style="font-size:12px;padding:6px 12px;" onClick=${doDeprecate} disabled=${deprecating}>${deprecating ? 'Deprecating…' : `Deprecate the ${status.unreadable} unreadable memor${status.unreadable === 1 ? 'y' : 'ies'}`}</button>
-                            </div>`}
-                            ${deprecatedCount !== null && html`<div style="margin:10px 0;font-size:12px;color:var(--text-dim);text-align:left;">✓ Deprecated ${deprecatedCount} unreadable memor${deprecatedCount === 1 ? 'y' : 'ies'} — hidden from view. You can back up your <em>current</em> recovery key anytime in Settings → Synaptic Ledger.</div>`}
-                            <button class="btn btn-primary" onClick=${doEnable} disabled=${enabling || deprecating}>${enabling ? 'Switching…' : 'Finish & restart'}</button>
+                            <${UnreadableMemoriesPanel} status=${status} onChange=${refreshStatus} onBusy=${setPanelBusy} />
+                            <button class="btn btn-primary" onClick=${doEnable} disabled=${enabling || panelBusy} title=${panelBusy ? 'Finish the recovery first' : ''}>${enabling ? 'Switching…' : 'Finish & restart'}</button>
                         </div>
                     `}
 
                     ${!loading && step === 'done' && html`
-                        <div style="text-align:center;padding:12px 0;">
-                            <div style="font-size:38px;margin-bottom:8px;">🧠</div>
-                            <h3 style="margin:0 0 8px;color:var(--accent-green);">Smart memory is ${enabling ? 'turning on' : 'on'}</h3>
-                            <p style="color:var(--text-dim);">${status?.is_semantic ? 'This node is already using semantic search.' : 'SAGE is restarting to finish. Unlock the vault when it returns, and semantic search will be live.'}</p>
+                        <div style="padding:12px 0;">
+                            <div style="text-align:center;">
+                                <div style="font-size:38px;margin-bottom:8px;">🧠</div>
+                                <h3 style="margin:0 0 8px;color:var(--accent-green);">Smart memory is ${enabling ? 'turning on' : 'on'}</h3>
+                                <p style="color:var(--text-dim);">${status?.is_semantic ? 'This node is using semantic search.' : 'SAGE is restarting to finish. Unlock the vault when it returns, and semantic search will be live.'}</p>
+                            </div>
+                            ${/* Only offer recover/deprecate when the node is actually up + unlocked — after
+                                a Finish&restart the node is mid-reboot with the vault locked, so the panel's
+                                buttons would all error. In that path is_semantic is still false (config not yet
+                                reloaded); the Settings "Review →" CTA picks it up once the node returns. */''}
+                            ${status?.is_semantic && !status?.vault_locked && html`<${UnreadableMemoriesPanel} status=${status} onChange=${refreshStatus} onBusy=${setPanelBusy} />`}
                         </div>
                     `}
 
@@ -3615,7 +3688,7 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
                     ${err && html`<div class="import-error" style="margin-top:14px;">${err}</div>`}
                 </div>
                 <div class="wizard-footer">
-                    <button class="btn" onClick=${() => { if (busy) return; if (onDone) onDone(); onClose(); }} disabled=${busy}>${step === 'done' ? 'Done' : 'Close'}</button>
+                    <button class="btn" onClick=${() => { if (busy || panelBusy) return; if (onDone) onDone(); onClose(); }} disabled=${busy || panelBusy}>${step === 'done' ? 'Done' : 'Close'}</button>
                 </div>
             </div>
         </div>
@@ -3914,12 +3987,14 @@ function SettingsPage() {
                             <h3>System Status</h3>
                             <div class="settings-row"><span class="label">${statusDot(true)} SAGE</span><span class="value" style="color:#10b981">Running</span></div>
                             <div class="settings-row"><span class="label">${statusDot(embedderStatus.online)} ${embedderStatus.displayName}</span><span class="value" style="color: ${embedderStatus.online ? '#10b981' : '#6b7280'}" title="${embedderStatus.detail || ''}">${embedderStatus.online ? (embedderStatus.detail ? embedderStatus.detail : 'Connected') : 'Offline'}</span></div>
-                            ${(embedderStatus.provider === 'hash' || (embStatus && embStatus.need_reembed > 0)) && html`
+                            ${(embedderStatus.provider === 'hash' || (embStatus && (embStatus.need_reembed > 0 || embStatus.unreadable > 0))) && html`
                                 <div class="settings-row" style="align-items:center;">
                                     <span class="label" style="color:var(--text-dim);font-size:12px;">${embedderStatus.provider === 'hash'
                                         ? 'Only keyword matching is on — turn on semantic (meaning-based) search.'
-                                        : `${embStatus.need_reembed} memor${embStatus.need_reembed === 1 ? 'y' : 'ies'} still need re-reading to be searchable by meaning.`}</span>
-                                    <button class="btn btn-primary" style="padding:6px 14px;font-size:12px;" onClick=${() => setShowEmbedSetup(true)}>${embedderStatus.provider === 'hash' ? 'Turn on smart memory →' : 'Finish setup →'}</button>
+                                        : embStatus.need_reembed > 0
+                                            ? `${embStatus.need_reembed} memor${embStatus.need_reembed === 1 ? 'y' : 'ies'} still need re-reading to be searchable by meaning.`
+                                            : `${embStatus.unreadable} memor${embStatus.unreadable === 1 ? 'y' : 'ies'} couldn't be read (old vault key) — recover or hide ${embStatus.unreadable === 1 ? 'it' : 'them'}.`}</span>
+                                    <button class="btn btn-primary" style="padding:6px 14px;font-size:12px;" onClick=${() => setShowEmbedSetup(true)}>${embedderStatus.provider === 'hash' ? 'Turn on smart memory →' : embStatus.need_reembed > 0 ? 'Finish setup →' : 'Review →'}</button>
                                 </div>
                             `}
                             <div class="settings-row"><span class="label">${statusDot(encrypted)} Synaptic Ledger Encryption</span><span class="value" style="color: ${encrypted ? '#10b981' : '#6b7280'}">${encrypted ? 'AES-256-GCM' : 'Off'}</span></div>

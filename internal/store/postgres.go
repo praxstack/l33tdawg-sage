@@ -16,6 +16,7 @@ import (
 	"github.com/pgvector/pgvector-go"
 
 	"github.com/l33tdawg/sage/internal/memory"
+	"github.com/l33tdawg/sage/internal/vault"
 )
 
 // pgxDB is satisfied by both *pgxpool.Pool and pgx.Tx, allowing
@@ -273,6 +274,10 @@ func (s *PostgresStore) DeprecateUnreadableMemories(_ context.Context) (int, err
 
 func (s *PostgresStore) ResetErroredEmbeddings(_ context.Context) (int, error) {
 	return 0, fmt.Errorf("ResetErroredEmbeddings not implemented for PostgresStore")
+}
+
+func (s *PostgresStore) RekeyUnreadableMemories(_ context.Context, _ *vault.Vault, _ bool) (int, error) {
+	return 0, fmt.Errorf("RekeyUnreadableMemories not implemented for PostgresStore")
 }
 
 func (s *PostgresStore) GetMemory(ctx context.Context, memoryID string) (*memory.MemoryRecord, error) {

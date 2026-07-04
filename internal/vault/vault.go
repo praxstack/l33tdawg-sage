@@ -276,6 +276,30 @@ func (v *Vault) RecoveryKey() (string, error) {
 	return base64.StdEncoding.EncodeToString(v.dataKey), nil
 }
 
+// FromDataKey builds an IN-MEMORY vault directly from a base64 recovery key (the
+// raw data key) WITHOUT reading or writing any key file. Use it to decrypt content
+// encrypted under a DIFFERENT (e.g. previous) data key — for example, recovering
+// memories orphaned by a past vault re-init — without disturbing the live on-disk
+// vault. The key lives only in memory for the lifetime of the returned *Vault.
+func FromDataKey(recoveryKeyB64 string) (*Vault, error) {
+	dataKey, err := base64.StdEncoding.DecodeString(recoveryKeyB64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid recovery key: %w", err)
+	}
+	if len(dataKey) != argonKeyLen {
+		return nil, fmt.Errorf("invalid recovery key length: got %d, want %d", len(dataKey), argonKeyLen)
+	}
+	block, err := aes.NewCipher(dataKey)
+	if err != nil {
+		return nil, fmt.Errorf("create cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("create GCM: %w", err)
+	}
+	return &Vault{gcm: gcm, dataKey: dataKey}, nil
+}
+
 // InitFromRecoveryKey re-initializes the vault from a recovery key.
 // This allows password reset without losing encrypted data.
 func InitFromRecoveryKey(keyFilePath, recoveryKeyB64, newPassphrase string) error {

@@ -1336,3 +1336,136 @@ func TestDeprecateUnreadableMemories(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 0, n2, "idempotent — nothing left to deprecate")
 }
+
+// TestRekeyUnreadableMemories verifies orphaned-memory recovery: a memory
+// encrypted under an OLD vault key, unreadable after a re-init to a NEW key, is
+// decrypted with the old key and re-encrypted under the live key in place —
+// preserving content, content_hash, and agent attribution.
+func TestRekeyUnreadableMemories(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+
+	// Vault A (original). Insert a memory encrypted under it.
+	keyA := filepath.Join(dir, "a.key")
+	require.NoError(t, vault.Init(keyA, "passphrase-a"))
+	vA, err := vault.Open(keyA, "passphrase-a")
+	require.NoError(t, err)
+	recoveryA, err := vA.RecoveryKey()
+	require.NoError(t, err)
+	s.SetVault(vA)
+
+	rec := testMemory("orphan", "claude-code", "secret notes from the old vault", "general")
+	origHash := rec.ContentHash
+	require.NoError(t, s.InsertMemory(ctx, rec))
+
+	// Re-init to a DIFFERENT key B — the memory is now undecryptable.
+	keyB := filepath.Join(dir, "b.key")
+	require.NoError(t, vault.Init(keyB, "passphrase-b"))
+	vB, err := vault.Open(keyB, "passphrase-b")
+	require.NoError(t, err)
+	s.SetVault(vB)
+
+	items, err := s.ListMemoriesForReembed(ctx, 100)
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+	require.False(t, items[0].Decryptable, "content must be undecryptable under the new key")
+	require.NoError(t, s.MarkMemoryEmbeddingSkipped(ctx, "orphan"))
+
+	oldV, err := vault.FromDataKey(recoveryA)
+	require.NoError(t, err)
+
+	// Dry run counts without mutating.
+	n, err := s.RekeyUnreadableMemories(ctx, oldV, true)
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+	counts, _ := s.CountMemoriesByProvider(ctx)
+	require.Equal(t, 1, counts["skipped"], "dry run must not mutate")
+
+	// A wrong key recovers nothing.
+	keyC := filepath.Join(dir, "c.key")
+	require.NoError(t, vault.Init(keyC, "passphrase-c"))
+	vC, _ := vault.Open(keyC, "passphrase-c")
+	rcC, _ := vC.RecoveryKey()
+	wrongV, _ := vault.FromDataKey(rcC)
+	nWrong, err := s.RekeyUnreadableMemories(ctx, wrongV, false)
+	require.NoError(t, err)
+	require.Equal(t, 0, nWrong, "a non-matching key recovers nothing and mutates nothing")
+
+	// Actual recovery with the right old key.
+	n, err = s.RekeyUnreadableMemories(ctx, oldV, false)
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+
+	got, err := s.GetMemory(ctx, "orphan")
+	require.NoError(t, err)
+	require.Equal(t, "secret notes from the old vault", got.Content, "readable under the live vault after re-key")
+	require.Equal(t, "claude-code", got.SubmittingAgent, "submitting agent preserved")
+	require.Equal(t, origHash, got.ContentHash, "content_hash (and on-chain hash) unchanged")
+	counts, _ = s.CountMemoriesByProvider(ctx)
+	require.Equal(t, 0, counts["skipped"], "recovered memory left the unreadable set")
+	require.Equal(t, 1, counts[""], "and re-entered the re-embed work set")
+}
+
+// TestReembedExcludesDeprecated verifies deprecated memories (audit-only, hidden
+// from CEREBRUM) are excluded from the re-embed work set AND the embeddings
+// accounting — they must never be embedded or counted as "needs re-embedding".
+func TestReembedExcludesDeprecated(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, s.InsertMemory(ctx, testMemory("visible", "a", "visible content", "g")))
+	require.NoError(t, s.InsertMemory(ctx, testMemory("dep", "a", "deprecated content", "g")))
+	require.NoError(t, s.UpdateStatus(ctx, "dep", memory.StatusDeprecated, time.Now().UTC()))
+
+	items, err := s.ListMemoriesForReembed(ctx, 100)
+	require.NoError(t, err)
+	require.Len(t, items, 1, "deprecated memory must not be in the re-embed set")
+	require.Equal(t, "visible", items[0].MemoryID)
+
+	counts, err := s.CountMemoriesByProvider(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, counts[""], "only the visible untagged memory counts")
+
+	// A deprecated unreadable ('skipped') memory is also excluded from the actionable set.
+	require.NoError(t, s.InsertMemory(ctx, testMemory("depskip", "a", "gone", "g")))
+	require.NoError(t, s.MarkMemoryEmbeddingSkipped(ctx, "depskip"))
+	require.NoError(t, s.UpdateStatus(ctx, "depskip", memory.StatusDeprecated, time.Now().UTC()))
+	counts, _ = s.CountMemoriesByProvider(ctx)
+	require.Equal(t, 0, counts["skipped"], "deprecated unreadable memory is not actionable")
+}
+
+// TestListMemoriesActiveHidesDeprecated verifies the "active" status filter hides
+// deprecated (audit-only) memories, while empty status (export/internal) still
+// returns everything and explicit "deprecated" surfaces them for audit.
+func TestListMemoriesActiveHidesDeprecated(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	require.NoError(t, s.InsertMemory(ctx, testMemory("c", "a", "committed one", "g")))
+	require.NoError(t, s.UpdateStatus(ctx, "c", memory.StatusCommitted, now))
+	require.NoError(t, s.InsertMemory(ctx, testMemory("p", "a", "proposed one", "g")))
+	require.NoError(t, s.InsertMemory(ctx, testMemory("d", "a", "deprecated one", "g")))
+	require.NoError(t, s.UpdateStatus(ctx, "d", memory.StatusDeprecated, now))
+
+	active, _, err := s.ListMemories(ctx, ListOptions{Status: "active", Limit: 100})
+	require.NoError(t, err)
+	ids := map[string]bool{}
+	for _, m := range active {
+		ids[m.MemoryID] = true
+	}
+	require.True(t, ids["c"] && ids["p"], "active shows committed + proposed")
+	require.False(t, ids["d"], "active must NOT show deprecated")
+
+	// Empty status (export/internal) still returns everything, including deprecated.
+	all, _, err := s.ListMemories(ctx, ListOptions{Limit: 100})
+	require.NoError(t, err)
+	require.Len(t, all, 3, "empty status returns all statuses (backup/export safe)")
+
+	// Explicit deprecated for the audit view.
+	dep, _, err := s.ListMemories(ctx, ListOptions{Status: "deprecated", Limit: 100})
+	require.NoError(t, err)
+	require.Len(t, dep, 1)
+	require.Equal(t, "d", dep[0].MemoryID)
+}

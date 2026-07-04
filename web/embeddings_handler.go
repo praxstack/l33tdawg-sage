@@ -26,6 +26,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/l33tdawg/sage/internal/embedding"
+	"github.com/l33tdawg/sage/internal/vault"
 )
 
 const (
@@ -43,6 +44,8 @@ func (h *DashboardHandler) RegisterEmbeddingsRoutes(r chi.Router) {
 	r.Post("/v1/dashboard/embeddings/reembed", h.handleEmbeddingsReembed)
 	r.Get("/v1/dashboard/embeddings/reembed/progress", h.handleEmbeddingsReembedProgress)
 	r.Post("/v1/dashboard/embeddings/deprecate-unreadable", h.handleEmbeddingsDeprecateUnreadable)
+	r.Post("/v1/dashboard/embeddings/recover-preview", h.handleEmbeddingsRecoverPreview)
+	r.Post("/v1/dashboard/embeddings/recover", h.handleEmbeddingsRecover)
 	r.Post("/v1/dashboard/embeddings/enable", h.handleEmbeddingsEnable)
 }
 
@@ -329,6 +332,63 @@ func (h *DashboardHandler) runReembed() {
 			}
 		}
 	}
+}
+
+// handleEmbeddingsRecoverPreview reports how many unreadable memories a given OLD
+// recovery key can decrypt — WITHOUT mutating anything — so the operator can
+// confirm the key is right before committing.
+func (h *DashboardHandler) handleEmbeddingsRecoverPreview(w http.ResponseWriter, r *http.Request) {
+	h.recoverOrphans(w, r, true)
+}
+
+// handleEmbeddingsRecover re-keys every unreadable memory the supplied old recovery
+// key can decrypt: decrypts with the old key, re-encrypts under the LIVE vault in
+// place, and clears embedding_provider so it re-embeds. Single key per call — run
+// again with another old key for whatever remains.
+func (h *DashboardHandler) handleEmbeddingsRecover(w http.ResponseWriter, r *http.Request) {
+	h.recoverOrphans(w, r, false)
+}
+
+func (h *DashboardHandler) recoverOrphans(w http.ResponseWriter, r *http.Request, dryRun bool) {
+	if h.VaultLocked.Load() {
+		writeError(w, http.StatusForbidden, "unlock the vault before recovering memories")
+		return
+	}
+	var body struct {
+		RecoveryKey string `json:"recovery_key"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if body.RecoveryKey == "" {
+		writeError(w, http.StatusBadRequest, "recovery_key is required")
+		return
+	}
+	oldVault, err := vault.FromDataKey(body.RecoveryKey)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid recovery key format") // don't echo key bytes
+		return
+	}
+	n, err := h.store.RekeyUnreadableMemories(r.Context(), oldVault, dryRun)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "recover: "+err.Error())
+		return
+	}
+	counts, _ := h.store.CountMemoriesByProvider(r.Context())
+	resp := map[string]any{
+		"remaining_unreadable": counts["skipped"], // still-unreadable (try another key)
+	}
+	if dryRun {
+		resp["decryptable"] = n // how many THIS key can recover
+	} else {
+		resp["recovered"] = n
+		if n > 0 {
+			h.SSE.Broadcast(SSEEvent{Type: EventForget}) // recovered content appears in views
+		}
+	}
+	writeJSONResp(w, http.StatusOK, resp)
 }
 
 // handleEmbeddingsEnable switches the node's embedding provider to Ollama in
