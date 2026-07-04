@@ -51,7 +51,21 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.0.1
+## What's New in v11.0.2
+
+**Smart memory setup now manages Ollama end to end.** v11.0.2 is a patch release on top of v11.0.1: no consensus rule, AppHash, transaction, key-encoding, or migration change. Existing v11 chains update in place; `app-v15` remains the active v11 consensus fork.
+
+- **Managed Ollama runtime for semantic memory.** The CEREBRUM smart-memory wizard can now install a pinned Ollama runtime, start/adopt the local sidecar, pull `nomic-embed-text`, verify the embedding dimension, and remember the managed runtime preference across restarts. This gives Ollama the same dashboard-first setup path as the managed reranker.
+- **Setup endpoints are wizard-gated.** The new install/start/pull routes run behind the dashboard setup security gate, and archive extraction refuses traversal, oversized payloads, incomplete downloads, and checksum mismatches before anything becomes active.
+- **Security and deployment wording is clearer.** The public Security FAQ now separates SAGE Personal from Enterprise threat models, calls out local BadgerDB/SQLite storage accurately, and tightens the GitHub Pages privacy copy so optional connector traffic is not confused with a SAGE-hosted relay.
+- **Docs stay current with v11 code truth.** The reference docs, benchmark READMEs, SDK README, roadmap, and environment-variable notes are updated for the v11.0.2 surface without changing consensus semantics.
+
+SDK 11.0.2.
+
+## Older releases
+
+<details>
+<summary>v11.0.1 — MRI-first CEREBRUM polish + security dependency update</summary>
 
 **CEREBRUM is now fully MRI-first.** v11.0.1 is a launch-polish patch on top of v11.0.0: no consensus rule, AppHash, transaction, key-encoding, or migration change. Existing v11 chains update in place; `app-v15` remains the active v11 consensus fork.
 
@@ -63,8 +77,7 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 - **Docs and SDK metadata are lockstep.** The Python SDK version, reference headers, roadmap status, and MCP/Docker registry metadata are bumped to 11.0.1.
 
 SDK 11.0.1.
-
-## Older releases
+</details>
 
 <details>
 <summary>v11.0.0 — CEREBRUM, managed reranker, federation join ceremony</summary>

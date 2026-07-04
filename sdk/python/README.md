@@ -2,7 +2,7 @@
 
 Python client for the SAGE (Sovereign Agent Governed Experience) protocol -- a governed, verifiable institutional memory layer for multi-agent systems.
 
-**Requires Python 3.10+** | **Compatible with SAGE v5.0.1+** | **TLS support since v6.1.0** | **v8.0 — domain reassign recovery** | **v8.1 — per-record `classification` on `propose()`**
+**Requires Python 3.10+** | **Current SAGE release: v11.0.2** | **TLS, RBAC, federation, domain recovery, and per-record `classification` supported**
 
 ## Installation
 
@@ -311,7 +311,7 @@ SAGE uses a hierarchical access control model. **All operations are on-chain BFT
 
 ```
 Organization
-  +-- Department (access boundary — agents in one dept cannot see another's memories)
+  +-- Department (membership metadata and federation scope)
         +-- Domain (knowledge category — access-controlled)
               +-- Agent (with clearance level 0-4)
 ```
@@ -326,14 +326,14 @@ Organization
 | 3 | Secret | High-security data |
 | 4 | Top Secret | Maximum restriction |
 
-### Setup Order (Critical)
-
-You MUST set up access controls BEFORE agents submit memories. Memories submitted before access controls exist cannot be retroactively restricted.
+### Setup Order
 
 ```
 1. Register organization  -->  2. Create departments  -->  3. Register domains
 4. Generate agent keypairs  -->  5. Add agents to org + depts  -->  6. Agents operate
 ```
+
+For production domains, register the domain or grant access before handing writers their identities. If an authenticated agent submits to a genuinely unowned, non-shared domain, the chain auto-registers that domain to the first writer and grants that owner level-2 access.
 
 ### Organization Management
 
@@ -360,7 +360,7 @@ admin_client.remove_org_member(org_id, agent_id="a1b2c3...")
 
 ### Department Management
 
-Departments are access boundaries within an organization. Agents in one department cannot see memories in another department.
+Departments are sub-groups within an organization. They are used for membership metadata and federation scoping (`allowed_depts`); they do not by themselves isolate all same-org memory visibility.
 
 ```python
 # Create departments
@@ -381,7 +381,7 @@ depts = admin_client.list_depts(org_id)
 # Get department info
 dept = admin_client.get_dept(org_id, sec_dept)
 
-# Add agents to departments (determines what domains they can access)
+# Add agents to departments (used by department-scoped federation agreements)
 admin_client.add_dept_member(org_id, sec_dept, agent_id="a1b2c3...", clearance=2)
 
 # List department members
@@ -393,7 +393,7 @@ admin_client.remove_dept_member(org_id, sec_dept, agent_id="a1b2c3...")
 
 ### Domain Registration & Access Control
 
-**Unregistered domains have NO access control** — any agent can read and write. Register all production domains.
+Domains have on-chain ownership. The first writer of a genuinely unowned, non-shared domain becomes owner automatically; explicit registration is still recommended when you want a predictable owner before any agent writes.
 
 ```python
 # Register domains (you become the domain owner)
@@ -406,11 +406,11 @@ info = admin_client.get_domain("security.crypto")
 # Request access to a domain
 client.request_access(domain="security.crypto", justification="Need crypto data", level=2)
 
-# Grant access (domain owner only)
+# Grant access (domain owner or ancestor owner only)
 admin_client.grant_access(
     grantee_id="a1b2c3...",
     domain="security.crypto",
-    level=2,                    # Clearance level (0-4)
+    level=2,                    # 1=read, 2=read+write, 3=modify on v11/app-v15
     expires_at=0,               # Unix timestamp, 0 = never
 )
 
@@ -423,10 +423,10 @@ grants = admin_client.list_grants(agent_id="a1b2c3...")
 
 ### Access Rules
 
-- An agent in Dept A can access Dept A's domains but NOT Dept B's domains
+- Department membership scopes federation agreements when `allowed_depts` is set
 - An agent in Org X cannot access ANY memories in Org Y unless a federation agreement exists
 - An agent always has access to memories it submitted, regardless of RBAC
-- Read-side RBAC is on-chain (consensus-enforced). Write-side RBAC is your responsibility
+- Read and write access are enforced through REST preflight checks and consensus-side `HasAccessMultiOrg`
 
 ### Cross-Organization Federation
 
@@ -461,23 +461,17 @@ info = admin_a.get_federation(fed["federation_id"])
 - `max_clearance` caps the clearance level regardless of agent's actual clearance
 - Revocation is immediate and on-chain
 
-## Write-Side Domain Enforcement
+## Domain Write Enforcement
 
-Read-side access control is enforced on-chain. **Write-side enforcement is your responsibility.** Without it, any agent can submit memories tagged to any domain, polluting retrieval for all consumers.
+SAGE enforces domain writes in the node:
 
-**Pattern 1: ABCI-level enforcement (strongest)**
+- REST submit handlers check the caller's domain policy before broadcasting.
+- The consensus path checks `HasAccessMultiOrg` before committing writes to owned domains.
+- Post-v8 grants walk ancestor domains, so a grant on `security` can cover `security.crypto` where appropriate.
+- Post-v8 access grants can auto-claim genuinely unowned, non-shared domains for the granter.
+- v11/app-v15 adds level `3` for modify workflows; level `2` remains read+write.
 
-```go
-// In your processMemorySubmit handler:
-hasWriteAccess, err := app.badgerStore.HasAccessMultiOrg(
-    submit.DomainTag, agentID, 2, blockTime,  // level 2 = write
-)
-if err != nil || !hasWriteAccess {
-    return &abcitypes.ExecTxResult{Code: 13, Log: "no write access"}
-}
-```
-
-**Pattern 2: Application-layer gatekeeper**
+Application-specific routing can still add a narrower policy on top, for example:
 
 ```python
 AGENT_DOMAIN_MAP = {
@@ -490,24 +484,14 @@ def validate_submission(agent_name: str, domain_tag: str) -> bool:
     return any(domain_tag.startswith(prefix) for prefix in allowed)
 ```
 
-**Pattern 3: Domain prefix convention**
+## Domain Reassign Recovery
 
-```python
-agent_dept = get_agent_department(agent_id)
-domain_prefix = domain_tag.split(".")[0]
-if agent_dept != domain_prefix:
-    raise ValueError(f"Agent in {agent_dept} cannot write to {domain_tag}")
-```
-
-## v8.0 — Domain Reassign Recovery
-
-SAGE v8.0 introduces an access-control recovery primitive: a chain admin can
-take over a domain whose owner is unavailable or compromised. The flow is
-governance-gated — a `domain_reassign` proposal carries the new owner +
-optional parent + an `open_to_shared` flag as its `payload`, validators vote,
-and once accepted a `TxTypeDomainReassign` consumes the proposal, transfers
-ownership, **purges all existing grants on the domain**, and (optionally)
-promotes the domain to shared.
+SAGE includes an access-control recovery primitive: a chain admin can take over
+a domain whose owner is unavailable or compromised. The flow is governance-gated:
+a `domain_reassign` proposal carries the new owner, optional parent, and an
+`open_to_shared` flag as its `payload`; validators vote; once accepted,
+`TxTypeDomainReassign` consumes the proposal, transfers ownership, **purges all
+existing grants on the domain**, and optionally promotes the domain to shared.
 
 The SDK exposes both a one-shot helper and the two underlying primitives.
 

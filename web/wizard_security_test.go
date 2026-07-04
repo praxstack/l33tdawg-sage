@@ -57,6 +57,9 @@ func TestWizard_Rejects_CrossOriginBrowser(t *testing.T) {
 		{http.MethodGet, "/v1/wizard/chatgpt/login-status"},
 		{http.MethodPost, "/v1/wizard/chatgpt/create-tunnel"},
 		{http.MethodPost, "/v1/wizard/chatgpt/mint-token"},
+		{http.MethodPost, "/v1/dashboard/embeddings/install-ollama"},
+		{http.MethodPost, "/v1/dashboard/embeddings/start-ollama"},
+		{http.MethodPost, "/v1/dashboard/embeddings/pull-model"},
 	}
 
 	for _, tc := range cases {

@@ -142,16 +142,17 @@ Hybrid recall exposes four env tunables, all read by the SAGE node, not by this 
 
 Run a baseline first, then bisect.
 
-## v7.1: cross-encoder reranker (optional)
+## Cross-encoder reranker (optional)
 
-v7.1 adds a post-RRF rerank pass via an external HTTP service. The default is off; turn it on by setting both `SAGE_RERANK_ENABLED=1` and `SAGE_RERANK_URL=<tei-endpoint>` in the SAGE node's environment:
+Current SAGE supports a post-RRF rerank pass. In v11, the dashboard-managed llama.cpp reranker is the recommended path. This TEI-compatible env-var path remains useful for older benchmark comparability and custom reranker deployments:
 
 | Var | Default | Effect |
 |---|---|---|
 | `SAGE_RERANK_ENABLED` | `0` | gate; must be `1`/`true`/`yes`/`on` to activate |
 | `SAGE_RERANK_URL` | *(unset)* | base URL of a TEI-compatible reranker (`/rerank` endpoint) |
 | `SAGE_RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | informational; surfaces in logs |
+| `SAGE_RERANK_KIND` | `tei` | endpoint dialect: `tei` or `llamacpp` |
 | `SAGE_RERANK_TIMEOUT_MS` | `2000` | per-call timeout; reranker failure falls back to RRF ordering |
 | `SAGE_RERANK_OVERSAMPLE` | `2` | candidate pool size factor: RRF returns `TopK * N` for the reranker |
 
-The harness records the operator-side `SAGE_RERANK_ENABLED` / `SAGE_RERANK_URL` values into the result JSON (`rerank_enabled_env`, `rerank_url_env`) so v7.0 baselines stay distinguishable from v7.1 reranker runs.
+The harness records the operator-side `SAGE_RERANK_ENABLED` / `SAGE_RERANK_URL` values into the result JSON (`rerank_enabled_env`, `rerank_url_env`) so baseline and reranker runs stay distinguishable.

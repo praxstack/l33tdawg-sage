@@ -1,4 +1,4 @@
-<!-- Verified against code at SAGE v11.0.1. Cite file:line when behavior is non-obvious. -->
+<!-- Verified against code at SAGE v11.0.2. Cite file:line when behavior is non-obvious. -->
 
 # SAGE Local Engines and First-Run Setup Reference (v11)
 
@@ -14,8 +14,9 @@ documented in [`rest-api.md`](rest-api.md) and [`concepts/memory-lifecycle.md`](
 
 All endpoints below live on the **dashboard listener** and use the dashboard's
 cookie/session auth (`authMiddleware`, `web/handler.go:635`), not the Ed25519
-signed-request scheme the `/v1/*` public API uses. The managed-reranker **setup**
-endpoints additionally sit behind a strict same-origin gate (see below).
+signed-request scheme the `/v1/*` public API uses. The managed semantic-memory and
+managed-reranker **setup** endpoints additionally sit behind a strict same-origin
+gate (see below).
 
 ---
 
@@ -88,12 +89,109 @@ Saves both values, **clamped** (`handleSaveRecallSettings`, `web/handler.go:2472
 
 ---
 
-## 3. Reranker configuration - `/v1/dashboard/settings/reranker`
+## 3. Managed semantic-memory setup - `/v1/dashboard/embeddings/*` (v11.0.2)
+
+Smart-memory setup follows the same no-terminal pattern as the managed reranker.
+The dashboard starts from `EmbeddingsSetupModal` (`web/static/js/app.js`), but the
+long-running work is server-side:
+
+1. install a pinned Ollama runtime under `~/.sage/ollama`;
+2. spawn or adopt `ollama serve` on `127.0.0.1:11434`;
+3. pull `nomic-embed-text` through Ollama;
+4. re-embed existing memories as a background node job;
+5. switch SAGE to the Ollama embedder and restart when needed.
+
+Routes are registered by `RegisterEmbeddingsRoutes` (`web/embeddings_handler.go`).
+The subprocess/download endpoints (`install-ollama`, `start-ollama`, `pull-model`)
+carry `authMiddleware` plus `wizardSecurityGate`; status, check, re-embed,
+recover/deprecate, and enable remain dashboard-authenticated routes. The gate matters
+because these endpoints download a runtime and spawn a local subprocess; a cross-origin
+browser tab must not be able to drive them.
+
+### `GET /v1/dashboard/embeddings/status`
+
+Reports the active embedder, migration counts, and managed-Ollama setup state
+(`handleEmbeddingsStatus`, `web/embeddings_handler.go`):
+
+```json
+{
+  "provider": "hash",
+  "is_semantic": false,
+  "model": "nomic-embed-text",
+  "dimension": 768,
+  "ollama_running": false,
+  "model_available": false,
+  "ollama_binary_found": false,
+  "ollama_engine_installed": false,
+  "ollama_install_supported": true,
+  "ollama_engine_bytes": 129037451,
+  "ollama_installing": false,
+  "ollama_pulling": false,
+  "ollama_model_done": 0,
+  "ollama_model_total": 0,
+  "ollama_pull_status": "",
+  "ollama_url": "http://127.0.0.1:11434",
+  "total_memories": 6948,
+  "need_reembed": 6948,
+  "on_ollama": 0,
+  "unreadable": 0,
+  "errored": 0,
+  "vault_locked": false
+}
+```
+
+`ollama_running` is a live `/api/tags` probe, not a pid check. `model_available`
+requires a real embedding probe through the Ollama API and a 768-dimensional vector,
+so the UI does not declare setup complete merely because `/api/tags` listed a model.
+
+### `POST /v1/dashboard/embeddings/install-ollama`
+
+Streams the pinned Ollama runtime download and extraction. `internal/ollamad`
+maps supported platforms to official `ollama/ollama` release assets, pinned by
+asset name, exact size, and sha256 digest (`internal/ollamad/install.go`). The
+installer refuses oversized, truncated, checksum-mismatched, or binary-missing
+archives before the runtime becomes active.
+
+### `POST /v1/dashboard/embeddings/start-ollama`
+
+Spawns or adopts `ollama serve` and waits until `GET /api/tags` answers. On success
+it persists `ollama_managed=1` and `ollama_url`, so node boot re-starts/adopts the
+managed runtime (`cmd/sage-gui/node.go`).
+
+**Response** (HTTP 200): `{"ok": true, "url": "http://127.0.0.1:11434"}`.
+
+### `POST /v1/dashboard/embeddings/pull-model`
+
+Pulls `nomic-embed-text` through the running Ollama API. This is readiness-gated:
+the handler returns success only after `ModelReady` can generate a 768-dimensional
+embedding (`internal/ollamad/ollamad.go`). Unlike the runtime archive, the model is
+pulled by Ollama tag through Ollama's registry protocol; SAGE verifies the runtime
+asset itself, but delegates model integrity/storage semantics to Ollama.
+
+### Streaming protocol
+
+`install-ollama` and `pull-model` both stream `text/plain` lines:
+
+| Line | Meaning |
+|------|---------|
+| `progress: <done> <total>` | Bytes so far and total, when available. |
+| `status: <message>` | Ollama pull status text. |
+| `done: 0` | Success terminator. |
+| `error: <message>` followed by `done: 1` | Failure. |
+
+The long-running install/pull contexts are detached from the browser request, so a
+closed tab does not cancel the node-side work. A later request attaches to the
+in-flight operation and streams the manager's current progress instead of failing
+with "already in progress".
+
+---
+
+## 4. Reranker configuration - `/v1/dashboard/settings/reranker`
 
 The optional cross-encoder reranker refines the top-K after hybrid recall
 (BM25 + vector via RRF). It is off by default and off-consensus. These endpoints
 configure a **bring-your-own** reranker endpoint; the **managed sidecar** flow
-(section 4) drives the same store hot-swap but downloads the engine itself.
+(section 5) drives the same store hot-swap but downloads the engine itself.
 Routes at `web/handler.go:413-416`. The reranker is hot-swapped LIVE on the recall
 path via `SetReranker` (no restart) and persisted to preferences so it survives a
 restart independent of the `SAGE_RERANK_*` env vars (`web/handler_reranker.go:63-65`).
@@ -127,7 +225,7 @@ Enables/disables and configures the reranker (`handleSaveReranker`,
 | `kind` | **v11 field.** Endpoint dialect: `"tei"` (default) or `"llamacpp"` (the managed sidecar). The Settings form omits it, which means TEI (`web/handler_reranker.go:24-29`). |
 
 **The `kind` field** selects which wire dialect the reranker HTTP client speaks (see
-section 5). Unknown / omitted values fall back to TEI. It is lower-cased and trimmed
+section 6). Unknown / omitted values fall back to TEI. It is lower-cased and trimmed
 before use (`web/handler_reranker.go:88`).
 
 **Verify-on-enable (v11):** when `enabled` is true, the handler probes the URL with a
@@ -168,12 +266,12 @@ IPv4 only.
 **Response** (HTTP 200): `{"found": true, "url": "http://localhost:8081"}` or `{"found": false}`
 
 > Port note: the **detect** probe targets `8081` (the bring-your-own TEI convention).
-> The **managed** sidecar (section 4) binds `8082` deliberately, to stay out of a
+> The **managed** sidecar (section 5) binds `8082` deliberately, to stay out of a
 > hand-run TEI server's way (`internal/rerankd/rerankd.go:39-42`).
 
 ---
 
-## 4. Managed reranker setup - `/v1/dashboard/reranker/setup/*` (v11)
+## 5. Managed reranker setup - `/v1/dashboard/reranker/setup/*` (v11)
 
 Ollama-style guided setup: SAGE downloads a pinned llama.cpp engine and a pinned GGUF
 model itself, then spawns and manages the process - no package manager, no sudo, no
@@ -276,7 +374,7 @@ Stops the sidecar and turns the reranker off (`handleRerankerSetupStop`,
 
 ---
 
-## 5. Internals: the managed reranker sidecar (`internal/rerankd`)
+## 6. Internals: the managed reranker sidecar (`internal/rerankd`)
 
 Package `rerankd` manages SAGE's optional reranker sidecar: a llama.cpp `llama-server`
 process serving `bge-reranker-v2-m3` on loopback (`internal/rerankd/rerankd.go:1-7`).
@@ -349,7 +447,7 @@ any TEI-compatible server) with no SAGE-specific adapter; llama.cpp is the diale
 
 ---
 
-## 6. Embedding provenance: `embedding_provider` stamped at insert (v11)
+## 7. Embedding provenance: `embedding_provider` stamped at insert (v11)
 
 Each memory record carries an `embedding_provider` string recording **which embedder**
 produced its vector - distinct from `provider`, which is the submitting agent's LLM
@@ -361,7 +459,7 @@ this column.
 time via `SupplementaryData.EmbeddingProvider` (`internal/memory/model.go:92-96`).
 Without it, every new memory would land at `embedding_provider = ''` and the dashboard
 would forever count it as "needs re-embed" even though its vector is already semantic
-(v11.0.1 release behavior).
+(v11.0.2 release behavior).
 
 - **Where the stamp is computed:** `Server.embedderStampFor(emb)` returns the semantic
   embedder's `Named` id (e.g. `"ollama"`) when one is active and the submission carries

@@ -1,4 +1,4 @@
-<!-- Reference index reconciled for SAGE v11.0.1. Core legacy REST/MCP/concepts references retain their last full code-verification headers (mostly v8.1.1, with PoE rechecks at v8.5.0) when those surfaces did not change. v11 adds/re-verifies `python-sdk.md`, `federation-and-brain-api.md`, and `reranker-and-setup.md`; `environment-variables.md` carries the v11 reranker additions. -->
+<!-- Reference index reconciled for SAGE v11.0.2. Core REST, MCP, concepts, Python SDK, federation/brain graph, reranker, and environment references are current-facing for v11. -->
 
 
 # SAGE Reference — Agent Integration Index
@@ -27,7 +27,7 @@ or `api/openapi.yaml`, **trust this reference** — those two have known drift (
 | [`concepts/consensus-confidence-decay.md`](concepts/consensus-confidence-decay.md) | CometBFT BFT path, "CometBFT-committed" vs "SAGE-committed", quorum, PoE weights, epochs. |
 | [`concepts/content-validation-gate.md`](concepts/content-validation-gate.md) | The optional Layer-2 content-validation gate (`outcome_class`-keyed reject hook) and the deployment **arming seam** — both the stateless `contentvalidator.SetProvider` and the context-aware `SetProviderWithContext` (exposes the on-chain `RoleResolver` for signer-authority checks) — enabling it without patching the cmd entrypoints. |
 | [`federation-and-brain-api.md`](federation-and-brain-api.md) | The v11 HTTP surface: cross-network federation (`/fed/v1/*` mTLS listener, `/v1/federation/*` operator REST, `/v1/dashboard/federation/*` proxy) and the memory train-of-thought endpoint (`GET /v1/dashboard/memory/{id}/related`). All off-consensus; only tx-33/34 reach chain state. |
-| [`reranker-and-setup.md`](reranker-and-setup.md) | The v11 local-engine and setup surface: first-run onboarding, recall-tuning clamps, the reranker config endpoint (`kind` field + verify-on-enable), the managed llama.cpp sidecar (`/v1/dashboard/reranker/setup/*`, pinned assets + sha256 + adopt-not-respawn), the TEI vs llama.cpp rerank dialects, and `embedding_provider` stamped at insert. All off-consensus. |
+| [`reranker-and-setup.md`](reranker-and-setup.md) | The v11 local-engine and setup surface: first-run onboarding, recall-tuning clamps, managed semantic memory setup (`/v1/dashboard/embeddings/*`, pinned Ollama runtime + readiness-gated model pull), the reranker config endpoint (`kind` field + verify-on-enable), the managed llama.cpp sidecar (`/v1/dashboard/reranker/setup/*`, pinned assets + sha256 + adopt-not-respawn), the TEI vs llama.cpp rerank dialects, and `embedding_provider` stamped at insert. All off-consensus. |
 
 ---
 
@@ -72,7 +72,7 @@ The **memory record** meaning is the data-classification column. See [`concepts/
 ### The classification submit rule (v6.8.6+)
 - On a **REST/SDK submit**, an **omitted** `classification` is stored as **PUBLIC (0)** — *not* INTERNAL.
 - Pass an explicit level to classify: `classification=3` for SECRET, `4` for TOP SECRET.
-- Python SDK (v8.1.1+): `client.propose(content=..., memory_type="fact", domain_tag="audit", confidence=0.9, classification=3)`.
+- Python SDK: `client.propose(content=..., memory_type="fact", domain_tag="audit", confidence=0.9, classification=3)`.
 - The INTERNAL default you may have heard about applies only to the **wire codec when replaying old on-chain txs** that predate the classification byte — it does *not* affect new submissions.
 
 ### Request signing
@@ -80,7 +80,7 @@ All authenticated REST endpoints use an Ed25519 signed-request scheme. The signe
 
 ---
 
-## Related docs (reconciled through v11.0.1)
+## Related docs (reconciled through v11.0.2)
 
 These were stale earlier in v8 and have now been reconciled against the code. Where any of them still disagrees with this reference, this reference wins.
 

@@ -2,7 +2,7 @@
 import { SSEClient } from './sse.js';
 import { fetchStats, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, fetchValidators, fetchMcpConfig, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchReranker, saveReranker, testReranker, detectReranker, fetchOnboarding, saveOnboarding,
 rerankerSetupStatus, rerankerSetupDownload, rerankerSetupStart, rerankerSetupStop, rerankerSetupInstallEngine, fetchTasks, updateTaskStatus, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken, connectProvider, connectRemoteUrl,
-embeddingsStatus, checkOllamaEmbed, pullEmbedModel, reembedMemories, reembedProgress, enableSemanticEmbeddings,
+embeddingsStatus, checkOllamaEmbed, installOllamaRuntime, startOllamaRuntime, pullEmbedModel, reembedMemories, reembedProgress, enableSemanticEmbeddings,
 deprecateUnreadable, getRecoveryKey, recoverOrphansPreview, recoverOrphans,
 joinHostInterfaces, enableNetworkMode, joinHostStart, joinHostStatus, joinHostApprove, joinHostAbort,
 joinGuestStart, joinGuestStatus, joinGuestCancel, joinGuestRestart,
@@ -16,7 +16,7 @@ const html = window.html;
 
 // Product version shown in the CEREBRUM header. Bump at release; the precise
 // build string (git describe) stays available on the backend.
-const SAGE_VERSION = 'v11.0';
+const SAGE_VERSION = 'v11.0.2';
 
 // MriView — the 3D MRI memory-brain, rendered natively (the dashboard's
 // X-Frame-Options/CSP forbid iframing, so we mount the shared renderer
@@ -3555,7 +3555,7 @@ function UnreadableMemoriesPanel({ status, onChange, onBusy }) {
 function EmbeddingsSetupModal({ onClose, onDone }) {
     const [status, setStatus] = useState(null);
     const [loading, setLoading] = useState(true);
-    const [step, setStep] = useState('intro'); // intro | need-ollama | pull | reembed | enable | done
+    const [step, setStep] = useState('intro'); // intro | pull | reembed | enable | running | done
     const [err, setErr] = useState(null);
     const [pullLog, setPullLog] = useState('');
     const [pulling, setPulling] = useState(false);
@@ -3565,13 +3565,17 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
     const [warn, setWarn] = useState(null); // non-blocking notice (e.g. partial re-embed failures)
     const [skipped, setSkipped] = useState(0); // memories that couldn't be read/embedded (this run)
     const [panelBusy, setPanelBusy] = useState(false); // UnreadableMemoriesPanel recover/deprecate in flight
+    const [stepState, setStepState] = useState({});
+    const [setupMsg, setSetupMsg] = useState('');
+    const [autoRunning, setAutoRunning] = useState(false);
+    const autoRunningRef = useRef(false);
     const alive = useRef(true); // poll loops must stop touching state after close
     useEffect(() => () => { alive.current = false; }, []);
     // Close-blockers: only CLIENT-side work locks the modal. The re-embed job
     // is server-side and survives the client (ReembedBanner keeps showing
     // progress in every tab), so it must never trap the user here; the 'done'
     // step stays closable while the node restarts (review HIGHs).
-    const busy = pulling || (enabling && step !== 'done');
+    const busy = autoRunning || pulling || (enabling && step !== 'done');
     const refreshStatus = () => { embeddingsStatus().then(setStatus).catch(() => {}); };
 
     useEffect(() => {
@@ -3591,8 +3595,6 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
                 const s = await embeddingsStatus();
                 setStatus(s);
                 if (s.is_semantic && s.need_reembed === 0) setStep('done');
-                else if (!s.ollama_running) setStep('need-ollama');
-                else if (!s.model_available) setStep('pull');
                 else setStep('intro');
             } catch (e) { setErr(e.message); }
             setLoading(false);
@@ -3612,6 +3614,76 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
         }
     };
 
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+    const formatSetupBytes = (n) => {
+        n = Number(n || 0);
+        if (n >= 1024 * 1024 * 1024) return (n / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+        if (n >= 1024 * 1024) return Math.round(n / (1024 * 1024)) + ' MB';
+        if (n >= 1024) return Math.round(n / 1024) + ' KB';
+        return n + ' B';
+    };
+
+    const installAndStartOllama = async (s) => {
+        setStepState(p => ({ ...p, ollama: 'active' }));
+        if (!s.ollama_binary_found && !s.ollama_engine_installed) {
+            if (!s.ollama_install_supported) throw new Error('This platform does not have a bundled Ollama runtime yet. Install Ollama once, then run setup again.');
+            setProg({ done: 0, total: s.ollama_engine_bytes || 0 });
+            setSetupMsg('Downloading and installing the Ollama runtime.');
+            let streamErr = null;
+            const res = await installOllamaRuntime();
+            if (!res.ok) throw new Error('Ollama runtime install failed (HTTP ' + res.status + ')');
+            await readStream(res, (k, v) => {
+                if (k === 'progress') {
+                    const [done, total] = v.split(/\s+/).map(Number);
+                    setProg({ done: done || 0, total: total || 0 });
+                    if (total > 0) setSetupMsg(`Installing Ollama runtime (${formatSetupBytes(done)} / ${formatSetupBytes(total)})`);
+                }
+                if (k === 'error') streamErr = v;
+                if (k === 'done' && v === '1' && !streamErr) streamErr = 'Ollama runtime install did not complete.';
+            });
+            if (streamErr) throw new Error(streamErr);
+        }
+        setProg(null);
+        setSetupMsg('Starting Ollama and waiting for the local API.');
+        await startOllamaRuntime();
+        for (let i = 0; i < 60; i++) {
+            if (!alive.current) return null;
+            const chk = await checkOllamaEmbed().catch(() => null);
+            if (chk && chk.ollama_running) {
+                setStepState(p => ({ ...p, ollama: 'done' }));
+                setSetupMsg('Ollama is running.');
+                return chk;
+            }
+            await sleep(1000);
+        }
+        throw new Error('Ollama started but did not answer readiness checks.');
+    };
+
+    const pullModelToReady = async () => {
+        setStepState(p => ({ ...p, model: 'active' }));
+        setPullLog('starting...');
+        setSetupMsg('Downloading nomic-embed-text. This is a one-time local model download.');
+        let streamErr = null;
+        const res = await pullEmbedModel();
+        if (!res.ok) throw new Error('model download failed (HTTP ' + res.status + ')');
+        await readStream(res, (k, v) => {
+            if (k === 'status') { setPullLog(v); setSetupMsg(v); }
+            if (k === 'progress') {
+                const [done, total] = v.split(/\s+/).map(Number);
+                setProg({ done: done || 0, total: total || 0 });
+            }
+            if (k === 'error') streamErr = v;
+            if (k === 'done' && v === '1' && !streamErr) streamErr = 'The model download did not complete.';
+        });
+        if (streamErr) throw new Error(streamErr);
+        const s = await checkOllamaEmbed();
+        if (!s.model_available) throw new Error('The model download did not finish. Try again.');
+        setStepState(p => ({ ...p, model: 'done' }));
+        setSetupMsg('Memory model is ready.');
+        return s;
+    };
+
     const doPull = async () => {
         setPulling(true); setErr(null); setPullLog('starting…');
         let streamErr = null;
@@ -3620,6 +3692,7 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
             await readStream(res, (k, v) => {
                 if (k === 'status') setPullLog(v);
                 if (k === 'error') { streamErr = v; setErr(v); }
+                if (k === 'done' && v === '1' && !streamErr) { streamErr = 'The model download did not complete.'; setErr(streamErr); }
             });
             const s = await checkOllamaEmbed();
             if (s.model_available) setStep('reembed');
@@ -3669,6 +3742,31 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
         pollReembed();
     };
 
+    const reembedToDone = async () => {
+        setStepState(p => ({ ...p, reembed: 'active' }));
+        setSetupMsg('Re-reading memories so SAGE can recall by meaning.');
+        const started = await reembedMemories();
+        setProg({ done: started.done || 0, total: started.total || 0 });
+        for (;;) {
+            if (!alive.current) return null;
+            const p = await reembedProgress();
+            setProg({ done: p.done || 0, total: p.total || 0 });
+            setSkipped(p.skipped || 0);
+            if (p.error) throw new Error(p.error);
+            if (!p.running) {
+                const s = await embeddingsStatus().catch(() => null);
+                if (s) setStatus(s);
+                if (s && s.errored > 0) {
+                    setWarn(`${s.errored} memor${s.errored === 1 ? 'y' : 'ies'} couldn't be embedded - run setup again to retry ${s.errored === 1 ? 'it' : 'them'}.`);
+                }
+                setStepState(p => ({ ...p, reembed: 'done' }));
+                setSetupMsg('Memories are re-read.');
+                return s;
+            }
+            await sleep(1000);
+        }
+    };
+
     const doEnable = async () => {
         setEnabling(true); setErr(null);
         try {
@@ -3684,16 +3782,137 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
             // The node execs itself in place to pick up the new embedder, so
             // poll until it answers again and only then release the modal -
             // otherwise Done/× stay dead and the user is stuck (review HIGH).
-            for (;;) {
+            for (let i = 0; i < 60; i++) {
+                if (!alive.current) return;
                 await new Promise(res => setTimeout(res, 2000));
                 const s = await embeddingsStatus().catch(() => null);
-                if (s) { setStatus(s); break; }
+                if (s) {
+                    setStatus(s);
+                    if (s.is_semantic) break;
+                }
+            }
+            const latest = await embeddingsStatus().catch(() => null);
+            if (latest) setStatus(latest);
+            if (!latest || !latest.is_semantic) {
+                setWarn('Semantic memory was saved, but SAGE is still restarting. Close this window and relaunch SAGE if it does not come back automatically.');
             }
             setEnabling(false);
         } catch (e) { setErr(e.message); setEnabling(false); }
     };
 
+    const enableToReady = async () => {
+        setStepState(p => ({ ...p, enable: 'active' }));
+        setSetupMsg('Switching SAGE to semantic memory.');
+        const r = await enableSemanticEmbeddings();
+        if (r && r.restart_required) {
+            setWarn(r.message || 'Semantic memory is on. Quit SAGE and relaunch it to finish switching.');
+            setStepState(p => ({ ...p, enable: 'done' }));
+            setStep('done');
+            return;
+        }
+        setStep('done');
+        for (let i = 0; i < 60; i++) {
+            if (!alive.current) return;
+            await sleep(2000);
+            const s = await embeddingsStatus().catch(() => null);
+            if (s) {
+                setStatus(s);
+                if (s.is_semantic) {
+                    setStepState(p => ({ ...p, enable: 'done' }));
+                    setSetupMsg('Semantic memory is on.');
+                    return;
+                }
+            }
+        }
+        setWarn('Semantic memory was saved, but SAGE is still restarting. Close this window and relaunch SAGE if it does not come back automatically.');
+    };
+
+    const runAll = async () => {
+        if (autoRunningRef.current) return;
+        autoRunningRef.current = true;
+        setAutoRunning(true);
+        setErr(null);
+        setWarn(null);
+        setSetupMsg('');
+        setProg(null);
+        setStep('running');
+        try {
+            let s = await embeddingsStatus();
+            setStatus(s);
+            setStepState({
+                ollama: s.ollama_running ? 'done' : 'pending',
+                model: s.model_available ? 'done' : 'pending',
+                reembed: (s.need_reembed || 0) === 0 ? 'done' : 'pending',
+                enable: s.is_semantic ? 'done' : 'pending',
+            });
+            if (!s.ollama_running) {
+                s = await installAndStartOllama(s);
+                if (!s) return;
+            }
+            if (s.model_available) {
+                setStepState(p => ({ ...p, model: 'done' }));
+            } else {
+                s = await pullModelToReady();
+            }
+            const latest = await embeddingsStatus();
+            setStatus(latest);
+            if ((latest.need_reembed || 0) > 0 || (latest.errored || 0) > 0) {
+                await reembedToDone();
+            } else {
+                setStepState(p => ({ ...p, reembed: 'done' }));
+            }
+            const afterReembed = await embeddingsStatus().catch(() => null);
+            if (afterReembed) setStatus(afterReembed);
+            if (!(afterReembed && afterReembed.is_semantic)) {
+                await enableToReady();
+            } else {
+                setStepState(p => ({ ...p, enable: 'done' }));
+            }
+            setStep('done');
+            if (onDone) onDone();
+        } catch (e) {
+            setErr(e.message || String(e));
+            setStep('intro');
+        } finally {
+            autoRunningRef.current = false;
+            setAutoRunning(false);
+        }
+    };
+
     const pct = prog && prog.total > 0 ? Math.round((prog.done / prog.total) * 100) : 0;
+    const needOllama = !!status && !status.ollama_running;
+    const needModel = !!status && !status.model_available;
+    const needReembed = !!status && ((status.need_reembed || 0) > 0 || (status.errored || 0) > 0);
+    const needEnable = !!status && !status.is_semantic;
+    const setupSummaryCount = (status?.need_reembed || status?.errored || status?.total_memories || 0);
+
+    const stepRow = (key, label, detail) => {
+        const s = stepState[key] || 'pending';
+        const active = s === 'active';
+        const isReembed = key === 'reembed';
+        const showPct = active && prog && prog.total > 0 && (isReembed || key === 'ollama' || key === 'model');
+        const progressText = isReembed
+            ? `${prog?.done || 0} / ${prog?.total || 0} memories (${pct}%)`
+            : `${formatSetupBytes(prog?.done || 0)} / ${formatSetupBytes(prog?.total || 0)} (${pct}%)`;
+        return html`
+            <div style="display:flex;align-items:flex-start;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);">
+                <span style="width:20px;text-align:center;color:${s === 'done' ? '#10b981' : active ? 'var(--primary)' : 'var(--text-muted)'};">
+                    ${s === 'done' ? '\u2713' : active ? '\u25B6' : '\u25CB'}
+                </span>
+                <div style="flex:1;min-width:0;">
+                    <div style="font-size:13px;color:var(--text);">${label}</div>
+                    ${detail && html`<div style="font-size:11px;color:var(--text-muted);margin-top:2px;">${detail}</div>`}
+                    ${active && key === 'model' && pullLog && html`<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">${pullLog}</div>`}
+                    ${showPct && html`
+                        <div style="height:6px;background:var(--bg-elev);border-radius:3px;overflow:hidden;margin-top:6px;">
+                            <div style="height:100%;width:${pct}%;background:var(--primary);transition:width 0.3s;"></div>
+                        </div>
+                        <div style="font-size:11px;color:var(--text-muted);margin-top:3px;">${progressText}</div>
+                    `}
+                    ${active && !showPct && html`<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Working...</div>`}
+                </div>
+            </div>`;
+    };
 
     return html`
         <div class="wizard-overlay" onClick=${e => { if (e.target === e.currentTarget && !busy) onClose(); }}>
@@ -3705,29 +3924,40 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
                 <div class="wizard-body" style="overflow-y:auto;flex:1;padding:20px;line-height:1.55;">
                     ${loading && html`<p style="color:var(--text-dim);text-align:center;padding:24px;">Checking…</p>`}
 
-                    ${!loading && step === 'intro' && html`
+                    ${!loading && !status && err && html`
+                        <div class="import-error" style="margin-bottom:14px;">${err}</div>
+                        <p style="color:var(--text-dim);font-size:13px;">SAGE could not read the smart-memory setup state. Retry before starting the install.</p>
+                        <button class="btn btn-primary" style="width:100%;padding:12px;" onClick=${async () => {
+                            setLoading(true); setErr(null);
+                            try {
+                                const s = await embeddingsStatus();
+                                setStatus(s);
+                                setStep(s.is_semantic && s.need_reembed === 0 ? 'done' : 'intro');
+                            } catch (e) { setErr(e.message || String(e)); }
+                            setLoading(false);
+                        }}>Retry check</button>
+                    `}
+
+                    ${!loading && status && step === 'intro' && html`
                         <p>Right now SAGE finds memories by matching <strong>keywords</strong>. Smart memory lets it find them by <strong>meaning</strong> — so "what did I decide about pricing" also surfaces notes that never used those exact words.</p>
                         <p style="color:var(--text-dim);font-size:13px;">It runs entirely on your machine using a local model (Ollama + nomic-embed-text). Nothing leaves your computer.</p>
                         <div class="summary-card" style="padding:14px;margin:14px 0;">
-                            <div style="font-size:13px;">To switch on, SAGE will re-read your <strong>${status?.need_reembed ?? status?.total_memories ?? 0} memories</strong> once (a few minutes), then restart briefly. Your memories aren't changed or deleted.</div>
+                            <div style="font-size:13px;margin-bottom:8px;">SAGE will handle the setup as a checklist:</div>
+                            <ul style="padding-left:18px;margin:0;color:var(--text-dim);font-size:12px;line-height:1.7;">
+                                <li>${needOllama ? 'Install and start the local Ollama runtime' : 'Ollama is already running ✓'}</li>
+                                <li>${needModel ? 'Download nomic-embed-text once' : 'Memory model is already installed ✓'}</li>
+                                <li>${needReembed ? `Re-read ${setupSummaryCount} memor${setupSummaryCount === 1 ? 'y' : 'ies'} for semantic recall` : 'Memories are already semantically indexed ✓'}</li>
+                                <li>${needEnable ? 'Switch SAGE to smart memory and restart briefly' : 'Smart memory is already active ✓'}</li>
+                            </ul>
                         </div>
-                        <button class="btn btn-primary" style="width:100%;padding:12px;" onClick=${() => setStep('reembed')}>Turn on smart memory</button>
+                        <button class="btn btn-primary" style="width:100%;padding:12px;" onClick=${runAll} disabled=${busy || !status}>Set it all up</button>
+                        ${needOllama && html`<div style="font-size:11px;color:var(--text-muted);margin-top:8px;">SAGE downloads the runtime, starts it locally, pulls the model, then continues only after readiness checks pass.</div>`}
                     `}
 
                     ${!loading && step === 'need-ollama' && html`
                         <div class="warning-banner" style="margin-bottom:12px;">Ollama isn't running yet.</div>
-                        <p>SAGE's smart memory needs <strong>Ollama</strong> — a small free app that runs the AI model locally.</p>
-                        <ol style="color:var(--text-dim);font-size:13px;line-height:1.8;">
-                            <li>Install it from <a href="https://ollama.com/download" target="_blank" rel="noopener" style="color:var(--accent);">ollama.com/download</a> and open it.</li>
-                            <li>Come back here and click <em>Check again</em>.</li>
-                        </ol>
-                        <button class="btn btn-primary" onClick=${async () => {
-                            try {
-                                const s = await checkOllamaEmbed();
-                                if (!s.ollama_running) setErr('Still can\'t reach Ollama — make sure the app is open.');
-                                else { setErr(null); setStep(s.model_available ? 'reembed' : 'pull'); }
-                            } catch (e) { setErr('Could not check Ollama: ' + (e.message || e)); }
-                        }}>Check again</button>
+                        <p>SAGE needs its local Ollama runtime before it can turn on smart memory.</p>
+                        <button class="btn btn-primary" onClick=${runAll} disabled=${busy}>Install and start Ollama</button>
                     `}
 
                     ${!loading && step === 'pull' && html`
@@ -3735,6 +3965,17 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
                         ${pulling
                             ? html`<div style="display:flex;align-items:center;gap:8px;color:var(--accent);margin:12px 0;"><span class="spinner" style="width:14px;height:14px;"></span> ${pullLog || 'Downloading…'}</div>`
                             : html`<button class="btn btn-primary" onClick=${doPull}>Download the model</button>`}
+                    `}
+
+                    ${!loading && step === 'running' && html`
+                        <div>
+                            ${stepRow('ollama', 'Ollama runtime', 'Runs the local embedding model on this machine.')}
+                            ${stepRow('model', 'Memory model: nomic-embed-text', 'One-time local model download.')}
+                            ${stepRow('reembed', 'Re-read existing memories', 'Keeps IDs and content intact; only embeddings are regenerated.')}
+                            ${stepRow('enable', 'Switch SAGE to smart memory', 'Saves the embedder config and restarts the node when needed.')}
+                        </div>
+                        ${setupMsg && html`<p style="color:var(--text-dim);font-size:12px;margin-top:12px;">${setupMsg}</p>`}
+                        <p style="color:var(--text-muted);font-size:12px;margin-top:8px;">Safe to leave open. Downloads continue on the node and the re-embed banner keeps tracking memory progress.</p>
                     `}
 
                     ${!loading && step === 'reembed' && html`
@@ -3768,7 +4009,7 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
                         <div style="padding:12px 0;">
                             <div style="text-align:center;">
                                 <div style="font-size:38px;margin-bottom:8px;">🧠</div>
-                                <h3 style="margin:0 0 8px;color:var(--accent-green);">Smart memory is ${enabling ? 'turning on' : 'on'}</h3>
+                                <h3 style="margin:0 0 8px;color:var(--accent-green);">Smart memory is ${status?.is_semantic ? 'on' : 'turning on'}</h3>
                                 <p style="color:var(--text-dim);">${status?.is_semantic ? 'This node is using semantic search.' : 'SAGE is restarting to finish (about 10-20s). If your vault has a passphrase, unlock it when the node is back and semantic search will be live.'}</p>
                             </div>
                             ${/* Only offer recover/deprecate when the node is actually up + unlocked — after
@@ -3780,7 +4021,7 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
                     `}
 
                     ${warn && html`<div class="warning-banner" style="margin-top:14px;">${warn}</div>`}
-                    ${err && html`<div class="import-error" style="margin-top:14px;">${err}</div>`}
+                    ${err && (status || step !== 'intro') && html`<div class="import-error" style="margin-top:14px;">${err}</div>`}
                 </div>
                 <div class="wizard-footer">
                     <button class="btn" onClick=${() => { if (busy || panelBusy) return; if (onDone) onDone(); onClose(); }} disabled=${busy || panelBusy}>${step === 'done' ? 'Done' : 'Close'}</button>
@@ -8605,7 +8846,7 @@ function OnboardingWizard({ onClose, onNavigate, onOpenGuide }) {
                             <p style="margin-top:0;">Out of the box SAGE recalls by <strong>keywords</strong>. Turning on the semantic embedder (a free local model via Ollama) lets your agents find memories by <strong>meaning</strong> - the single biggest recall upgrade.</p>
                             ${ollamaUp
                                 ? html`<p style="color:#10b981;font-size:13px;">Ollama is already running on this machine - setup takes about a minute.</p>`
-                                : html`<p style="color:var(--text-dim);font-size:13px;">It uses <strong>Ollama</strong>, a free local model runner. The setup screen walks you through installing it - or skip for now and turn it on any time from Settings.</p>`}
+                                : html`<p style="color:var(--text-dim);font-size:13px;">SAGE downloads and verifies the local Ollama runtime, starts it, pulls the model, and continues only after readiness checks pass. You can skip for now and turn it on any time from Settings.</p>`}
                             <button class="btn btn-primary" onClick=${() => setShowEmbedSetup(true)}>Set up semantic memory</button>
                         `}
                         <div style="display:flex;gap:8px;justify-content:space-between;margin-top:20px;">

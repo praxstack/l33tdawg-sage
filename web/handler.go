@@ -183,6 +183,9 @@ type DashboardHandler struct {
 	// pinned model download, spawn/adopt/stop). Wired in cmd/sage-gui; nil
 	// disables the /v1/dashboard/reranker/setup/* endpoints.
 	Rerankd RerankdManager
+	// Ollamad manages the local Ollama runtime used by smart memory. Wired in
+	// cmd/sage-gui; nil leaves the older "bring your own Ollama" endpoints.
+	Ollamad OllamadManager
 	// ValidatorCountFn returns the live consensus validator count. When set it is
 	// the authoritative signal for whether an agent op needs a full chain
 	// redeploy (count > 1) or can be applied instantly (count <= 1) — more

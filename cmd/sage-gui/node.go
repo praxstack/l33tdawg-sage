@@ -40,6 +40,7 @@ import (
 	"github.com/l33tdawg/sage/internal/mcp"
 	"github.com/l33tdawg/sage/internal/memory"
 	"github.com/l33tdawg/sage/internal/metrics"
+	"github.com/l33tdawg/sage/internal/ollamad"
 	"github.com/l33tdawg/sage/internal/orchestrator"
 	"github.com/l33tdawg/sage/internal/rerankd"
 	"github.com/l33tdawg/sage/internal/snapshot"
@@ -184,6 +185,9 @@ func runServe() (rerr error) {
 	// Manager for the optional llama.cpp reranker sidecar (guided setup from
 	// the dashboard; adopt-or-spawn on boot when the operator enabled it).
 	rerankdMgr := rerankd.New(SageHome())
+	// Manager for the local Ollama runtime used by smart memory setup. It
+	// follows the same adopt-or-spawn model as rerankd.
+	ollamaMgr := ollamad.New(SageHome())
 
 	// Persisted reranker intent (Settings > Engine toggle) overrides the env
 	// config so an operator's dashboard on/off choice survives restart without
@@ -218,6 +222,18 @@ func runServe() (rerr error) {
 					return
 				}
 				logger.Info().Str("url", rerankURL).Msg("managed reranker sidecar ready")
+			}()
+		}
+		if prefs["ollama_managed"] == "1" {
+			go func() {
+				startCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+				defer cancel()
+				ollamaURL, startErr := ollamaMgr.Start(startCtx)
+				if startErr != nil {
+					logger.Warn().Err(startErr).Msg("managed Ollama runtime did not start; semantic recall may be unavailable until setup runs")
+					return
+				}
+				logger.Info().Str("url", ollamaURL).Msg("managed Ollama runtime ready")
 			}()
 		}
 	}
@@ -564,6 +580,7 @@ func runServe() (rerr error) {
 	// Create dashboard handler
 	dashboard := web.NewDashboardHandler(sqliteStore, version)
 	dashboard.Rerankd = rerankdMgr            // managed reranker sidecar (guided setup)
+	dashboard.Ollamad = ollamaMgr             // managed Ollama runtime for smart memory setup
 	dashboard.BadgerStore = badgerStore       // Wire on-chain RBAC for agent isolation
 	dashboard.PostV8ForkFn = app.IsPostV8Fork // v8.0: ancestor-walk grants on post-fork dashboards
 

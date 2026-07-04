@@ -1,8 +1,8 @@
-Verified against SDK source at SAGE v11.0.1. Package: sage-agent-sdk.
+Verified against SDK source at SAGE v11.0.2. Package: sage-agent-sdk.
 
 # SAGE Python SDK Reference
 
-**Package:** `sage-agent-sdk` **Version:** 11.0.1
+**Package:** `sage-agent-sdk` **Version:** 11.0.2
 **Requires:** Python 3.10+ | httpx ≥ 0.25 | pydantic ≥ 2.0 | PyNaCl ≥ 1.5
 
 ```bash
@@ -61,7 +61,7 @@ Every request is signed with Ed25519. The client adds four headers automatically
 | `X-Timestamp` | Unix epoch seconds |
 | `X-Nonce` | 8 random bytes (hex). Prevents replay collisions within the same second. |
 
-`agent_id` is derived entirely from the public key — the server never issues tokens.
+For SDK REST calls, `agent_id` is derived entirely from the public key; the server does not issue a REST session token. HTTP MCP transports use their own bearer-token/OAuth flow.
 
 ### Constructors
 
@@ -635,6 +635,8 @@ request_access(
 
 `POST /v1/access/request`
 
+`level`: `1` = read, `2` = read+write, `3` = modify on app-v15+ chains.
+
 ---
 
 #### `grant_access()`
@@ -652,6 +654,7 @@ grant_access(
 `POST /v1/access/grant`
 
 Domain owner only. `expires_at` is a Unix timestamp; `0` means never-expires.
+`level`: `1` = read, `2` = read+write, `3` = modify on app-v15+ chains.
 
 ---
 
@@ -695,7 +698,7 @@ register_domain(
 
 `POST /v1/domain/register`
 
-Caller becomes domain owner. Unregistered domains have no access control — any agent can read or write.
+Caller becomes domain owner. Current v11 chains also auto-register the first writer of an unowned, non-shared domain as owner and grant that owner level-2 access; shared domains (`general`, `self`, `meta`, `sage-*`, and domains opened by governance) remain writable by authenticated agents.
 
 ---
 

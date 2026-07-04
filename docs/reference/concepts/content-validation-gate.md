@@ -1,8 +1,8 @@
-<!-- Verified against code at SAGE v10.3.0 (registry.go:67/84/109, app.go:897/917/932/939/987/1890/2123/2134, provider.go:98/107/132/139/147). -->
+<!-- Reconciled through SAGE v11.0.2 (registry.go:67/84/109, app.go:704-729/2688-2718, provider.go:98/107/132/139/147). -->
 
 # Layer-2 content-validation gate (and how a deployment arms it)
 
-Verified against code at SAGE v10.3.0.
+Verified against code at SAGE v11.0.2.
 
 SAGE ships an optional, deployment-agnostic **content-validation gate**: a
 consensus-path hook that can REJECT a memory submission based on the *shape of
@@ -48,16 +48,19 @@ ignores every sibling.
 
 ### When enforcement is actually live
 
-Enforcement requires BOTH (`internal/abci/app.go:2123`):
+Enforcement requires BOTH (`internal/abci/app.go:2701`):
 
 1. a registry is installed (`app.contentValidators != nil`), AND
-2. the chain has activated the **app-v7** fork (`postAppV7Fork(height)` true).
+2. `postAppV7Fork(height)` is true.
 
 There is no separate enable flag. A registry compiled in past the fork is enough;
 enforcement is then chain-wide and driven by consensus state, not a per-node
-toggle. A node on an app-v7 chain with NO registry stays bootable (a generic-only
-fleet is valid) but emits an advisory — see `ContentValidationEnforcementWarning`
-(`app.go:932`). A MIXED fleet (some nodes with a registry, some without) is the
+toggle. Current code makes this a bounded consensus window: the gate is live after
+app-v7 activation and turns off again after app-v14 activation
+(`internal/abci/app.go:704-729`). A node in the live window with NO registry stays
+bootable (a generic-only fleet is valid) but emits an advisory — see
+`ContentValidationEnforcementWarning` (`app.go:1238-1258`). A MIXED fleet
+(some nodes with a registry, some without) during the live window is the
 real hazard: it forks `AppHash`. Every validator in a fleet must run the SAME
 registry.
 

@@ -1,8 +1,8 @@
-<!-- Verified against code at SAGE v8.1.1 (commit 2ca50ba) -->
+<!-- Reconciled through SAGE v11.0.2. -->
 
 # Memory Lifecycle
 
-Verified against code at SAGE v8.1.1 (commit 2ca50ba).
+Verified against code at SAGE v11.0.2.
 
 ## Overview
 
@@ -62,7 +62,7 @@ CometBFT calls `CheckTx` (`internal/abci/app.go:504-537`). The ABCI app decodes 
 4. Writes content hash + status `"proposed"` to BadgerDB at key `memory:<memoryID>`.
 5. Pops supplementary data (embedding, provider, triples) from `SupplementaryCache`.
 6. Buffers a `pendingWrite{writeType:"memory"}` with the full `MemoryRecord` for PostgreSQL.
-7. Writes classification to BadgerDB at key `memclass:<memoryID>` — verbatim from the tx field (see `clearance-classification.md`).
+7. Writes classification to BadgerDB at key `mem_class:<memoryID>` — verbatim from the tx field (see `clearance-classification.md`).
 8. Buffers a `pendingWrite{writeType:"mem_classification"}`.
 
 ### 4. Commit — offchain flush
@@ -85,14 +85,14 @@ Each validator (in personal mode: the single node's own auto-voter; in multi-nod
 
 `checkAndApplyQuorum` (`app.go:1043-1119`):
 - Loads all validators, reads each vote from BadgerDB.
-- Phase 1: all validators have **equal weight** (`weights[v.ID] = 1.0`).
+- Current chains use PoE-weighted votes after the app-v3 fork, with equal-weight replay retained only for pre-fork blocks.
 - Calls `validator.CheckQuorum` (threshold: `>= 2/3` of total weight, `internal/validator/quorum.go:6`).
 - **Quorum reached** → `SetMemoryHash(memoryID, nil, "committed")` in BadgerDB, buffers `status_update{StatusCommitted}` for PostgreSQL.
 - **All validators voted, quorum not reached** (e.g. 2-2 tie) → immediately deprecates to prevent the validator ticker from flooding the chain with re-votes.
 
 ### 6. Challenge → Deprecated (or Reinstated)
 
-A committed memory may be challenged via `TxTypeMemoryChallenge`. The code comment at `app.go:1133-1134` is authoritative: **"A challenge that passes BFT consensus (included in a block) is decisive — the memory is deprecated immediately. The block inclusion IS the consensus."**
+A committed memory may be challenged via `TxTypeMemoryChallenge`. Current chains authorize challenges through the app-v15 domain-access rules: the challenger must be the domain owner or ancestor owner, or hold a level-3 modify grant. Once an authorized challenge is included in a block, deprecation is decisive.
 
 There is no separate voting round for challenges. The challenged memory transitions from `committed` → `deprecated` in the same `processMemoryChallenge` call that includes the tx.
 
@@ -109,7 +109,7 @@ The `validTransitions` map (`lifecycle.go:9`) does list `challenged → committe
 | Data                            | Storage           | Notes                                                                                         |
 |---------------------------------|-------------------|-----------------------------------------------------------------------------------------------|
 | Content hash + status           | BadgerDB (on-chain) | Key `memory:<id>`. Every node maintains a consistent copy via BFT replication.               |
-| Classification level            | BadgerDB (on-chain) | Key `memclass:<id>`. Written in `processMemorySubmit` (`app.go:970`), mirrored to PostgreSQL. |
+| Classification level            | BadgerDB (on-chain) | Key `mem_class:<id>`. Written in `processMemorySubmit`, mirrored to PostgreSQL. |
 | Validator votes                 | BadgerDB (on-chain) | Key `state:vote:<memoryID>:<validatorID>`. Deterministic quorum input.                        |
 | Access grants / domain owners  | BadgerDB (on-chain) | Keys `grant:<domain>:<agentID>`, `domain:<name>`. Written via tx, not REST-only.             |
 | Full content, embedding vector  | PostgreSQL (off-chain) | Written in `Commit`; node-local until replicated by PostgreSQL shared service.              |

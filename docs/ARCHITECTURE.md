@@ -30,7 +30,7 @@ This document covers the full multi-node BFT deployment, Python SDK, REST API, m
 
 ![SAGE Architecture — Self-Governed, Byzantine Fault Tolerant Memory Infrastructure for AI Agents](sage_architecture-17062026.png)
 
-*Editable vector source: `docs/sage_architecture-17062026.svg` (kept locally). Regenerate this PNG with: `rsvg-convert -w 2400 docs/sage_architecture-17062026.svg -o docs/sage_architecture-17062026.png`. Verified against [`docs/reference/`](reference/INDEX.md) at v10.6.1.*
+*Editable vector source: `docs/sage_architecture-17062026.svg` (kept locally). Regenerate this PNG with: `rsvg-convert -w 2400 docs/sage_architecture-17062026.svg -o docs/sage_architecture-17062026.png`. Reconciled against [`docs/reference/`](reference/INDEX.md) for v11.*
 
 ### How it works
 
@@ -494,15 +494,15 @@ If you want a domain that multiple agents write to freely, either give it a name
 When agent A needs to write to a domain that agent B owns (or that hasn't been written to yet), the safe bootstrap sequence is:
 
 1. **Determine the real on-chain owner first.** The "intended" owner in your application code may not be the actual owner — whichever agent wrote first captured the domain. Probe ownership with `GET /v1/domain/{name}` before issuing any grant. If no owner exists yet, step 2 will claim it; if a different agent than expected owns it, grants must come from *that* agent's signing key.
-2. **For unclaimed domains**, the agent that will act as owner issues `POST /v1/domain/register` to claim the namespace explicitly. This avoids the race where a stray first-write captures ownership unpredictably.
-3. **Once ownership is settled**, the owner issues `POST /v1/access/grant` granting the writer level 2 (read+write). One grant per concrete domain name.
-4. **The writer can now submit memories** to that domain. Repeat steps 2–3 for each subdomain you care about.
+2. **For unclaimed domains**, the future owner can either issue `POST /v1/domain/register` explicitly or issue the first `POST /v1/access/grant`; post-v8 access grants auto-claim genuinely unowned, non-shared domains for the granter before writing the grant.
+3. **Once ownership is settled**, the owner issues `POST /v1/access/grant` granting the writer level 2 (read+write). In v11/app-v15, level 3 can be granted for modify/deprecate workflows.
+4. **The writer can now submit memories** to that domain. Ancestor grants are honored post-v8, so a grant on `pipeline.failures` covers descendants such as `pipeline.failures.pwn_buffer_overflow` unless a stricter ownership path intervenes.
 
-#### Known limitations (v7.1)
+#### Current v11 semantics
 
-- **Grants do not cascade to descendant domains.** A grant on `pipeline.failures` does not authorize writes to `pipeline.failures.pwn_buffer_overflow`. Each concrete subdomain that other agents will write to needs its own explicit `register_domain` + `access_grant` pair. Ancestor-walk access checks (symmetric with the registration path) are queued for a future release behind the upgrade-machinery work.
-- **`POST /v1/access/grant` and other access-control endpoints currently return HTTP 201 even if the underlying tx is later rejected at `FinalizeBlock`** (e.g. when the supposed granter is not the on-chain owner). Always verify a grant landed by calling `GET /v1/access/grants/{agent_id}` and checking that the domain appears. A bootstrap script should probe-write a sentinel from each candidate agent to detect the real owner before issuing grants from a different identity. Migrating these handlers to commit-mode broadcasts so `FinalizeBlock` rejections surface as HTTP 403 is on the v7.1.x patch track.
-- **Recovery from a lost-owner domain is not yet automated.** If the owner agent's key is lost or the agent is retired, the domain becomes write-locked with no admin override. A `domain_reassign` governance primitive is planned for the same release as the ancestor-walk fix.
+- **Ancestor grants are active.** Access checks walk from the concrete domain toward parent domains post-v8, so parent-domain ownership and grants can cover subdomains.
+- **Access-control REST handlers use commit-mode broadcasts.** `POST /v1/access/grant` waits for `FinalizeBlock`; underlying consensus rejections surface as request errors instead of returning a false-success `201`.
+- **Lost-owner recovery exists through governance.** `domain_reassign` can transfer a domain and optionally open it as a shared domain, preserving an auditable recovery path when an owner key is retired or lost.
 
 ### Domain Access + Clearance Interaction
 
@@ -542,9 +542,9 @@ Access to a memory requires passing three checks, evaluated in order:
 
 ---
 
-## Upgrade Machinery (v7.5)
+## Upgrade Machinery
 
-SAGE v7.5 ships the substrate for in-place chain upgrades: existing chains move forward across consensus-rule changes without a chain reset and without losing accumulated memory. How much of it is hands-off depends on the fork: the upgrade watchdog auto-proposes only up to its frozen deployment-safe default (app-v6), while every later fork (app-v7 onward) is governance-activated by an operator running `sage-gui upgrade propose --target <next>` one fork at a time (post-app-v8, signed by a chain-admin agent). An auto-advance mode for personal (single-validator) nodes — restoring the no-typed-commands experience for the later forks — lands in v10.5.1. The substrate has four moving parts:
+SAGE includes an in-place chain-upgrade substrate: existing chains move forward across consensus-rule changes without a chain reset and without losing accumulated memory. How much of it is hands-off depends on the fork: the upgrade watchdog auto-proposes only up to its frozen deployment-safe default (app-v6), while every later fork (app-v7 onward) is governance-activated by an operator running `sage-gui upgrade propose --target <next>` one fork at a time (post-app-v8, signed by a chain-admin agent). Personal single-validator nodes also have auto-advance support for later forks, preserving the no-typed-commands experience. The substrate has four moving parts:
 
 ### 1. Scheduled snapshots
 
@@ -576,7 +576,7 @@ At the activation height, `FinalizeBlock` reads the pending plan, emits `Respons
 
 At-most-one pending plan is enforced: a propose arriving while another is pending returns code 47 "already pending". A pre-activation `UpgradeCancel` (signed by any agent) clears the plan; post-activation cancel returns code 48 "too late".
 
-**Quiescent chains (app-v12+).** Once the issue-#40 idle fix is active, an idle chain mints no blocks — so a pending plan's activation height never arrives on its own. The always-on **pending-plan pump** (`cmd/sage-gui/upgrade_pump.go`, v10.5.2, issue #41) watches the `upgrade:plan` slot in-process: whenever a plan is pending and the height is stagnant below its activation height, it broadcasts idempotent heartbeat txs (operator re-registration, Code 0 "already registered") that each mint one block, carrying the chain to activation. It runs independently of auto-advance, admin roles, and `disable_auto_upgrade` — the plan already passed governance; the pump is execution, not an upgrade decision. Interactively, `sage-gui upgrade propose --wait` does the same climb attached to the terminal.
+**Quiescent chains (app-v12+).** Once the idle-chain fix is active, an idle chain mints no blocks — so a pending plan's activation height never arrives on its own. The always-on **pending-plan pump** (`cmd/sage-gui/upgrade_pump.go`) watches the `upgrade:plan` slot in-process: whenever a plan is pending and the height is stagnant below its activation height, it broadcasts idempotent heartbeat txs (operator re-registration, Code 0 "already registered") that each mint one block, carrying the chain to activation. It runs independently of auto-advance, admin roles, and `disable_auto_upgrade` — the plan already passed governance; the pump is execution, not an upgrade decision. Interactively, `sage-gui upgrade propose --wait` does the same climb attached to the terminal.
 
 ### 3. Halt detection
 
@@ -598,7 +598,7 @@ Crash-loop circuit breaker: 3 non-HALT crashes within a 60s sliding window halts
 
 ### Operator behaviour
 
-For sovereign single-machine users (the dominant deployment), the entire substrate is invisible. Drop a v7.5+ binary into `~/.sage/bin/`, restart `sage-gui`, and it just works:
+For sovereign single-machine users (the dominant deployment), the entire substrate is invisible. Drop the current binary into `~/.sage/bin/`, restart `sage-gui`, and it just works:
 
 - No `sage-cli` subcommand is introduced.
 - The existing detached-launcher flow (used by macOS `.app` / Windows `.exe` double-click) is preserved. `--supervise` is opt-in.
@@ -1194,11 +1194,11 @@ results = client.query("your query", status_filter="committed")
 
 New memories start as `proposed` and only become `committed` after reaching quorum (>= 2/3 weighted validator votes).
 
-> **Phase 2 (v8.2+) note:** the quorum check consults each validator's PoE weight on **post-fork blocks** — gated by `app.postV8_2Fork(height)` in `checkAndApplyQuorum` (`internal/abci/app.go`). Pre-v8.2-activation blocks (and any v8.1.x chain) keep the equal-weight 2/3-majority branch so they replay byte-identical to v8.1.2. Weights are computed every epoch boundary by `processEpoch` and persisted on-chain at `poew:<validatorID>` (IEEE-754 BE float64) + `poew:current` (uvarint epoch number), so a node restart between epoch boundaries hydrates the same weight set its peers are running with. Validators added mid-epoch (PoEWeight == 0 until the next boundary) fall back to `1/N` via `poeWeightOrFallback` — they aren't silently disenfranchised, but their vote carries equal-share weight until they earn a real one.
+> **Current quorum weighting:** the quorum check consults each validator's PoE weight on current-chain blocks. Legacy equal-weight branches remain only for byte-identical replay before the relevant fork activations. Weights are computed every epoch boundary by `processEpoch` and persisted on-chain at `poew:<validatorID>` (IEEE-754 BE float64) + `poew:current` (uvarint epoch number), so a node restart between epoch boundaries hydrates the same weight set its peers are running with. Validators added mid-epoch (PoEWeight == 0 until the next boundary) fall back to `1/N` via `poeWeightOrFallback` until they earn a real one.
 >
-> **Phase 2 (v8.3+) note — real accuracy + corroboration:** on **post-`app-v4` blocks** (gated by `app.postV8_3Fork(height)`), two of the remaining stubs become real. `accuracy` is the verdict-correctness EWMA (`poe.EWMATracker.Accuracy()` over "did this validator's vote match the final committed/deprecated verdict"), and `corr_score` is `CorroborationScore(CorrCount)` over the validator's lifetime verdict-match count. Both are credited at the terminal-verdict transition in `checkAndApplyQuorum` and persisted in the `vstats:<validatorID>` record, which grows 24→56 bytes post-fork (legacy 24-byte records decode with the new fields zero, reading as the v8.2 cold-start values, so the migration is seamless and pre-fork replay is byte-identical). Activation resets accuracy to the 0.5 cold-start on chains with vote history (a one-time, intended reweighting — pre-fork "accuracy" was accept-propensity, not correctness).
+> **Current accuracy + corroboration:** `accuracy` is the verdict-correctness EWMA (`poe.EWMATracker.Accuracy()` over "did this validator's vote match the final committed/deprecated verdict"), and `corr_score` is `CorroborationScore(CorrCount)` over the validator's lifetime verdict-match count. Both are credited at the terminal-verdict transition in `checkAndApplyQuorum` and persisted in the `vstats:<validatorID>` record.
 >
-> **Phase 2 (v8.4+) note — real domain factor (last Phase-1 stub closed):** on **post-`app-v5` blocks** (gated by `app.postV8_4Fork(height)`), the `domain_score` becomes real *per-memory* rather than the flat 0.5. When a memory in a non-shared domain `D` is voted on, `checkAndApplyQuorum` weights each validator's vote by its **verdict-correctness in `D`** — a per-domain verdict-correctness EWMA persisted at `vstats_domain:<validatorID>:<D>` (the same 24/56-byte codec as `vstats:`), with the global accuracy/recency/corroboration factors recomputed live from `vstats:<validatorID>`. The memory's domain is recorded at submit time in `memdomain:<memoryID>` (the on-chain `memory:<id>` record stores only contentHash+status). Shared catch-all domains (`general`, `self`, `meta`, and the `sage-*` prefix family) and unknown/legacy memories fall back to the v8.2 scalar `PoEWeight`, so domain weighting only bites where subject-matter expertise is meaningful. The per-epoch scalar `domain_score` in `processEpoch` stays 0.5 by design — it is only the fallback weight; the real domain factor is applied per-memory in quorum. With this, **none of the four `ComputeWeight` factors remain Phase-1 stubs.** Pre-fork replay is byte-identical (new key prefixes only written post-`app-v5`); epoch weight normalization is also made deterministic (sorted-key sum) at this fork so the persisted `poew:` bits agree across replicas.
+> **Current domain factor:** for a memory in a non-shared domain `D`, `checkAndApplyQuorum` weights each validator's vote by its **verdict-correctness in `D`** — a per-domain verdict-correctness EWMA persisted at `vstats_domain:<validatorID>:<D>`, with global accuracy/recency/corroboration recomputed live from `vstats:<validatorID>`. The memory's domain is recorded at submit time in `memdomain:<memoryID>`. Shared catch-all domains (`general`, `self`, `meta`, and the `sage-*` prefix family) and unknown legacy memories fall back to the scalar `PoEWeight`; domain weighting applies where subject-matter expertise is meaningful.
 
 ### Data reset
 

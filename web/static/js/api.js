@@ -666,6 +666,14 @@ export async function checkOllamaEmbed() {
     const res = await fetch(`${API_BASE}/v1/dashboard/embeddings/check-ollama`, { method: 'POST' });
     return res.json();
 }
+export function installOllamaRuntime() {
+    return fetch(`${API_BASE}/v1/dashboard/embeddings/install-ollama`, { method: 'POST' });
+}
+export async function startOllamaRuntime() {
+    const res = await fetch(`${API_BASE}/v1/dashboard/embeddings/start-ollama`, { method: 'POST' });
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || `HTTP ${res.status}`); }
+    return res.json();
+}
 // Streaming endpoints — return the Response so the caller reads .body progressively
 // (each line is "key: value\n"; final line is "done: 0|1").
 export function pullEmbedModel() {

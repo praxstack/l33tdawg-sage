@@ -1,8 +1,8 @@
-# SAGE v7.1 reranker sidecar
+# SAGE reranker sidecar
 
-A tiny FastAPI server that wraps `sentence_transformers.CrossEncoder` to expose the same `POST /rerank` contract HuggingFace's Text Embeddings Inference (TEI) does. SAGE's hybrid-recall reranker client (`internal/embedding/reranker.go`) talks to either equivalently.
+A tiny FastAPI server that wraps `sentence_transformers.CrossEncoder` to expose the same `POST /rerank` contract HuggingFace's Text Embeddings Inference (TEI) does. SAGE's hybrid-recall reranker client (`internal/embedding/reranker.go`) talks to TEI-compatible services and the v11 managed llama.cpp sidecar.
 
-The sidecar exists because TEI ships amd64-only CPU images, and running them under Rosetta translation on Apple Silicon tends to OOM during the `bge-reranker-v2-m3` warmup phase. This sidecar runs natively on arm64 with MPS (Apple GPU) acceleration when available, so the v7.1 bench is reproducible on Mac without Docker emulation in the loop.
+In v11, the normal user path is the CEREBRUM-managed llama.cpp reranker setup. This FastAPI server remains useful for benchmark reproducibility, TEI-compatible experiments, and hosts where you want native MPS/CUDA acceleration without a container around the inference loop.
 
 ## When to use which
 
@@ -44,7 +44,7 @@ export SAGE_RERANK_URL=http://localhost:18090
 sage-gui serve
 ```
 
-When SAGE is in a Docker container (e.g. `sage:v7.1-bench` during a bench run), use `host.docker.internal` so the container reaches the sidecar process on the host:
+When SAGE is in a Docker container during a bench run, use `host.docker.internal` so the container reaches the sidecar process on the host:
 
 ```bash
 docker run -d --name sage-bench --rm -p 18080:8080 \
@@ -52,8 +52,9 @@ docker run -d --name sage-bench --rm -p 18080:8080 \
   -e REST_ADDR=0.0.0.0:8080 \
   -e SAGE_RERANK_ENABLED=1 \
   -e SAGE_RERANK_URL=http://host.docker.internal:18090 \
+  -e SAGE_RERANK_KIND=tei \
   -e SAGE_RERANK_MODEL=BAAI/bge-reranker-v2-m3 \
-  sage:v7.1-bench
+  sage:bench
 ```
 
 ## Smoke test

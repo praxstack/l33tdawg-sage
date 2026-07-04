@@ -36,11 +36,33 @@ const (
 	reembedPageSize = 100
 )
 
+type OllamadManager interface {
+	BinaryPath() (string, bool)
+	EngineInstalled() bool
+	InstallSupported() bool
+	EngineSizeBytes() int64
+	Installing() bool
+	Pulling() bool
+	Progress() (done, total int64)
+	PullStatus() string
+	InstallEngine(ctx context.Context, progress func(done, total int64)) error
+	Start(ctx context.Context) (string, error)
+	Probe(ctx context.Context) bool
+	ModelReady(ctx context.Context) bool
+	PullModel(ctx context.Context, status func(string), progress func(done, total int64)) error
+	URL() string
+}
+
 // RegisterEmbeddingsRoutes wires the embeddings-setup routes (authed group).
 func (h *DashboardHandler) RegisterEmbeddingsRoutes(r chi.Router) {
 	r.Get("/v1/dashboard/embeddings/status", h.handleEmbeddingsStatus)
 	r.Post("/v1/dashboard/embeddings/check-ollama", h.handleEmbeddingsCheckOllama)
-	r.Post("/v1/dashboard/embeddings/pull-model", h.handleEmbeddingsPullModel)
+	r.Group(func(r chi.Router) {
+		r.Use(h.wizardSecurityGate)
+		r.Post("/v1/dashboard/embeddings/install-ollama", h.handleEmbeddingsInstallOllama)
+		r.Post("/v1/dashboard/embeddings/start-ollama", h.handleEmbeddingsStartOllama)
+		r.Post("/v1/dashboard/embeddings/pull-model", h.handleEmbeddingsPullModel)
+	})
 	r.Post("/v1/dashboard/embeddings/reembed", h.handleEmbeddingsReembed)
 	r.Get("/v1/dashboard/embeddings/reembed/progress", h.handleEmbeddingsReembedProgress)
 	r.Post("/v1/dashboard/embeddings/deprecate-unreadable", h.handleEmbeddingsDeprecateUnreadable)
@@ -63,22 +85,52 @@ func (h *DashboardHandler) handleEmbeddingsStatus(w http.ResponseWriter, r *http
 		total += n
 	}
 	current := currentEmbedProvider(h.embedder)
-	ollamaUp := ollamaRunning(r.Context())
-	modelReady := ollamaUp && ollamaHasModel(r.Context(), embedModel)
+	ollamaUp := h.embeddingOllamaRunning(r.Context())
+	modelReady := ollamaUp && h.embeddingOllamaHasModel(r.Context())
+	binPath, binFound := "", false
+	engineInstalled, installSupported, installing, pulling := false, false, false, false
+	var engineBytes, modelDone, modelTotal int64
+	pullStatus := ""
+	if h.Ollamad != nil {
+		binPath, binFound = h.Ollamad.BinaryPath()
+		engineInstalled = h.Ollamad.EngineInstalled()
+		installSupported = h.Ollamad.InstallSupported()
+		engineBytes = h.Ollamad.EngineSizeBytes()
+		installing = h.Ollamad.Installing()
+		pulling = h.Ollamad.Pulling()
+		modelDone, modelTotal = h.Ollamad.Progress()
+		pullStatus = h.Ollamad.PullStatus()
+	}
 
 	writeJSONResp(w, http.StatusOK, map[string]any{
-		"provider":        current, // active embedder: "hash" | "ollama" | ...
-		"is_semantic":     current == embedProviderOllama,
-		"model":           embedModel,
-		"dimension":       embedDimension,
-		"ollama_running":  ollamaUp,
-		"model_available": modelReady,
-		"total_memories":  total,
-		"need_reembed":    counts[""], // untagged memories still needing an embedding (excludes done + skipped)
-		"on_ollama":       counts[embedProviderOllama],
-		"unreadable":      counts["skipped"], // undecryptable/empty — deprecation candidates
-		"errored":         counts["error"],   // readable but embed failed — retryable
-		"vault_locked":    h.VaultLocked.Load(),
+		"provider":                 current, // active embedder: "hash" | "ollama" | ...
+		"is_semantic":              current == embedProviderOllama,
+		"model":                    embedModel,
+		"dimension":                embedDimension,
+		"ollama_running":           ollamaUp,
+		"model_available":          modelReady,
+		"ollama_binary_found":      binFound,
+		"ollama_binary_path":       binPath,
+		"ollama_engine_installed":  engineInstalled,
+		"ollama_install_supported": installSupported,
+		"ollama_engine_bytes":      engineBytes,
+		"ollama_installing":        installing,
+		"ollama_pulling":           pulling,
+		"ollama_model_done":        modelDone,
+		"ollama_model_total":       modelTotal,
+		"ollama_pull_status":       pullStatus,
+		"ollama_url": func() string {
+			if h.Ollamad != nil {
+				return h.Ollamad.URL()
+			}
+			return ollamaBaseURL
+		}(),
+		"total_memories": total,
+		"need_reembed":   counts[""], // untagged memories still needing an embedding (excludes done + skipped)
+		"on_ollama":      counts[embedProviderOllama],
+		"unreadable":     counts["skipped"], // undecryptable/empty — deprecation candidates
+		"errored":        counts["error"],   // readable but embed failed — retryable
+		"vault_locked":   h.VaultLocked.Load(),
 	})
 }
 
@@ -101,12 +153,78 @@ func currentEmbedProvider(e Embedder) string {
 // handleEmbeddingsCheckOllama reports whether Ollama is reachable and whether the
 // bundled model is pulled.
 func (h *DashboardHandler) handleEmbeddingsCheckOllama(w http.ResponseWriter, r *http.Request) {
-	up := ollamaRunning(r.Context())
+	up := h.embeddingOllamaRunning(r.Context())
 	writeJSONResp(w, http.StatusOK, map[string]any{
 		"ollama_running":  up,
 		"model":           embedModel,
-		"model_available": up && ollamaHasModel(r.Context(), embedModel),
+		"model_available": up && h.embeddingOllamaHasModel(r.Context()),
 	})
+}
+
+func (h *DashboardHandler) handleEmbeddingsInstallOllama(w http.ResponseWriter, r *http.Request) {
+	if h.Ollamad == nil {
+		writeError(w, http.StatusNotImplemented, "managed Ollama setup not available on this node")
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming unsupported")
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{}) //nolint:errcheck
+	w.WriteHeader(http.StatusOK)
+	line := func(k, v string) { fmt.Fprintf(w, "%s: %s\n", k, v); flusher.Flush() }
+	if h.Ollamad.Installing() {
+		h.streamOllamaProgress(r.Context(), h.Ollamad.Installing, h.Ollamad.EngineInstalled, line)
+		return
+	}
+	instCtx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
+	defer cancel()
+	lastEmit := time.Time{}
+	err := h.Ollamad.InstallEngine(instCtx, func(done, total int64) {
+		if time.Since(lastEmit) < 250*time.Millisecond && done != total {
+			return
+		}
+		lastEmit = time.Now()
+		line("progress", fmt.Sprintf("%d %d", done, total))
+	})
+	if err != nil {
+		if h.Ollamad.EngineInstalled() {
+			line("done", "0")
+			return
+		}
+		if h.Ollamad.Installing() {
+			h.streamOllamaProgress(r.Context(), h.Ollamad.Installing, h.Ollamad.EngineInstalled, line)
+			return
+		}
+		line("error", err.Error())
+		line("done", "1")
+		return
+	}
+	line("done", "0")
+}
+
+func (h *DashboardHandler) handleEmbeddingsStartOllama(w http.ResponseWriter, r *http.Request) {
+	if h.Ollamad == nil {
+		writeError(w, http.StatusNotImplemented, "managed Ollama setup not available on this node")
+		return
+	}
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(80 * time.Second)) //nolint:errcheck
+	ctx, cancel := context.WithTimeout(r.Context(), 75*time.Second)
+	defer cancel()
+	url, err := h.Ollamad.Start(ctx)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if h.prefStore != nil {
+		_ = h.prefStore.SetPreference(r.Context(), "ollama_managed", "1")
+		_ = h.prefStore.SetPreference(r.Context(), "ollama_url", url)
+	}
+	writeJSONResp(w, http.StatusOK, map[string]any{"ok": true, "url": url})
 }
 
 // handleEmbeddingsPullModel streams `ollama pull nomic-embed-text` progress as
@@ -126,6 +244,34 @@ func (h *DashboardHandler) handleEmbeddingsPullModel(w http.ResponseWriter, r *h
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{}) //nolint:errcheck // best-effort; unsupported writers keep prior behaviour
 	w.WriteHeader(http.StatusOK)
 	line := func(k, v string) { fmt.Fprintf(w, "%s: %s\n", k, v); flusher.Flush() }
+
+	if h.Ollamad != nil {
+		if h.Ollamad.Pulling() {
+			h.streamOllamaProgress(r.Context(), h.Ollamad.Pulling, func() bool { return h.Ollamad.ModelReady(r.Context()) }, line)
+			return
+		}
+		pullCtx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
+		defer cancel()
+		err := h.Ollamad.PullModel(pullCtx,
+			func(status string) { line("status", status) },
+			func(done, total int64) { line("progress", fmt.Sprintf("%d %d", done, total)) },
+		)
+		if err != nil {
+			if h.Ollamad.ModelReady(r.Context()) {
+				line("done", "0")
+				return
+			}
+			if h.Ollamad.Pulling() {
+				h.streamOllamaProgress(r.Context(), h.Ollamad.Pulling, func() bool { return h.Ollamad.ModelReady(r.Context()) }, line)
+				return
+			}
+			line("error", err.Error())
+			line("done", "1")
+			return
+		}
+		line("done", "0")
+		return
+	}
 
 	body, _ := json.Marshal(map[string]any{"name": embedModel, "stream": true})
 	req, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, ollamaBaseURL+"/api/pull", strings.NewReader(string(body)))
@@ -156,6 +302,35 @@ func (h *DashboardHandler) handleEmbeddingsPullModel(w http.ResponseWriter, r *h
 		}
 	}
 	line("done", "0")
+}
+
+func (h *DashboardHandler) streamOllamaProgress(ctx context.Context, active func() bool, complete func() bool, line func(k, v string)) {
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if h.Ollamad != nil {
+			if status := h.Ollamad.PullStatus(); h.Ollamad.Pulling() && status != "" {
+				line("status", status)
+			}
+			if done, total := h.Ollamad.Progress(); total > 0 {
+				line("progress", fmt.Sprintf("%d %d", done, total))
+			}
+		}
+		if !active() {
+			if complete() {
+				line("done", "0")
+			} else {
+				line("error", "operation did not complete")
+				line("done", "1")
+			}
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // reembedJob is the live state of the SERVER-SIDE background re-embed job. It is
@@ -212,7 +387,7 @@ func (h *DashboardHandler) handleEmbeddingsReembed(w http.ResponseWriter, r *htt
 		writeError(w, http.StatusForbidden, "unlock the vault before re-embedding")
 		return
 	}
-	if !ollamaRunning(r.Context()) || !ollamaHasModel(r.Context(), embedModel) {
+	if !h.embeddingOllamaRunning(r.Context()) || !h.embeddingOllamaHasModel(r.Context()) {
 		writeError(w, http.StatusPreconditionFailed, "Ollama with "+embedModel+" is not available")
 		return
 	}
@@ -397,7 +572,7 @@ func (h *DashboardHandler) recoverOrphans(w http.ResponseWriter, r *http.Request
 			// is true - otherwise they sit unembedded until someone finds the
 			// Settings CTA. Same guarded start as handleEmbeddingsReembed.
 			if currentEmbedProvider(h.embedder) == embedProviderOllama &&
-				ollamaRunning(r.Context()) && ollamaHasModel(r.Context(), embedModel) {
+				h.embeddingOllamaRunning(r.Context()) && h.embeddingOllamaHasModel(r.Context()) {
 				h.reembed.mu.Lock()
 				if !h.reembed.running {
 					counts2, _ := h.store.CountMemoriesByProvider(r.Context())
@@ -413,6 +588,20 @@ func (h *DashboardHandler) recoverOrphans(w http.ResponseWriter, r *http.Request
 		}
 	}
 	writeJSONResp(w, http.StatusOK, resp)
+}
+
+func (h *DashboardHandler) embeddingOllamaRunning(ctx context.Context) bool {
+	if h.Ollamad != nil {
+		return h.Ollamad.Probe(ctx)
+	}
+	return ollamaRunning(ctx)
+}
+
+func (h *DashboardHandler) embeddingOllamaHasModel(ctx context.Context) bool {
+	if h.Ollamad != nil {
+		return h.Ollamad.ModelReady(ctx)
+	}
+	return ollamaHasModel(ctx, embedModel)
 }
 
 // handleEmbeddingsEnable switches the node's embedding provider to Ollama in

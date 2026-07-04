@@ -1,8 +1,8 @@
-<!-- Verified against code at SAGE v8.1.1 (commit 2ca50ba) -->
+<!-- Reconciled through SAGE v11.0.2. -->
 
 # RBAC, Organizations, and Federation
 
-Verified against code at SAGE v8.1.1 (commit 2ca50ba).
+Verified against code at SAGE v11.0.2.
 
 ## Overview
 
@@ -24,10 +24,10 @@ All RBAC state is on-chain. Organizations, departments, clearance levels, access
 
 `POST /v1/org/register` → `handleOrgRegister` (`api/rest/org_handler.go:56+`) → `TxTypeOrgRegister` → `processOrgRegister` (`internal/abci/app.go`).
 
-The `OrgID` field in `tx.OrgRegister` (`internal/tx/types.go:169-174`) is deterministic: `SHA256(admin_agent_pubkey + name)`. The registering agent becomes the `AdminAgent`. One admin per org at registration; additional admins can be added via `OrgAddMember` with role `"admin"`.
+The REST handler precomputes `OrgID` as `hex(SHA256(admin_agent_pubkey + name)[:16])` before broadcasting. If a transaction arrives without an ID, ABCI derives a deterministic fallback from `adminID:name:height`. The registering agent becomes the `AdminAgent`. One admin per org at registration; additional admins can be added via `OrgAddMember` with role `"admin"`.
 
 BadgerDB key: `org:<orgID>` with JSON-encoded org record.
-Reverse index: `org_name:<normalized_name>` → org IDs (enables `GET /v1/org/by-name/{name}`).
+Reverse index: `org_name:<name>:<orgID>` marker entries enable name lookup without assuming org names are unique.
 
 ### Membership
 
@@ -38,9 +38,9 @@ Fields: `OrgID`, `AgentID`, `Clearance` (0-4), `Role` (`"admin"`, `"member"`, `"
 BadgerDB keys:
 - `org_member:<orgID>:<agentID>` — the membership record
 - `agent_org:<agentID>` → org ID (legacy single-slot reverse index)
-- `agent_orgs:<agentID>` → JSON array of all org IDs (v8+ multi-org reverse index)
+- `agent_orgs:<agentID>:<orgID>` — marker entry for each membership
 
-**Multi-org membership note:** An agent can belong to multiple organizations. `HasAccessMultiOrg` iterates `ListAgentOrgs(agentID)` which reads the `agent_orgs:` key. The legacy `agent_org:` single-slot was silently dropping non-primary memberships from access checks; the multi-org index was backfilled at `BadgerStore` open time (since v8.0, `store/badger.go:53-61`).
+**Multi-org membership note:** An agent can belong to multiple organizations. `HasAccessMultiOrg` iterates `ListAgentOrgs(agentID)`, which prefix-scans `agent_orgs:<agentID>:` marker entries. The legacy `agent_org:` single-slot is retained for compatibility.
 
 ### Clearance Updates
 
@@ -98,7 +98,7 @@ When an agent submits a memory to a domain that has no registered owner and is n
 **Shared domains** (never auto-registered, writable by any authenticated agent):
 - Exact names: `general`, `self`, `meta` (`app.go:766-770`)
 - Prefix match: `sage-*` (`app.go:780-782`)
-- Post-v8.0: any domain with on-chain `shared_domain:<name>` sentinel (set by `TxTypeDomainReassign` with `OpenToShared=true`)
+- Any domain with on-chain `shared_domain:<name>` sentinel (set by `TxTypeDomainReassign` with `OpenToShared=true`)
 
 ### Explicit Grants
 
@@ -106,11 +106,11 @@ When an agent submits a memory to a domain that has no registered owner and is n
 
 BadgerDB key: `grant:<domain>:<agentID>`, value: `level(1 byte) + expiresAt(8 bytes big-endian)`.
 
-`Level` values: `1` = read, `2` = read+write.
+`Level` values: `1` = read, `2` = read+write, `3` = modify on app-v15+ chains (`internal/abci/app.go:3949-3955`).
 
 `ExpiresAt`: Unix timestamp; `0` = permanent.
 
-**Important known limitation (v7.1.x):** `POST /v1/access/grant` returns HTTP 201 even if the tx is subsequently rejected at `FinalizeBlock` (e.g., the granter is not the domain owner). Always verify the grant landed with `GET /v1/access/grants/{agent_id}`.
+The REST handler uses `broadcast_tx_commit`, so a `FinalizeBlock` rejection is surfaced before the handler returns (`api/rest/access_handler.go:163-169`). A grant on a genuinely unowned, non-shared domain auto-registers the granter as owner before writing the grant; owned domains require owner or ancestor-owner authority (`internal/abci/app.go:3844-3964`).
 
 ### Access Requests
 
@@ -145,7 +145,7 @@ Applied when `domainAccessApproved == false` and the domain has a registered own
 
 `resolveVisibleAgents(agentID)` (`memory_handler.go:258-320`) returns `(allowedAgentIDs, seeAll)`:
 
-- `agentID == nodeOperatorID` → `seeAll = true` (node operator bypass, v7.1+)
+- `agentID == nodeOperatorID` → `seeAll = true` (node operator bypass)
 - `role == "admin"` → `seeAll = true`
 - `visible_agents == "*"` → `seeAll = true`
 - **Any org member with clearance=4 (TOP SECRET)** → `seeAll = true` (`agentHasTopSecretClearance` check, `memory_handler.go:310`)
@@ -168,7 +168,7 @@ See `clearance-classification.md` for the full specification. Applied after the 
 
 ## HasAccessMultiOrg Algorithm
 
-Source: `internal/store/badger.go:2047-2151`.
+Source: `internal/store/badger.go:3113-3188`.
 
 ```
 HasAccessMultiOrg(domain, agentID, memoryClassification, blockTime, postFork):
@@ -202,7 +202,7 @@ HasAccessMultiOrg(domain, agentID, memoryClassification, blockTime, postFork):
 return false
 ```
 
-**Pre/post-fork note:** `postFork` is `app.postV8Fork(height)` on the consensus path and `app.IsPostV8Fork()` (advisory) on REST handlers. Pre-fork = exact-match semantics (v7.1.1-equivalent). Post-fork = ancestor-walk for grants and domain ownership.
+**Current semantics:** On live v11 chains, access checks use ancestor-walk behavior for grants and domain ownership. Exact-match behavior remains only for replaying pre-fork history.
 
 ---
 

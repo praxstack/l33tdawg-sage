@@ -1,10 +1,10 @@
-<!-- Verified against code at SAGE v8.1.1 (commit 2ca50ba). Cite file:line when behavior is non-obvious. -->
+<!-- Reconciled through SAGE v11.0.2. Cite file:line when behavior is non-obvious. -->
 
 # SAGE REST API Reference
 
 ## Authentication
 
-All endpoints under `/v1/` (except `GET /v1/agents`) require three headers on every request (`api/rest/middleware/auth.go:81-213`):
+Most core `/v1/*` REST endpoints require Ed25519 request signing (`api/rest/middleware/auth.go:81-213`). Public and alternate-auth exceptions include `GET /v1/agents`, health/readiness routes, OAuth discovery/flows, and the HTTP MCP transports (`/v1/mcp/sse`, `/v1/mcp/messages`, `/v1/mcp/streamable`), which use MCP bearer-token/OAuth authentication.
 
 | Header | Format | Purpose |
 |---|---|---|
@@ -17,10 +17,10 @@ All endpoints under `/v1/` (except `GET /v1/agents`) require three headers on ev
 
 ```
 canonical = METHOD + " " + PATH[?QUERY] + "\n" + BODY
-message   = SHA-256(canonical) + bigEndian(timestamp_int64)
+message   = SHA-256(canonical) + bigEndian(timestamp_int64) + nonce
 ```
 
-With nonce: `auth.VerifyRequestWithNonce` appends nonce bytes before the signature check. Without nonce: legacy `auth.VerifyRequest` applies.
+Include `X-Nonce` on current clients. If `X-Nonce` is absent, the server accepts the legacy nonce-less signature shape for backward compatibility.
 
 **Constraints:**
 - Timestamp must be within ±5 minutes of server time (`auth.go:79`).
@@ -84,12 +84,14 @@ Submit a memory for BFT consensus. Blocks until `broadcast_tx_commit` returns (F
 # Compute timestamp and sign with your Ed25519 key (see SDK for helpers)
 BODY='{"content":"Go 1.22 dropped support for GOPATH mode","memory_type":"fact","domain_tag":"go-debugging","confidence_score":0.95}'
 TS=$(date +%s)
-# signature = ed25519_sign(SHA256("POST /v1/memory/submit\n" + BODY) + bigEndian(TS))
+NONCE=$(openssl rand -hex 8)
+# signature = ed25519_sign(SHA256("POST /v1/memory/submit\n" + BODY) + bigEndian(TS) + hex_decode(NONCE))
 curl -X POST http://localhost:8080/v1/memory/submit \
   -H "Content-Type: application/json" \
   -H "X-Agent-ID: <64-hex-pubkey>" \
   -H "X-Signature: <hex-sig>" \
   -H "X-Timestamp: $TS" \
+  -H "X-Nonce: $NONCE" \
   -d "$BODY"
 ```
 
@@ -531,7 +533,7 @@ All fields are nullable pointers — sending `null` explicitly resets to empty s
 
 ### `POST /v1/access/request`
 
-Request read or read+write access to a domain. Broadcasts `TxTypeAccessRequest`.
+Request domain access. Broadcasts `TxTypeAccessRequest`.
 
 **Request body:**
 
@@ -539,7 +541,7 @@ Request read or read+write access to a domain. Broadcasts `TxTypeAccessRequest`.
 |---|---|---|---|
 | `target_domain` | string | yes | |
 | `justification` | string | no | |
-| `requested_level` | int | no | 1=read, 2=read+write; defaults to 1 |
+| `requested_level` | int | no | 1=read, 2=read+write, 3=modify on app-v15+; defaults to 1 |
 
 **Response** (HTTP 201): `{"status": "pending", "tx_hash": "..."}`
 
@@ -555,7 +557,7 @@ Grant domain access. Caller must own the domain or be admin. Broadcasts `TxTypeA
 |---|---|---|---|
 | `grantee_id` | string | yes | Hex agent ID |
 | `domain` | string | yes | |
-| `level` | int | no | 1=read, 2=read+write; defaults to 1 |
+| `level` | int | no | 1=read, 2=read+write, 3=modify on app-v15+; defaults to 1 |
 | `expires_at` | int64 | no | Unix timestamp, 0=permanent |
 | `request_id` | string | no | Links to originating access request |
 
@@ -1122,35 +1124,6 @@ If the server has `nodeOperatorID` configured (`server.go:50-57`), requests sign
 
 ---
 
-## OpenAPI Drift Notes
+## OpenAPI Status
 
-The following drift was found between `api/openapi.yaml` (version 3.5.0) and the actual handlers in `server.go`:
-
-1. **Missing endpoints in OpenAPI** — The spec documents only a subset of implemented routes. These endpoints exist in code but have no OpenAPI path entry:
-   - `POST /v1/memory/search`
-   - `POST /v1/memory/hybrid`
-   - `POST /v1/memory/link`
-   - `GET /v1/memory/tasks`
-   - `GET /v1/memory/list`
-   - `GET /v1/memory/timeline`
-   - `POST /v1/memory/pre-validate`
-   - `POST /v1/memory/{memory_id}/forget`
-   - `PUT /v1/memory/{memory_id}/task-status`
-   - All access/grant/revoke/list endpoints (`/v1/access/*`)
-   - All org/federation/department endpoints (`/v1/org/*`, `/v1/federation/*`)
-   - All governance vote and cancel endpoints (`/v1/governance/vote`, `/v1/governance/cancel`)
-   - All pipeline endpoints (`/v1/pipe/*`)
-   - All embedding endpoints (`/v1/embed`, `/v1/embed/info`)
-   - All MCP token endpoints (`/v1/mcp/tokens*`)
-   - All OAuth endpoints (`/oauth/*`, `/.well-known/*`)
-   - `GET /v1/agents` (public)
-
-2. **`MemoryType` enum incomplete** — OpenAPI schema lists `fact`, `observation`, `inference` but the handler also accepts `task` (`memory_handler.go:364-367`, `internal/tx/types.go:79`).
-
-3. **`VoteResponse` schema mismatch** — OpenAPI declares `vote_id` field; actual handler returns `tx_hash` (`vote_handler.go:168`).
-
-4. **`classification` field absent from `MemorySubmitRequest` schema** — The spec's `MemorySubmitRequest` does not include `classification`, though the handler accepts and passes it through verbatim. The clearance values in `AgentSetPermissionRequest` description use "Guest" for 0, but the code calls it "PUBLIC".
-
-5. **`/v1/agent/register` response code** — OpenAPI shows HTTP 200 for both new and existing. Handler returns HTTP 201 for new registrations and HTTP 200 for already-registered.
-
-6. **`EpochInfo` schema** — OpenAPI declares `started_at` field (`api/openapi.yaml:543`); the actual `EpochResponse` struct in `vote_handler.go:86-91` does not include `started_at` or `block_height` is present but `epoch_num` comes from a different source. The handler returns `epoch_num`, `block_height`, `scores` — no `started_at`.
+`api/openapi.yaml` is reconciled for the core REST surface documented here. The remaining known gap is response-shape precision on a few organization, federation, and department `GET` routes, where the spec still uses generic objects while the handlers return concrete structs.

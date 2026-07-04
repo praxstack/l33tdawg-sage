@@ -1,8 +1,8 @@
-<!-- Verified against code at SAGE v8.1.1 (commit 2ca50ba) -->
+<!-- Reconciled through SAGE v11.0.2. -->
 
 # Clearance and Classification
 
-Verified against code at SAGE v8.1.1 (commit 2ca50ba).
+Verified against code at SAGE v11.0.2.
 
 ## Overview
 
@@ -30,16 +30,15 @@ Same constants are mirrored at `internal/store/store.go:224-230` as `store.Clear
 
 ## The Two-Path Classification Default — Critical Nuance
 
-Agents frequently get this wrong. There are **two distinct paths** that determine a memory's classification, and they have **different defaults**.
+Agents frequently get this wrong. There are **two distinct paths** that determine a memory's classification.
 
-### Path A: REST submit (v6.8.6+)
+### Path A: REST submit
 
 `POST /v1/memory/submit` → `handleMemorySubmit` (`api/rest/memory_handler.go:407`):
 
 ```go
-// v6.8.6: REST passes the caller's classification through verbatim —
-// 0 means PUBLIC. The prior 0→INTERNAL bump here turned an absent or
-// explicitly-public submission into INTERNAL on the wire.
+// REST passes the caller's classification through verbatim.
+// 0 means PUBLIC.
 classification := req.Classification
 ```
 
@@ -52,8 +51,6 @@ This behavior is verified in `internal/abci/app_test.go:1156-1168`:
 // caller's classification=0 must round-trip as Public, not silently bumped to Internal
 assert.Equal(t, uint8(tx.ClearancePublic), class, ...)
 ```
-
-**Before v6.8.6**, the REST handler bumped `0 → 1 (INTERNAL)`. That caused every cross-agent query on PUBLIC memories to hit the per-record classification gate and be silently dropped for any reader without a shared-org path to the writer — even when `visible_agents="*"` was granted. That bug is fixed.
 
 ### Path B: On-chain wire decode (old txs)
 
@@ -75,7 +72,7 @@ When decoding a **legacy on-chain tx** that predates the classification byte (th
 
 | Scenario | Classification result |
 |----------|-----------------------|
-| REST submit with `classification=0` or omitted (v6.8.6+) | `0` (PUBLIC) stored on-chain |
+| REST submit with `classification=0` or omitted | `0` (PUBLIC) stored on-chain |
 | REST submit with `classification=1` explicitly | `1` (INTERNAL) stored on-chain |
 | Old tx decoded from chain history (no classification byte) | `1` (INTERNAL) via codec default |
 
@@ -131,7 +128,7 @@ If a memory has **no classification key in BadgerDB** (e.g. submitted before v6.
 
 ## Classification Storage
 
-- **BadgerDB (on-chain):** key `memclass:<memoryID>`, single byte value. Written in `processMemorySubmit` (`app.go:970`):
+- **BadgerDB (on-chain):** key `mem_class:<memoryID>`, single byte value. Written in `processMemorySubmit`:
   ```go
   classification := uint8(submit.Classification)
   app.badgerStore.SetMemoryClassification(memoryID, classification)

@@ -27,7 +27,7 @@ sudo mv sage-gui /usr/local/bin/  # or add to your PATH
 
 ```bash
 sage-gui version
-# sage-gui v11.0.1
+# sage-gui v11.0.2
 ```
 
 ---
@@ -107,8 +107,8 @@ Out of the box SAGE recalls by **keywords**. Turning on the bundled semantic emb
 
 Open the guided setup from the onboarding wizard, or from **Settings > Recall**. SAGE walks a non-technical path end to end:
 
-1. **Detect Ollama** - SAGE uses [Ollama](https://ollama.ai), a free local model runner, to host the embedder. If it is not installed yet, the screen tells you how to get it.
-2. **Download the model** - it pulls `nomic-embed-text` (the embedder) with a live progress bar if you do not already have it.
+1. **Install and start Ollama** - SAGE downloads a pinned Ollama runtime for your platform, verifies the asset checksum, installs it under `~/.sage/`, starts it on loopback, and proceeds only after the local API answers.
+2. **Download the model** - it pulls `nomic-embed-text` (the embedder) through Ollama with live progress if you do not already have it.
 3. **Re-embed your existing memories** - anything already in your brain is re-embedded so old and new memories are searchable the same way. This runs as a **background job on the node**: it survives closing the modal, reloading, or switching tabs, and a progress banner keeps you posted in every tab. Memories that cannot be read or embedded are surfaced honestly rather than silently skipped, and you can re-run setup to retry them.
 4. **Switch recall over** - SAGE flips the node to the semantic embedder (a brief restart) and you are done.
 
@@ -356,11 +356,11 @@ Each agent automatically gets its own permanent key file and unique Agent ID, wh
 
 ---
 
-## Using Ollama for Local Embeddings
+## Using your own Ollama for Local Embeddings
 
-For fully private, local-only operation:
+The guided smart-memory setup above is the recommended path: SAGE installs, starts, and checks the local Ollama runtime for you. If you prefer to manage Ollama yourself, you can still configure SAGE manually:
 
-1. Install Ollama: https://ollama.ai
+1. Install and start Ollama from https://ollama.ai
 2. Pull the embedding model:
    ```bash
    ollama pull nomic-embed-text
@@ -384,7 +384,7 @@ Privacy first. Your memories never leave your machine.
 
 | Provider | Quality | Privacy | Cost | Setup |
 |----------|---------|---------|------|-------|
-| **Ollama** | Smart semantic search | Fully local | Free | Install Ollama |
+| **Ollama** | Smart semantic search | Fully local | Free | Guided SAGE setup |
 | **Hash** | Keyword matching only | Fully local | Free | Nothing needed |
 
 The hash provider generates deterministic pseudo-embeddings from text hashes. It works offline with zero setup but doesn't provide semantic similarity. Upgrade to Ollama when you want your AI to find related memories even with different wording.
@@ -481,7 +481,7 @@ rest_addr: ":8081"
 
 **"embedding provider error"**
 - OpenAI: verify your API key is valid and has credits
-- Ollama: make sure Ollama is running (`ollama serve`)
+- Ollama: reopen the smart-memory setup from CEREBRUM so SAGE can check the local runtime, model, and re-embedding status
 - Switch to hash provider for zero-dependency operation
 
 **Where are my memories?**

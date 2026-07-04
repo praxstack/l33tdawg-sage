@@ -1,10 +1,10 @@
-Verified against internal/mcp at SAGE v8.1.1 (commit 2ca50ba).
+Reconciled against internal/mcp at SAGE v11.0.2.
 
 # SAGE MCP Tools Reference
 
-SAGE exposes 18 MCP tools over JSON-RPC 2.0 (stdio transport; also SSE and
-Streamable-HTTP). All calls are Ed25519-signed. Only consensus-committed
-memories are returned to callers.
+SAGE exposes 20 MCP tools over JSON-RPC 2.0. Stdio tools sign REST calls with
+the local Ed25519 identity; SSE and Streamable-HTTP use the MCP bearer-token/OAuth
+flow. Only consensus-committed memories are returned to callers.
 
 ---
 
@@ -27,9 +27,10 @@ non-negotiable:
 - Skipping `sage_reflect` breaks the feedback loop. Paper 4 measured Spearman
   rho=0.716 improvement over time with memory vs rho=0.040 without it.
 
-The server enforces turn discipline: after 7 non-SAGE tool calls or 5 minutes
-without `sage_turn`, the server blocks further calls and returns an error until
-`sage_turn` is called (`server.go:331-351`).
+The server enforces turn discipline: it blocks non-SAGE tool calls after 7
+non-SAGE calls without `sage_turn`, or after more than 5 minutes since the last
+`sage_turn` once at least 2 non-SAGE calls have accumulated. Calling `sage_turn`
+resets the guard (`server.go:327-349`).
 
 ---
 
@@ -265,6 +266,54 @@ moves to `challenged`, not immediately deleted. Consensus governs final removal.
 
 **When to call:** When a memory contains outdated or incorrect information —
 e.g. an IP address changed, a decision was reversed, or a fact was disproven.
+
+---
+
+### sage_corroborate
+
+**Purpose:** Independently corroborate a committed memory. The submitting agent
+cannot corroborate its own memory.
+
+**Source:** `tools.go:298-310` (definition), `tools.go:2010-2055` (handler)
+
+**Parameters:**
+
+| Name        | Type   | Required | Description |
+|-------------|--------|----------|-------------|
+| `memory_id` | string | yes      | The memory ID to corroborate. |
+| `evidence`  | string | no       | Optional supporting note or citation. |
+
+**Returns:**
+- `memory_id`, `status`, and the REST response from the corroboration endpoint.
+
+**REST:** `POST /v1/memory/{memory_id}/corroborate`
+
+**When to call:** When an independent source supports an existing memory and you
+want that support captured without creating a duplicate memory.
+
+---
+
+### sage_link
+
+**Purpose:** Create a typed, directional relationship between two memories.
+
+**Source:** `tools.go:311-326` (definition), `tools.go:708-760` (handler)
+
+**Parameters:**
+
+| Name        | Type   | Required | Description |
+|-------------|--------|----------|-------------|
+| `source_id` | string | yes      | Source memory ID. |
+| `target_id` | string | yes      | Target memory ID. |
+| `link_type` | string | no       | Relationship type. Default: `related`. |
+
+**Returns:**
+- `status`, `source_id`, `target_id`, `link_type`.
+
+**REST:** `POST /v1/memory/link`
+
+**When to call:** When a task, fact, observation, or inference should be connected
+to another memory for future traversal.
 
 ---
 
@@ -608,6 +657,10 @@ None. All tools mentioned in CLAUDE.md, MEMORY.md, and the MCP server
 
 ### Tools in tools.go not in documented boot sequence
 
+`sage_corroborate` and `sage_link` are core memory graph tools, but not part of
+the boot sequence. They are used only when a caller needs to strengthen or
+connect existing memories.
+
 `sage_gov_propose`, `sage_gov_vote`, `sage_gov_status` — governance tools —
 are not part of the boot sequence. This is correct: they are admin/validator
 operations, not agent memory operations.
@@ -624,12 +677,12 @@ needing to call these explicitly.
 
 ## Summary
 
-**18 tools documented:**
+**20 tools documented:**
 
 | Category     | Tools |
 |--------------|-------|
 | Boot / lifecycle | `sage_inception`, `sage_red_pill`, `sage_turn`, `sage_reflect` |
-| Core memory  | `sage_remember`, `sage_recall`, `sage_forget` |
+| Core memory  | `sage_remember`, `sage_recall`, `sage_forget`, `sage_corroborate`, `sage_link` |
 | Browse       | `sage_list`, `sage_timeline`, `sage_status` |
 | Tasks        | `sage_task`, `sage_backlog` |
 | Identity     | `sage_register` |
