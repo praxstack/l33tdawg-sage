@@ -161,6 +161,8 @@ func (r *HTTPReranker) Rerank(ctx context.Context, query string, texts []string)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
+	// lgtm[go/request-forgery] -- baseURL is accepted only after
+	// netguard.LocalLANHTTPBase validates localhost/RFC1918/ULA HTTP(S).
 	resp, err := r.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("rerank request: %w", err)

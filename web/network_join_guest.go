@@ -320,6 +320,8 @@ func guestPost(url string, body []byte, out any) (int, error) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	client := &http.Client{Timeout: 10 * time.Second}
+	// lgtm[go/request-forgery] -- endpoint is derived from a pairing token but
+	// accepted only after netguard.LocalLANHTTPBase validates localhost/RFC1918/ULA.
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0, err

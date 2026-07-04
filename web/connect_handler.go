@@ -87,6 +87,8 @@ func (h *DashboardHandler) handleConnectProvider(w http.ResponseWriter, r *http.
 			writeError(w, http.StatusBadRequest, cleanErr.Error())
 			return
 		}
+		// lgtm[go/path-injection] -- this same-origin dashboard action is
+		// intentionally scoped to an operator-selected local project directory.
 		info, err := os.Stat(cleanPath)
 		if err != nil {
 			if os.IsNotExist(err) {

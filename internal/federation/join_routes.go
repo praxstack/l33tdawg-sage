@@ -1024,6 +1024,8 @@ func (m *Manager) fetchHostCA(ctx context.Context, hostEndpoint, sessionID strin
 	}
 	client := &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}}
 	defer client.CloseIdleConnections()
+	// lgtm[go/request-forgery] -- hostEndpoint is HTTPS and
+	// localhost/RFC1918/ULA-only via validateJoinEndpoint/netguard.
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -1103,8 +1105,11 @@ func (m *Manager) joinBootstrapTLS() (*tls.Config, error) {
 		return nil, err
 	}
 	return &tls.Config{
-		Certificates:       []tls.Certificate{cert},
-		MinVersion:         tls.VersionTLS13,
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS13,
+		// lgtm[go/disabled-certificate-check] -- this bootstrap call fetches
+		// only the CA payload; the caller validates that payload against the
+		// scanned SPKI pin before any trusted ceremony call is made.
 		InsecureSkipVerify: true, // #nosec G402 -- the fetched CA payload is validated against the scanned SPKI pin
 	}, nil
 }

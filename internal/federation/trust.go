@@ -361,7 +361,10 @@ func (m *Manager) clientTLSConfig(remoteChainID string, expectedPin []byte) (*tl
 		Certificates:           []tls.Certificate{cert},
 		MinVersion:             tls.VersionTLS13,
 		SessionTicketsDisabled: true,
-		InsecureSkipVerify:     true, // #nosec G402 -- verification happens in VerifyPeerCertificate against the pinned per-agreement CA; hostname matching is intentionally replaced by the SPKI pin (loopback-SAN node certs)
+		// lgtm[go/disabled-certificate-check] -- hostname verification is
+		// intentionally replaced by VerifyPeerCertificate against the pinned
+		// per-agreement CA; the CA SPKI is committed on-chain.
+		InsecureSkipVerify: true, // #nosec G402 -- verification happens in VerifyPeerCertificate against the pinned per-agreement CA; hostname matching is intentionally replaced by the SPKI pin (loopback-SAN node certs)
 		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 			return verifyChainAgainstCA(rawCerts, ca, x509.ExtKeyUsageServerAuth)
 		},
