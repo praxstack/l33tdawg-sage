@@ -85,7 +85,7 @@ Dashboard: http://localhost:8080/ui/
 REST API:  http://localhost:8080/v1/
 ```
 
-Open the dashboard in your browser to see the Brain Visualization. The default view is the **MRI** brain (a 3D, brain-shaped map of your AI's memory); a **2D legacy** toggle remains for the flat force-directed graph with a timeline scrubber. Click any memory to see its "train of thought", click a domain lobe to drill in, and expand the Chain Activity bar to see real-time consensus events. See [BRAIN.md](BRAIN.md) for a full guide to reading it.
+Open the dashboard in your browser to see the Brain Visualization: the **MRI** brain, a 3D, brain-shaped map of your AI's memory. Click any memory to see its "train of thought", click open space to reset back to all memories, click a domain lobe to drill in, and expand the Chain Activity bar to see real-time consensus events. See [BRAIN.md](BRAIN.md) for a full guide to reading it.
 
 ---
 

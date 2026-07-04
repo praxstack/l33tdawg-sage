@@ -5,25 +5,17 @@ as a node in a live brain and lets you walk from any one memory to the ones it i
 connected to. This is a short guide to reading that view and using it as a tool,
 not just a picture.
 
-Both views read the same endpoint (`GET /v1/dashboard/memory/graph`), so they
-show the same memories - only the layout differs.
+The view reads `GET /v1/dashboard/memory/graph` and renders committed memories
+inside the MRI brain.
 
 ---
 
-## MRI vs 2D
+## The MRI Brain
 
-Top-right of the brain page is a two-button toggle:
-
-- **⬡ MRI** - the 3D brain (the default). A brain-shaped wireframe with your
-  memories placed inside it by domain and how settled they are. New users land
-  here.
-- **2D legacy** - the flat force-directed bubble graph, with a timeline bar
-  underneath for filtering by hour.
-
-MRI is the launch default and wins on reload, including for dashboards that
-previously saved `sage-brain-mode=2d`. The 2D map stays available as a manual
-legacy toggle for operators who need the flat graph/timeline. The rest of this
-guide describes the MRI, since that is the default and the richer view.
+CEREBRUM renders a brain-shaped wireframe with your memories placed inside it by
+domain and how settled they are. This is the brain view: drag to orbit, scroll
+to zoom, click a memory to focus its train of thought, and click open space to
+return to all memories.
 
 ---
 
@@ -155,7 +147,7 @@ back in.
 
 ## In short
 
-- **MRI is the default**; 2D is a legacy toggle away when you need the flat graph.
+- **MRI is the CEREBRUM view**; click open space to leave a focused train of thought and return to all memories.
 - **The reading panel** collapses to just your domain lobes (newest 30, most
   recently active first); **▾ how to read** expands the full legend, and the
   choice sticks. Click a lobe to drill in.

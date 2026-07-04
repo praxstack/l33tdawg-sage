@@ -20,7 +20,7 @@ const SAGE_VERSION = 'v11.0';
 
 // MriView — the 3D MRI memory-brain, rendered natively (the dashboard's
 // X-Frame-Options/CSP forbid iframing, so we mount the shared renderer
-// directly). Reads the same /v1/dashboard/memory/graph the 2D brain uses.
+// directly). Reads /v1/dashboard/memory/graph.
 function MriView({ sse }) {
     const ref = useRef(null);
     const [mriEmpty, setMriEmpty] = useState(false);
@@ -5314,52 +5314,17 @@ function HelpOverlay({ onClose, initialSection }) {
             key: 'cerebrum-view',
             title: 'Cerebrum View',
             icon: html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a7 7 0 0 0-7 7c0 2.38 1.19 4.47 3 5.74V17a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-2.26c1.81-1.27 3-3.36 3-5.74a7 7 0 0 0-7-7z"/></svg>`,
-            summary: 'The 3D MRI brain, with a legacy 2D map available when needed.',
+            summary: 'The 3D MRI brain is the CEREBRUM view.',
             content: html`
-                <p>The Cerebrum view is your brain's neural map. The <strong>3D MRI brain</strong> is the default and renders memories as glowing points inside a translucent brain. A <strong>legacy 2D map</strong> remains available from the toggle for a flat force-directed graph and timeline.</p>
+                <p>The Cerebrum view is your brain's neural map. The <strong>3D MRI brain</strong> renders memories as glowing points inside a translucent brain, with domains as lobes and consolidation shown by depth, size, and glow.</p>
                 <div class="guide-detail-grid">
                     <div class="guide-detail-item">
                         <div class="guide-detail-label">MRI: navigate</div>
-                        <div class="guide-detail-desc">Drag to orbit, scroll to zoom. Click a memory point to mark it with a white focus ring, light up its related constellation, and open the related notes board. The lobe legend drills into a domain.</div>
+                        <div class="guide-detail-desc">Drag to orbit, scroll to zoom. Click a memory point to mark it with a white focus ring, light up its related constellation, and open the related notes board. Click open space to reset back to all memories.</div>
                     </div>
                     <div class="guide-detail-item">
                         <div class="guide-detail-label">MRI: scan & flow</div>
                         <div class="guide-detail-desc">"Scan" toggles a slow auto-rotate; "flow" animates particles along memory links so you can watch knowledge pathways. Corroborated memories glow brighter and larger.</div>
-                    </div>
-                </div>
-                <p style="margin-top:10px;"><strong>Legacy 2D map</strong> — the classic force-directed view:</p>
-                <div class="guide-detail-grid">
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Bubble size</div>
-                        <div class="guide-detail-desc">Reflects the memory's confidence score. Higher confidence = larger bubble. Confidence ranges from 0.0 to 1.0 and is determined by BFT consensus among validators.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Bubble color</div>
-                        <div class="guide-detail-desc">Each domain gets a unique color. Memories in the same domain cluster together visually, making it easy to spot knowledge concentrations.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Navigation</div>
-                        <div class="guide-detail-desc">Scroll to zoom in/out. Click and drag to pan. Use the navigation pad in the corner for precise movement.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Click-to-Focus</div>
-                        <div class="guide-detail-desc">Click any bubble to focus its domain group. Other domains fade out, and the focused memories arrange in a timeline row sorted by creation date. Click a focused bubble again to open its detail panel. Click empty space to exit focus mode.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Domain filter</div>
-                        <div class="guide-detail-desc">Click the colored domain pills at the top to filter. Only bubbles from selected domains will appear. Click again to remove the filter.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Agent tabs</div>
-                        <div class="guide-detail-desc">Filter memories by agent. Admin agents appear first. Click an agent tab to see only their memories; click again to show all.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Interactive timeline</div>
-                        <div class="guide-detail-desc">The bar at the bottom shows memory activity over the last 24 hours. Click any time bucket to filter the graph to only those hours. Multi-select by clicking multiple buckets. Click "Clear" to reset.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Memory Stats panel</div>
-                        <div class="guide-detail-desc">Shows domain breakdown and totals. Grab the header to drag it anywhere on screen — position persists between sessions. Use the resize handle at the bottom-right to expand.</div>
                     </div>
                     <div class="guide-detail-item">
                         <div class="guide-detail-label">Chain Activity</div>
@@ -9298,19 +9263,8 @@ function App() {
     const [authState, setAuthState] = useState('loading'); // loading | login | ready
     const [isEncrypted, setIsEncrypted] = useState(false);
     const [page, setPage] = useState('brain');
-    // Brain view mode: MRI is the v11 default even if an older dashboard saved
-    // the 2D preference. The legacy 2D map remains an explicit manual toggle.
-    const [brainMode, setBrainMode] = useState(() => {
-        try { localStorage.setItem('sage-brain-mode', 'mri'); } catch (e) {}
-        return 'mri';
-    });
-    const changeBrainMode = (mode) => {
-        setBrainMode(mode);
-        try { localStorage.setItem('sage-brain-mode', mode); } catch (e) {}
-    };
     const [selectedMemory, setSelectedMemory] = useState(null);
     const [sseConnected, setSseConnected] = useState(false);
-    const [timelineFilter, setTimelineFilter] = useState([]); // [{from, to}, ...]
     const [showHelp, setShowHelp] = useState(false);
     const [showOnboarding, setShowOnboarding] = useState(false);
     const [helpSection, setHelpSection] = useState(null);
@@ -9576,18 +9530,7 @@ function App() {
             <${ChainActivityLog} sse=${sseRef.current} />
 
             ${page === 'overview' && html`<${OverviewPage} sse=${sseRef.current} />`}
-            ${page === 'brain' && html`
-                <div class="brain-mode-toggle">
-                    <button class=${brainMode === 'mri' ? 'active' : ''} onClick=${() => changeBrainMode('mri')} title="3D MRI brain view">⬡ MRI</button>
-                    <button class=${brainMode === '2d' ? 'active' : ''} onClick=${() => changeBrainMode('2d')} title="Legacy 2D map">2D legacy</button>
-                </div>
-                ${brainMode === '2d'
-                    ? html`
-                        <${BrainView} sse=${sseRef.current} onSelectMemory=${onSelectMemory} timelineFilter=${timelineFilter} />
-                        <${TimelineBar} selectedRanges=${timelineFilter} onSelectRange=${setTimelineFilter} />
-                    `
-                    : html`<${MriView} sse=${sseRef.current} />`}
-            `}
+            ${page === 'brain' && html`<${MriView} sse=${sseRef.current} />`}
             ${page === 'search' && html`<${SearchPage} onSelectMemory=${onSelectMemory} />`}
             ${page === 'tasks' && html`<${TasksPage} sse=${sseRef.current} />`}
             ${page === 'import' && html`<${ImportPage} sse=${sseRef.current} />`}

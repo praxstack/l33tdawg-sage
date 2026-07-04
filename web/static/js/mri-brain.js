@@ -329,6 +329,7 @@ export function mountMriBrain(container, opts = {}) {
   }
 
   let Graph = null, controls = null, disposed = false, flow = true, scanning = true;
+  let lastNodeClickAt = 0, graphPointerDown = null;
   let hullMat = null, brainMat = null, surfMat = null, curOpacity = 0.08;
   let focusMarker = null, focusRingTexture = null;
   let currentDomain = null;                 // drill-down lobe (null = overview)
@@ -674,7 +675,7 @@ export function mountMriBrain(container, opts = {}) {
       .linkDirectionalParticleWidth(1.1).linkDirectionalParticleSpeed(0.006)
       .warmupTicks(1).cooldownTicks(6)
       .onNodeHover(showTip)
-      .onNodeClick(n=>{ exploreNode(n); })
+      .onNodeClick(n=>{ lastNodeClickAt = performance.now(); exploreNode(n); })
       .onBackgroundClick(()=>{ exitFocus(); });
 
     // Positions are pinned by placeNodes() (fx/fy/fz), so disable the force
@@ -834,7 +835,20 @@ export function mountMriBrain(container, opts = {}) {
       <div style="margin-top:5px"><span class="chip">conf ${(+n.confidence).toFixed(2)}</span><span class="chip">corroborated ×${n.corroboration_count|0}</span></div>`; }
   function onMove(e){ const tip=$('.tip'); if(tip.style.display==='block'){ const r=root.getBoundingClientRect();
     tip.style.left=(e.clientX-r.left+14)+'px'; tip.style.top=(e.clientY-r.top+14)+'px'; } }
+  function isPanelTarget(t){ return !!(t && t.closest && t.closest('.panel')); }
+  function onGraphPointerDown(e){
+    if (isPanelTarget(e.target)) return;
+    graphPointerDown = { x: e.clientX, y: e.clientY };
+  }
+  function onGraphClick(e){
+    if (!focusId || isPanelTarget(e.target)) return;
+    if (performance.now() - lastNodeClickAt < 350) return;
+    if (graphPointerDown && Math.hypot(e.clientX - graphPointerDown.x, e.clientY - graphPointerDown.y) > 6) return;
+    exitFocus();
+  }
   root.addEventListener('mousemove', onMove);
+  root.addEventListener('pointerdown', onGraphPointerDown);
+  root.addEventListener('click', onGraphClick);
   $('.b-rot').onclick=function(){ scanning=!scanning; if(controls) controls.autoRotate=scanning; this.textContent=scanning?'⏸ pause':'▶ scan'; };
   $('.b-flow').onclick=function(){ flow=!flow; if(Graph) Graph.linkDirectionalParticles(l=>l.link_type==='focus'?3:(flow&&(LINK_TYPES[l.link_type]||{}).typed?2:0)); this.textContent=flow?'⚡ flow: on':'⚡ flow: off'; };
   $('.b-op').oninput=function(){ setHullOpacity(this.value/100); };
@@ -843,6 +857,8 @@ export function mountMriBrain(container, opts = {}) {
     disposed = true;
     subs.forEach(u => { try { u && u(); } catch(e){ /* noop */ } });
     root.removeEventListener('mousemove', onMove);
+    root.removeEventListener('pointerdown', onGraphPointerDown);
+    root.removeEventListener('click', onGraphClick);
     try {
       if (focusMarker && focusMarker.parent) focusMarker.parent.remove(focusMarker);
       if (focusMarker && focusMarker.material) focusMarker.material.dispose();
