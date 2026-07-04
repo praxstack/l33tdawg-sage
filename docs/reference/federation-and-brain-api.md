@@ -1,4 +1,4 @@
-<!-- Verified against code at SAGE v11.0.0 (release commit 8cb40f9). Cite file:line when behavior is non-obvious. This doc covers the NEW v11 surface only; the v8.1.1-pinned rest-api.md still governs the core /v1/* endpoints. -->
+<!-- Verified against code at SAGE v11.0.1. Cite file:line when behavior is non-obvious. This doc covers the NEW v11 surface only; the v8.1.1-pinned rest-api.md still governs the core /v1/* endpoints. -->
 
 # SAGE Federation and Brain HTTP API Reference (v11)
 

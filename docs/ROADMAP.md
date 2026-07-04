@@ -1,6 +1,6 @@
 # SAGE Roadmap
 
-**Status (2026-07):** **v11.0.0 is the current release.** The migration substrate (v7.5) and the consensus-rule work (v8.0 / v8.2 / v8.3) this roadmap was originally written around have all shipped and are carried forward in v11; their detailed histories are preserved further down under "Historical track". This document now looks forward from v11 to the v11.5 slate. Everything past v11 is planned, not promised, and carries no date.
+**Status (2026-07):** **v11.0.1 is the current release.** The migration substrate (v7.5) and the consensus-rule work (v8.0 / v8.2 / v8.3) this roadmap was originally written around have all shipped and are carried forward in v11; their detailed histories are preserved further down under "Historical track". This document now looks forward from v11 to the v11.5 slate. Everything past v11 is planned, not promised, and carries no date.
 
 **Hard constraint driving the whole plan:** no chain reset, no operator-typed commands. Existing chains must upgrade in place across all future releases.
 

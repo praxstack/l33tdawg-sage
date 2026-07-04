@@ -1,4 +1,4 @@
-<!-- Reference index reconciled for SAGE v11.0.0 (release commit 8cb40f9). Core legacy REST/MCP/concepts references retain their last full code-verification headers (mostly v8.1.1, with PoE rechecks at v8.5.0) when those surfaces did not change. v11.0.0 adds/re-verifies `python-sdk.md`, `federation-and-brain-api.md`, and `reranker-and-setup.md`; `environment-variables.md` carries the v11 reranker additions. -->
+<!-- Reference index reconciled for SAGE v11.0.1. Core legacy REST/MCP/concepts references retain their last full code-verification headers (mostly v8.1.1, with PoE rechecks at v8.5.0) when those surfaces did not change. v11 adds/re-verifies `python-sdk.md`, `federation-and-brain-api.md`, and `reranker-and-setup.md`; `environment-variables.md` carries the v11 reranker additions. -->
 
 
 # SAGE Reference — Agent Integration Index
@@ -80,7 +80,7 @@ All authenticated REST endpoints use an Ed25519 signed-request scheme. The signe
 
 ---
 
-## Related docs (reconciled through v11.0.0)
+## Related docs (reconciled through v11.0.1)
 
 These were stale earlier in v8 and have now been reconciled against the code. Where any of them still disagrees with this reference, this reference wins.
 

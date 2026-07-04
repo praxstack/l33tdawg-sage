@@ -51,7 +51,23 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.0.0
+## What's New in v11.0.1
+
+**CEREBRUM is now fully MRI-first.** v11.0.1 is a launch-polish patch on top of v11.0.0: no consensus rule, AppHash, transaction, key-encoding, or migration change. Existing v11 chains update in place; `app-v15` remains the active v11 consensus fork.
+
+- **MRI is the CEREBRUM view.** The legacy 2D brain option is no longer exposed in the dashboard. CEREBRUM opens directly into the 3D MRI memory brain, with the same offline three.js / 3d-force-graph bundle and anatomical mesh fallback path.
+- **Focused memories are clearer and easier to leave.** Clicking a memory brings it into focus with a visible white focus ring, and clicking open space exits the focused train-of-thought view back to all memories.
+- **Launch visuals now match the product.** The README leads with the real MRI brain screenshot, and the supporting screenshots are tracked with the docs so GitHub, package archives, and release pages show the correct launch surface.
+- **Federation wording is tightened.** v11.0 federation is LAN-first, or reachable over a VPN/tunnel/operator-provided route. First-class internet/NAT traversal remains scoped for v11.5.
+- **Security dependency update.** `golang.org/x/net` is bumped to `v0.55.0`, clearing Dependabot alert #6 (`GHSA-5cv4-jp36-h3mw` / `CVE-2026-25680`) in the Go module graph.
+- **Docs and SDK metadata are lockstep.** The Python SDK version, reference headers, roadmap status, and MCP/Docker registry metadata are bumped to 11.0.1.
+
+SDK 11.0.1.
+
+## Older releases
+
+<details>
+<summary>v11.0.0 — CEREBRUM, managed reranker, federation join ceremony</summary>
 
 **CEREBRUM becomes a real control board, semantic memory turns on in a few clicks, one click stands up a managed reranker, and two SAGE nodes can now federate their memory over a secure LAN-first join ceremony.** v11.0.0 activates a new `app-v15` consensus fork and ships as a major version: every validator must run this binary and fully converge before the `app-v15` activation height (the auto-vote readiness gate enforces this on the governance path, so an unsupported upgrade never reaches quorum). Every existing chain replays byte-identically until activation (the fork gate is dormant pre-activation), and a node-by-node rolling upgrade is safe: a mixed v10.x / v11.0.0 cluster computes the identical AppHash while `app-v15` is dormant. On personal/single-validator nodes the auto-advance ladder reaches `app-v15` automatically.
 
@@ -68,8 +84,7 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 - **Quality.** New memories now stamp their embedding provider at insert, so a freshly-written memory stops posing as unembedded and the "needs re-reading" counter no longer creeps up forever over real vectors. Redeploy got a robustness pass: a single-validator agent add/remove no longer runs the destructive wipe-and-restart that could brick a personal node, a stuck "reconfiguration in progress" banner can no longer wedge forever, and redeploy status reports the real terminal outcome instead of flashing a false success. Underneath it all are dozens of fixes from multi-pass adversarial find-and-verify reviews across the consensus, transport, web, frontend, and crypto surfaces.
 
 SDK 11.0.0.
-
-## Older releases
+</details>
 
 <details>
 <summary>v10.9.1 — MRI 3D brain renders everywhere + content-hash cache-busting</summary>
