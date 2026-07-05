@@ -437,6 +437,11 @@ func runServe() (rerr error) {
 	health.Version = version
 	health.SetPostgresHealth(true) // SQLite is always "healthy"
 
+	// Embedder health watchdog: keeps /ready's semantic-recall signal current so a
+	// down embedding provider surfaces as "degraded" instead of a silently
+	// keyword-only recall. Non-blocking (probes in its own goroutine).
+	startEmbedderWatchdog(ctx, embedProvider, health, logger)
+
 	// Start CometBFT in-process
 	cometCfg := config.DefaultConfig()
 	cometCfg.SetRoot(cometHome)
@@ -1340,6 +1345,79 @@ size = 5000
 }
 
 // createEmbeddingProvider creates the configured embedding provider.
+// startEmbedderWatchdog probes the embedding provider every 30s so /ready reflects
+// real semantic-recall availability (a down provider degrades hybrid recall to
+// keyword-only). It prefers the optional Pinger for a live check — an Ollama Ping hits
+// /api/tags, an OpenAI-compatible Ping is a real embed request, so the 30s cadence
+// keeps it cheap — and falls back to the sticky Ready() flag otherwise. Non-blocking:
+// the initial probe runs inside the goroutine so boot never waits on the embedder.
+func startEmbedderWatchdog(ctx context.Context, p embedding.Provider, health *metrics.HealthChecker, logger zerolog.Logger) {
+	if p == nil || health == nil {
+		return
+	}
+	probe := func() metrics.EmbedderStatus {
+		s := metrics.EmbedderStatus{Semantic: p.Semantic()}
+		if n, ok := p.(embedding.Named); ok {
+			s.Provider = n.Name()
+		}
+		if m, ok := p.(embedding.Modeler); ok {
+			s.Model = m.Model()
+		}
+		if pinger, ok := p.(embedding.Pinger); ok {
+			pctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			err := pinger.Ping(pctx)
+			cancel()
+			s.OK = err == nil
+			if err != nil {
+				// Bound the detail: an OpenAI-compatible upstream can embed a large
+				// error body, which would otherwise bloat every /ready response.
+				s.Detail = truncateString(err.Error(), 200)
+			}
+		} else {
+			s.OK = p.Ready()
+		}
+		health.SetEmbedderHealth(s)
+		return s
+	}
+	go func() {
+		// Log only on transition (and once at startup) so a persistently-down provider
+		// doesn't spam the log every 30s.
+		var prevOK, probed bool
+		record := func(s metrics.EmbedderStatus) {
+			if s.Semantic && (!probed || prevOK != s.OK) {
+				if s.OK {
+					logger.Info().Str("provider", s.Provider).Str("model", s.Model).
+						Msg("embedding provider healthy — semantic recall available")
+				} else {
+					logger.Warn().Str("provider", s.Provider).Str("detail", s.Detail).
+						Msg("embedding provider unreachable — recall is keyword-only until it recovers")
+				}
+			}
+			prevOK, probed = s.OK, true
+		}
+		record(probe()) // seed immediately (in-goroutine, so it doesn't block boot)
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				record(probe())
+			}
+		}
+	}()
+}
+
+// truncateString caps s at max runes, appending an ellipsis when it overflows.
+func truncateString(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "…"
+}
+
 func createEmbeddingProvider(cfg *Config, logger zerolog.Logger) embedding.Provider {
 	switch cfg.Embedding.Provider {
 	case "ollama":
