@@ -118,3 +118,46 @@ func testZip(t *testing.T, files map[string]string) []byte {
 	require.NoError(t, zw.Close())
 	return buf.Bytes()
 }
+
+// A tar containing symlinks whose targets escape the extract root must not create
+// those links (arbitrary file write / go/unsafe-unzip-symlink), while a safe internal
+// symlink is still extracted.
+func TestExtractTar_RejectsEscapingSymlinks(t *testing.T) {
+	dst := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "victim")
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	content := []byte("x")
+	require.NoError(t, tw.WriteHeader(&tar.Header{Name: "ok.txt", Typeflag: tar.TypeReg, Size: int64(len(content)), Mode: 0o644}))
+	_, _ = tw.Write(content)
+	writeSym := func(name, target string) {
+		require.NoError(t, tw.WriteHeader(&tar.Header{Name: name, Typeflag: tar.TypeSymlink, Linkname: target, Mode: 0o777}))
+	}
+	writeSym("escape-rel", "../../../../../../etc/passwd")
+	writeSym("escape-abs", "/etc/passwd")
+	writeSym("safe", "ok.txt")
+	require.NoError(t, tw.Close())
+
+	require.NoError(t, extractTar(&buf, dst))
+
+	for _, n := range []string{"escape-rel", "escape-abs"} {
+		_, err := os.Lstat(filepath.Join(dst, n))
+		assert.True(t, os.IsNotExist(err), "escaping symlink %q must be skipped", n)
+	}
+	fi, err := os.Lstat(filepath.Join(dst, "safe"))
+	require.NoError(t, err)
+	assert.True(t, fi.Mode()&os.ModeSymlink != 0, "safe internal symlink should be created")
+	_, err = os.Stat(outside)
+	assert.True(t, os.IsNotExist(err), "nothing must be written outside the extract root")
+}
+
+func TestArchiveTargetWithinRoot(t *testing.T) {
+	root := filepath.Clean("/x/root")
+	assert.True(t, archiveTargetWithinRoot(root, filepath.Join(root, "a"), "b"))
+	assert.True(t, archiveTargetWithinRoot(root, root, "sub/file"))
+	assert.False(t, archiveTargetWithinRoot(root, filepath.Join(root, "a"), "../../etc"))
+	assert.False(t, archiveTargetWithinRoot(root, root, "../sibling"))
+	assert.False(t, archiveTargetWithinRoot(root, root, "/etc/passwd"))
+	assert.False(t, archiveTargetWithinRoot(root, root, ""))
+}

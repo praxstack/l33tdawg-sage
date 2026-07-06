@@ -222,6 +222,7 @@ func extractTarZst(src, dst string) error {
 
 func extractTar(r io.Reader, dst string) error {
 	tr := tar.NewReader(r)
+	root := filepath.Clean(dst)
 	var total int64
 	for {
 		hdr, err := tr.Next()
@@ -256,15 +257,31 @@ func extractTar(r io.Reader, dst string) error {
 			if err := writeLimitedFile(path, tr, hdr.Size, mode); err != nil {
 				return err
 			}
-		case tar.TypeSymlink, tar.TypeLink:
+		case tar.TypeSymlink:
+			// A symlink's target is resolved relative to the link's OWN directory.
+			// Confirm the resolved location stays inside the extract root — a target
+			// that escapes (even via a later write-through) is arbitrary file write.
+			// Validating the resolved path (not just the target string) closes the
+			// go/unsafe-unzip-symlink hole; the same cleaned target is used for the link.
 			target := filepath.Clean(hdr.Linkname)
-			if filepath.IsAbs(target) || strings.HasPrefix(target, "..") {
+			if !archiveTargetWithinRoot(root, filepath.Dir(path), target) {
 				continue
 			}
 			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 				return err
 			}
 			_ = os.Symlink(target, path)
+		case tar.TypeLink:
+			// A hard link's target is an archive-relative path (relative to the root),
+			// referencing an already-extracted file. Confine it to the extract root too.
+			target := filepath.Clean(hdr.Linkname)
+			if !archiveTargetWithinRoot(root, root, target) {
+				continue
+			}
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				return err
+			}
+			_ = os.Link(filepath.Join(root, target), path)
 		}
 	}
 }
@@ -323,6 +340,23 @@ func safeArchiveName(raw string) (string, bool) {
 		return "", false
 	}
 	return clean, true
+}
+
+// archiveTargetWithinRoot reports whether a link target (symlink or hard link),
+// resolved relative to baseDir, stays inside root. Absolute targets and any target
+// whose resolved path escapes root are rejected — validating the RESOLVED path (not
+// just the target string) is what makes extracting an archive's links safe against
+// arbitrary file write (go/unsafe-unzip-symlink).
+func archiveTargetWithinRoot(root, baseDir, linkname string) bool {
+	if linkname == "" || filepath.IsAbs(linkname) {
+		return false
+	}
+	resolved := filepath.Join(baseDir, linkname) // Join cleans the joined path
+	rel, err := filepath.Rel(root, resolved)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return true
 }
 
 func safeArchivePath(dst, name string) (string, error) {
