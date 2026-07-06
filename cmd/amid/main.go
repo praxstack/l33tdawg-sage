@@ -130,7 +130,7 @@ func main() {
 // chain. Returns an error — rather than only warning — when no voter can run
 // (keyFile empty, unreadable, or invalid); the caller decides whether that is
 // fatal (--require-voter / VOTER_REQUIRED) or logged-and-tolerated (default).
-func startMemoryVoter(ctx context.Context, app *sageabci.SageApp, cometRPC, keyFile string, logger zerolog.Logger) error {
+func startMemoryVoter(ctx context.Context, app *sageabci.SageApp, cometRPC, keyFile string, health *metrics.HealthChecker, logger zerolog.Logger) error {
 	if keyFile == "" {
 		return fmt.Errorf("validator key not set (set --validator-key-file / VALIDATOR_KEY_FILE)")
 	}
@@ -138,7 +138,10 @@ func startMemoryVoter(ctx context.Context, app *sageabci.SageApp, cometRPC, keyF
 	if err != nil {
 		return fmt.Errorf("load validator key %s: %w", keyFile, err)
 	}
-	go voter.Run(ctx, app, app.GetOffchainStore(), voter.Config{Key: key, CometRPC: cometRPC, PollInterval: 2 * time.Second}, logger)
+	// Wire the health checker so amid's /ready voter block reflects the live voter
+	// (amid serves /ready via NewMetricsServer), keeping it consistent with the
+	// sage_voter_running gauge on the same listener.
+	go voter.Run(ctx, app, app.GetOffchainStore(), voter.Config{Key: key, CometRPC: cometRPC, PollInterval: 2 * time.Second, Health: health}, logger)
 	return nil
 }
 
@@ -193,7 +196,7 @@ func runABCIServer(app *sageabci.SageApp, abciAddr, restAddr, metricsAddr, comet
 	// the voter needs it supplied explicitly (operator mounts priv_validator_key.json
 	// readable to amid via --validator-key-file). Absent → no voter (or no boot at
 	// all under --require-voter, enforced by the pre-serve gate above).
-	if err := startMemoryVoter(ctx, app, cometRPC, validatorKeyFile, logger); err != nil {
+	if err := startMemoryVoter(ctx, app, cometRPC, validatorKeyFile, health, logger); err != nil {
 		if requireVoter {
 			// Normally unreachable — requireVoterKeyOrExit already refused to serve —
 			// but a key that rots between the gate and here must not slip through.
@@ -269,7 +272,7 @@ func runInProcess(app *sageabci.SageApp, cometHome, restAddr, metricsAddr, tlsCe
 
 	// In-process: the consensus key is right here under --home; the voter signs
 	// memory votes with it (same key CometBFT validates blocks with).
-	if err := startMemoryVoter(ctx, app, cometRPC, cometCfg.PrivValidatorKeyFile(), logger); err != nil {
+	if err := startMemoryVoter(ctx, app, cometRPC, cometCfg.PrivValidatorKeyFile(), health, logger); err != nil {
 		if requireVoter {
 			// Normally unreachable — requireVoterKeyOrExit already refused to serve —
 			// but a key that rots between the gate and here must not slip through.

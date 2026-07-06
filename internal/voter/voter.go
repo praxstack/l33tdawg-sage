@@ -9,6 +9,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/l33tdawg/sage/internal/memory"
+	"github.com/l33tdawg/sage/internal/metrics"
 	"github.com/l33tdawg/sage/internal/tx"
 )
 
@@ -29,6 +30,11 @@ type Config struct {
 	CometRPC string
 	// PollInterval is how often pending memories are scanned (default 2s).
 	PollInterval time.Duration
+	// Health, when non-nil, receives a VoterStatus snapshot every poll tick so
+	// the node's /ready endpoint can surface voter liveness and the proposed
+	// backlog (sage-gui wires this). Optional and nil-safe: amid has no local
+	// health server and leaves it nil — the Prometheus gauges publish either way.
+	Health *metrics.HealthChecker
 }
 
 // App is the slice of *abci.SageApp the voter needs for the upgrade-proposal arm.
@@ -49,10 +55,23 @@ type PendingSource interface {
 	GetPendingByDomain(ctx context.Context, domainTag string, limit int) ([]*memory.MemoryRecord, error)
 }
 
-// Store is the memory store the voter reads from: pending work + dedup lookups.
+// BacklogSource exposes the proposed-backlog watermark behind the stuck-memory
+// telemetry (sage_proposed_oldest_age_seconds / sage_proposed_pending_count).
+// Both real stores (SQLite/Postgres) implement it via store.MemoryStore.
+type BacklogSource interface {
+	// OldestProposedCreatedAt returns the created_at of the oldest memory still
+	// in status='proposed' (ok=false when nothing is pending).
+	OldestProposedCreatedAt(ctx context.Context) (time.Time, bool, error)
+	// ProposedPendingCount returns how many memories are in status='proposed'.
+	ProposedPendingCount(ctx context.Context) (int, error)
+}
+
+// Store is the memory store the voter reads from: pending work + dedup lookups
+// + backlog telemetry.
 type Store interface {
 	PendingSource
 	DupChecker
+	BacklogSource
 }
 
 // Run is the voter loop. It blocks until ctx is cancelled. Every tick it:
@@ -75,6 +94,16 @@ func Run(ctx context.Context, app App, store Store, cfg Config, logger zerolog.L
 	}
 	selfID := hex.EncodeToString(cfg.Key.Public().(ed25519.PublicKey))
 
+	// Liveness signal: sage_voter_running=1 for the lifetime of this loop, 0 on
+	// every exit path (and 0 forever on nodes where Run never got this far).
+	// The health block mirrors it so /ready flips running=false on shutdown too.
+	metrics.SetVoterRunning(true)
+	defer metrics.SetVoterRunning(false)
+	if cfg.Health != nil {
+		cfg.Health.SetVoterStatus(metrics.VoterStatus{Running: true, ValidatorID: selfID})
+		defer cfg.Health.SetVoterStatus(metrics.VoterStatus{Running: false, ValidatorID: selfID})
+	}
+
 	logger.Info().
 		Str("validator", selfID[:16]).
 		Dur("interval", cfg.PollInterval).
@@ -92,6 +121,10 @@ func Run(ctx context.Context, app App, store Store, cfg Config, logger zerolog.L
 	ticker := time.NewTicker(cfg.PollInterval)
 	defer ticker.Stop()
 
+	// lastVote is when this session last broadcast a memory vote tx (zero =
+	// never). Surfaced via /ready's voter block as last_vote_unix.
+	var lastVote time.Time
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -104,19 +137,62 @@ func Run(ctx context.Context, app App, store Store, cfg Config, logger zerolog.L
 			if len(voted) > maxVotedTracked {
 				voted = make(map[string]bool)
 			}
-			voteOnPendingMemories(ctx, store, cfg, voted, logger)
+			if voteOnPendingMemories(ctx, store, cfg, voted, logger) > 0 {
+				lastVote = time.Now()
+			}
 			voteOnUpgradeProposal(ctx, app, cfg, selfID, warnedProposals, logger)
+			publishBacklogTelemetry(ctx, store, cfg.Health, selfID, lastVote)
 		}
 	}
 }
 
-// voteOnPendingMemories scans proposed memories and casts one signed vote per
-// newly-seen memory.
-func voteOnPendingMemories(ctx context.Context, store Store, cfg Config, voted map[string]bool, logger zerolog.Logger) {
-	pending, err := store.GetPendingByDomain(ctx, "%", 20)
+// publishBacklogTelemetry refreshes the stuck-memory alarm pair
+// (sage_proposed_oldest_age_seconds / sage_proposed_pending_count) and, when a
+// health checker is wired (sage-gui; amid leaves it nil), mirrors the same
+// snapshot into /ready's "voter" block. NODE-LOCAL: both numbers come from
+// THIS node's off-chain store, so on a multi-node chain every node reports its
+// own view of the shared backlog. Observability only — no consensus state, no
+// tx, no AppHash impact.
+func publishBacklogTelemetry(ctx context.Context, store Store, health *metrics.HealthChecker, selfID string, lastVote time.Time) {
+	oldest, ok, err := store.OldestProposedCreatedAt(ctx)
+	if err != nil {
+		return // transient store error — keep the previous gauge values
+	}
+	pending, err := store.ProposedPendingCount(ctx)
 	if err != nil {
 		return
 	}
+	var age float64
+	if ok {
+		if age = time.Since(oldest).Seconds(); age < 0 {
+			age = 0 // clock skew guard — never publish a negative age
+		}
+	}
+	metrics.SetProposedBacklog(age, pending)
+	if health != nil {
+		var lastVoteUnix int64
+		if !lastVote.IsZero() {
+			lastVoteUnix = lastVote.Unix()
+		}
+		health.SetVoterStatus(metrics.VoterStatus{
+			Running:                  true,
+			ValidatorID:              selfID,
+			LastVoteUnix:             lastVoteUnix,
+			OldestProposedAgeSeconds: age,
+			PendingProposed:          pending,
+		})
+	}
+}
+
+// voteOnPendingMemories scans proposed memories and casts one signed vote per
+// newly-seen memory. Returns how many vote txs were broadcast this tick (feeds
+// the /ready voter block's last_vote_unix).
+func voteOnPendingMemories(ctx context.Context, store Store, cfg Config, voted map[string]bool, logger zerolog.Logger) int {
+	pending, err := store.GetPendingByDomain(ctx, "%", 20)
+	if err != nil {
+		return 0
+	}
+	cast := 0
 	for _, mem := range pending {
 		if voted[mem.MemoryID] {
 			continue
@@ -155,7 +231,9 @@ func voteOnPendingMemories(ctx context.Context, store Store, cfg Config, voted m
 		}
 		broadcastVoteTx(ctx, cfg.CometRPC, encoded, logger)
 		voted[mem.MemoryID] = true
+		cast++
 	}
+	return cast
 }
 
 // voteOnUpgradeProposal auto-votes ACCEPT on an active app-version upgrade

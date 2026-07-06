@@ -29,6 +29,7 @@ import (
 	cmttime "github.com/cometbft/cometbft/types/time"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/cors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
 
 	"github.com/l33tdawg/sage/api/rest"
@@ -809,6 +810,12 @@ func runServe() (rerr error) {
 	// Embedding endpoint override — use configured provider, not just Ollama
 	r.Post("/v1/embed/personal", handleEmbedPersonal(embedProvider))
 
+	// Prometheus scrape endpoint. amid serves this via internal/metrics's
+	// dedicated metrics server; sage-gui has no such listener, so the default
+	// registry (sage_voter_running, sage_proposed_oldest_age_seconds, …) is
+	// exposed on the same loopback-bound dashboard mux as everything else here.
+	r.Method(http.MethodGet, "/metrics", promhttp.Handler())
+
 	httpServer := &http.Server{
 		Addr:         cfg.RESTAddr,
 		Handler:      r,
@@ -1037,7 +1044,9 @@ func runServe() (rerr error) {
 				logger.Warn().Str("poll_interval", raw).Msg("invalid voter.poll_interval — using default 2s")
 			}
 		}
-		go voter.Run(ctx, app, sqliteStore, voter.Config{Key: selfKey, CometRPC: cometRPC, PollInterval: pollInterval}, logger)
+		// Health wired in so /ready's "voter" block tracks liveness + the
+		// proposed backlog (nil-safe: amid starts the voter without one).
+		go voter.Run(ctx, app, sqliteStore, voter.Config{Key: selfKey, CometRPC: cometRPC, PollInterval: pollInterval, Health: health}, logger)
 	case cfg.Voter.Required:
 		// Normally unreachable — the pre-serve gate before StartChain already refused
 		// to boot — but a key that rots between the gate and here must still honor the

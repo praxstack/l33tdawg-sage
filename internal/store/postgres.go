@@ -558,6 +558,36 @@ func (s *PostgresStore) GetPendingByDomain(ctx context.Context, domainTag string
 	return results, nil
 }
 
+// OldestProposedCreatedAt returns MIN(created_at) over status='proposed'
+// memories — the voter-observability probe behind
+// sage_proposed_oldest_age_seconds. ok=false (zero time) when nothing is
+// pending. Keep in lockstep with the SQLiteStore implementation.
+func (s *PostgresStore) OldestProposedCreatedAt(ctx context.Context) (time.Time, bool, error) {
+	var createdAt *time.Time // MIN over zero rows is NULL
+	err := s.db.QueryRow(ctx,
+		`SELECT MIN(created_at) FROM memories WHERE status = 'proposed'`).Scan(&createdAt)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("oldest proposed: %w", err)
+	}
+	if createdAt == nil {
+		return time.Time{}, false, nil
+	}
+	return *createdAt, true, nil
+}
+
+// ProposedPendingCount returns how many memories are still in status='proposed'
+// (sage_proposed_pending_count). Keep in lockstep with the SQLiteStore
+// implementation.
+func (s *PostgresStore) ProposedPendingCount(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRow(ctx,
+		`SELECT COUNT(*) FROM memories WHERE status = 'proposed'`).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("proposed pending count: %w", err)
+	}
+	return n, nil
+}
+
 // GetScore retrieves a validator's score.
 func (s *PostgresStore) GetScore(ctx context.Context, validatorID string) (*ValidatorScore, error) {
 	row := s.db.QueryRow(ctx,

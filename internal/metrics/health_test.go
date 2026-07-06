@@ -89,6 +89,58 @@ func TestReadiness_SemanticEmbedderUp_Ready(t *testing.T) {
 	}
 }
 
+func TestReadiness_VoterBlockInformationalOnly(t *testing.T) {
+	h := NewHealthChecker()
+	h.SetPostgresHealth(true)
+	h.SetCometBFTHealth(true)
+
+	// Never reported (voter-less node / loop not up yet): block present,
+	// checked=false, readiness untouched.
+	code, body := readiness(t, h, "")
+	if code != http.StatusOK || body["status"] != "ready" {
+		t.Fatalf("unreported voter must not gate readiness, got %d %v", code, body["status"])
+	}
+	v, _ := body["voter"].(map[string]any)
+	if v == nil || v["checked"] != false {
+		t.Fatalf("voter block should report checked=false before the first tick, got %v", body["voter"])
+	}
+
+	// Live voter with a backlog snapshot: fields surface verbatim.
+	h.SetVoterStatus(VoterStatus{
+		Running:                  true,
+		ValidatorID:              "ab12cd34",
+		LastVoteUnix:             1700000000,
+		OldestProposedAgeSeconds: 12.5,
+		PendingProposed:          3,
+	})
+	code, body = readiness(t, h, "")
+	if code != http.StatusOK || body["status"] != "ready" {
+		t.Fatalf("healthy voter must be ready, got %d %v", code, body["status"])
+	}
+	v, _ = body["voter"].(map[string]any)
+	if v == nil {
+		t.Fatal("missing voter block in /ready body")
+	}
+	if v["checked"] != true || v["running"] != true || v["validator_id"] != "ab12cd34" {
+		t.Errorf("voter identity fields wrong: %v", v)
+	}
+	if v["last_vote_unix"] != float64(1700000000) || v["oldest_proposed_age_seconds"] != 12.5 || v["pending_proposed"] != float64(3) {
+		t.Errorf("voter backlog fields wrong: %v", v)
+	}
+
+	// Dead voter with a huge stuck backlog: still informational — the /ready
+	// status must NOT flip (the alarm surface is sage_proposed_oldest_age_seconds).
+	h.SetVoterStatus(VoterStatus{Running: false, OldestProposedAgeSeconds: 99999, PendingProposed: 42})
+	code, body = readiness(t, h, "")
+	if code != http.StatusOK || body["status"] != "ready" {
+		t.Fatalf("dead voter must stay informational (ready/200), got %d %v", code, body["status"])
+	}
+	v, _ = body["voter"].(map[string]any)
+	if v == nil || v["running"] != false || v["pending_proposed"] != float64(42) {
+		t.Errorf("dead-voter block wrong: %v", v)
+	}
+}
+
 func TestReadiness_EmbedderUnchecked_Ready(t *testing.T) {
 	h := NewHealthChecker()
 	h.SetPostgresHealth(true)

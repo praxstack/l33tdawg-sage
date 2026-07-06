@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 
@@ -65,6 +66,15 @@ func (f *fakeStore) GetPendingByDomain(_ context.Context, _ string, _ int) ([]*m
 }
 func (f *fakeStore) FindByContentHash(_ context.Context, h string) (bool, error) {
 	return f.dups[h], nil
+}
+func (f *fakeStore) OldestProposedCreatedAt(_ context.Context) (time.Time, bool, error) {
+	if len(f.pending) == 0 {
+		return time.Time{}, false, nil
+	}
+	return f.pending[0].CreatedAt, true, nil
+}
+func (f *fakeStore) ProposedPendingCount(_ context.Context) (int, error) {
+	return len(f.pending), nil
 }
 
 type fakeApp struct {

@@ -1730,6 +1730,36 @@ func (s *SQLiteStore) GetPendingByDomain(ctx context.Context, domainTag string, 
 	return results, nil
 }
 
+// OldestProposedCreatedAt returns MIN(created_at) over status='proposed'
+// memories — the voter-observability probe behind
+// sage_proposed_oldest_age_seconds. ok=false (zero time) when nothing is
+// pending. Keep in lockstep with the PostgresStore implementation.
+func (s *SQLiteStore) OldestProposedCreatedAt(ctx context.Context) (time.Time, bool, error) {
+	var createdAt sql.NullString
+	err := s.conn.QueryRowContext(ctx,
+		`SELECT MIN(created_at) FROM memories WHERE status = 'proposed'`).Scan(&createdAt)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("oldest proposed: %w", err)
+	}
+	if !createdAt.Valid {
+		return time.Time{}, false, nil
+	}
+	return parseTime(createdAt.String), true, nil
+}
+
+// ProposedPendingCount returns how many memories are still in status='proposed'
+// (sage_proposed_pending_count). Keep in lockstep with the PostgresStore
+// implementation.
+func (s *SQLiteStore) ProposedPendingCount(ctx context.Context) (int, error) {
+	var n int
+	err := s.conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM memories WHERE status = 'proposed'`).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("proposed pending count: %w", err)
+	}
+	return n, nil
+}
+
 func (s *SQLiteStore) ListMemories(ctx context.Context, opts ListOptions) ([]*memory.MemoryRecord, int, error) {
 	if opts.Limit <= 0 {
 		opts.Limit = 50

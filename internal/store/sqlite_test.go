@@ -324,6 +324,45 @@ func TestGetPendingByDomain(t *testing.T) {
 	assert.Len(t, results, 4)
 }
 
+func TestOldestProposedCreatedAtAndPendingCount(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// Empty store: no proposed rows -> ok=false, count 0.
+	_, ok, err := s.OldestProposedCreatedAt(ctx)
+	require.NoError(t, err)
+	assert.False(t, ok, "empty store must report no proposed watermark")
+	n, err := s.ProposedPendingCount(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 0, n)
+
+	// Two proposed memories, one much older — MIN must pick the old one.
+	oldRec := testMemory("m-old", "agent1", "the oldest proposed memory body", "general")
+	oldRec.CreatedAt = time.Now().UTC().Add(-90 * time.Minute)
+	require.NoError(t, s.InsertMemory(ctx, oldRec))
+	newRec := testMemory("m-new", "agent1", "a newer proposed memory body", "general")
+	require.NoError(t, s.InsertMemory(ctx, newRec))
+
+	got, ok, err := s.OldestProposedCreatedAt(ctx)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.WithinDuration(t, oldRec.CreatedAt, got, time.Second)
+	n, err = s.ProposedPendingCount(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 2, n)
+
+	// Committing the old row moves the watermark to the newer one and shrinks
+	// the count — only status='proposed' rows feed the stuck-memory alarm.
+	require.NoError(t, s.UpdateStatus(ctx, "m-old", memory.StatusCommitted, time.Now().UTC()))
+	got, ok, err = s.OldestProposedCreatedAt(ctx)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.WithinDuration(t, newRec.CreatedAt, got, time.Second)
+	n, err = s.ProposedPendingCount(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+}
+
 func TestListMemories(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

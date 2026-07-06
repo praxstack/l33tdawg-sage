@@ -99,6 +99,33 @@ var (
 		Name: "sage_fork_branch_total",
 		Help: "Per-fork count of pre- vs post-fork branches taken inside fork-gated consensus handlers",
 	}, []string{"fork", "branch"})
+
+	// VoterRunning is 1 while the memory auto-voter goroutine (voter.Run) is
+	// live, 0 once it exits — and 0 forever on a node where it never started
+	// (gauges default to 0). A node showing 0 here cannot move memories out of
+	// status='proposed' by itself.
+	VoterRunning = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "sage_voter_running",
+		Help: "1 while the memory auto-voter goroutine is running, 0 when exited or never started",
+	})
+
+	// ProposedOldestAgeSeconds is the age of the oldest memory still in
+	// status='proposed' — THE stuck-memory alarm. With a healthy voter this
+	// hovers near the poll interval; a value that climbs without bound means
+	// nothing is voting memories through quorum. 0 when nothing is pending.
+	// NODE-LOCAL view of this node's off-chain mirror, refreshed by the voter
+	// loop each poll tick.
+	ProposedOldestAgeSeconds = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "sage_proposed_oldest_age_seconds",
+		Help: "Age in seconds of the oldest memory still in status='proposed' (0 when none pending)",
+	})
+
+	// ProposedPendingCount is the number of memories currently in
+	// status='proposed', refreshed alongside ProposedOldestAgeSeconds.
+	ProposedPendingCount = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "sage_proposed_pending_count",
+		Help: "Number of memories currently in status='proposed'",
+	})
 )
 
 // RecordTx records a transaction metric.
@@ -114,6 +141,25 @@ func RecordTx(txType string, duration time.Duration, err error) {
 // RecordQuery records a query metric.
 func RecordQuery(domain string, duration time.Duration) {
 	QueryLatency.WithLabelValues(domain).Observe(duration.Seconds())
+}
+
+// SetVoterRunning flips the sage_voter_running liveness gauge (1=running,
+// 0=stopped). Called by voter.Run on start and — via defer — on every exit
+// path, so a crashed or cancelled voter always drops the gauge back to 0.
+func SetVoterRunning(running bool) {
+	if running {
+		VoterRunning.Set(1)
+	} else {
+		VoterRunning.Set(0)
+	}
+}
+
+// SetProposedBacklog publishes the stuck-memory alarm pair in one shot:
+// the age of the oldest status='proposed' memory and how many are pending.
+// Called by the voter loop each poll tick from this node's off-chain store.
+func SetProposedBacklog(oldestAgeSeconds float64, pending int) {
+	ProposedOldestAgeSeconds.Set(oldestAgeSeconds)
+	ProposedPendingCount.Set(float64(pending))
 }
 
 // SetPoEWeights publishes the per-validator sage_poe_weight gauge from a freshly

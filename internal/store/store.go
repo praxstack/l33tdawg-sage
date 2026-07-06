@@ -151,6 +151,13 @@ type MemoryStore interface {
 	// in a single batched query (avoids the N+1 of GetCorroborations per memory).
 	GetCorroborationCounts(ctx context.Context, memoryIDs []string) (map[string]int, error)
 	GetPendingByDomain(ctx context.Context, domainTag string, limit int) ([]*memory.MemoryRecord, error)
+	// OldestProposedCreatedAt returns the created_at of the oldest memory still
+	// in status='proposed' (ok=false, zero time when nothing is pending). Feeds
+	// the sage_proposed_oldest_age_seconds stuck-memory alarm.
+	OldestProposedCreatedAt(ctx context.Context) (time.Time, bool, error)
+	// ProposedPendingCount returns how many memories are in status='proposed'
+	// (sage_proposed_pending_count).
+	ProposedPendingCount(ctx context.Context) (int, error)
 	ListMemories(ctx context.Context, opts ListOptions) ([]*memory.MemoryRecord, int, error)
 	GetStats(ctx context.Context) (*StoreStats, error)
 	GetTimeline(ctx context.Context, from, to time.Time, domain string, bucket string) ([]TimelineBucket, error)

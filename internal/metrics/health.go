@@ -18,11 +18,27 @@ type EmbedderStatus struct {
 	Detail   string `json:"detail,omitempty"`   // error summary when down
 }
 
+// VoterStatus is the health checker's view of the memory auto-voter, refreshed
+// every poll tick by the voter loop. It lets /ready show whether memories can
+// actually leave status='proposed' on this node — with no voter anywhere,
+// submissions strand at proposed forever with no other signal. Informational
+// only: it NEVER gates readiness, because a voter-less node is a legitimate
+// deployment (another validator may vote memories through).
+type VoterStatus struct {
+	Checked                  bool    `json:"checked"`                     // has the voter reported yet?
+	Running                  bool    `json:"running"`                     // voter goroutine live right now
+	ValidatorID              string  `json:"validator_id,omitempty"`      // hex consensus pubkey the voter signs with
+	LastVoteUnix             int64   `json:"last_vote_unix,omitempty"`    // when this node last broadcast a memory vote (0 = never this session)
+	OldestProposedAgeSeconds float64 `json:"oldest_proposed_age_seconds"` // node-local stuck-memory watermark
+	PendingProposed          int     `json:"pending_proposed"`            // node-local count of status='proposed'
+}
+
 // HealthChecker tracks the health status of dependencies.
 type HealthChecker struct {
 	postgresOK atomic.Bool
 	cometbftOK atomic.Bool
 	embedder   atomic.Value // EmbedderStatus, set by SetEmbedderHealth
+	voter      atomic.Value // VoterStatus, set by SetVoterStatus
 	Version    string
 }
 
@@ -43,6 +59,23 @@ func (h *HealthChecker) embedderStatus() EmbedderStatus {
 		return v
 	}
 	return EmbedderStatus{}
+}
+
+// SetVoterStatus records the memory auto-voter's latest self-report (called by
+// the voter loop each poll tick). Until the first call, the voter reads as
+// not-yet-checked. Informational only — it never changes the
+// ready/degraded/not_ready decision; the alerting surface for a stuck backlog
+// is the sage_proposed_oldest_age_seconds gauge.
+func (h *HealthChecker) SetVoterStatus(s VoterStatus) {
+	s.Checked = true
+	h.voter.Store(s)
+}
+
+func (h *HealthChecker) voterStatus() VoterStatus {
+	if v, ok := h.voter.Load().(VoterStatus); ok {
+		return v
+	}
+	return VoterStatus{}
 }
 
 // SetPostgresHealth updates the PostgreSQL health status.
@@ -114,5 +147,8 @@ func (h *HealthChecker) ReadinessHandler(w http.ResponseWriter, r *http.Request)
 		"postgres": pgOK,
 		"cometbft": cmtOK,
 		"embedder": emb,
+		// Informational voter/backlog block — never gates the status above
+		// (a voter-less node is legitimate; peers may vote memories through).
+		"voter": h.voterStatus(),
 	})
 }

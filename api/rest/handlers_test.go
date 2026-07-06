@@ -148,6 +148,17 @@ func (m *mockMemoryStore) GetPendingByDomain(_ context.Context, domainTag string
 	return m.pendingRecords, nil
 }
 
+func (m *mockMemoryStore) OldestProposedCreatedAt(_ context.Context) (time.Time, bool, error) {
+	if len(m.pendingRecords) == 0 {
+		return time.Time{}, false, nil
+	}
+	return m.pendingRecords[0].CreatedAt, true, nil
+}
+
+func (m *mockMemoryStore) ProposedPendingCount(_ context.Context) (int, error) {
+	return len(m.pendingRecords), nil
+}
+
 func (m *mockMemoryStore) ListMemories(_ context.Context, opts store.ListOptions) ([]*memory.MemoryRecord, int, error) {
 	results := make([]*memory.MemoryRecord, 0, len(m.memories))
 	for _, rec := range m.memories {
