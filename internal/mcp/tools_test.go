@@ -644,7 +644,7 @@ func TestStoreMemoryPreValidateReject(t *testing.T) {
 	_, priv, _ := ed25519.GenerateKey(nil)
 	s := NewServer(ts.URL, priv)
 
-	err := s.storeMemory(context.Background(), "too short", "general", "observation", 0.8)
+	_, err := s.storeMemory(context.Background(), "too short", "general", "observation", 0.8)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "memory rejected by validators")
 	assert.Contains(t, err.Error(), "quality_filter")
@@ -677,7 +677,7 @@ func TestStoreMemoryPreValidateAccept(t *testing.T) {
 	_, priv, _ := ed25519.GenerateKey(nil)
 	s := NewServer(ts.URL, priv)
 
-	err := s.storeMemory(context.Background(), "Valid observation about Go debugging patterns", "go-debugging", "observation", 0.85)
+	_, err := s.storeMemory(context.Background(), "Valid observation about Go debugging patterns", "go-debugging", "observation", 0.85)
 	assert.NoError(t, err)
 }
 

@@ -194,7 +194,7 @@ func TestStoreMemory_HealsAfterRestart(t *testing.T) {
 
 	// storeMemory backs sage_turn's per-turn observation store — the every-turn
 	// path that originally surfaced the bare "Broadcast error: access denied".
-	err := s.storeMemory(context.Background(), "an observation worth keeping", "sage-debugging", "observation", 0.80)
+	_, err := s.storeMemory(context.Background(), "an observation worth keeping", "sage-debugging", "observation", 0.80)
 	require.NoError(t, err)
 	assert.EqualValues(t, 2, submits.Load(), "storeMemory should retry the submit after re-handshake")
 	assert.EqualValues(t, 1, registers.Load(), "storeMemory should re-register once on the stale-session error")

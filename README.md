@@ -51,7 +51,20 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.2.0
+## What's New in v11.2.1
+
+**A reliability patch: `sage_turn` (and all embedding-backed recall/store) no longer fails on transient Ollama hiccups.** Agents reported intermittent embed errors — the local embedder (`nomic-embed-text`) blipping or disconnecting "from time to time." The root cause was the embedder client: a single, unretried request with no `keep_alive`, so Ollama's default 5-minute idle unload meant the next embed paid a cold model reload that could time out or fail. `sage_turn` embeds twice (recall + store), so the flakiness hit both legs. All fixes are off-consensus — no chain, fork, or API-contract change.
+
+- **The embed model stays resident.** Every embed request now sends `keep_alive` (default `30m`, override `OLLAMA_KEEP_ALIVE`), so `nomic-embed-text` isn't unloaded between turns — eliminating the cold-reload behind most of the intermittent failures. Integer-form values (e.g. `OLLAMA_KEEP_ALIVE=-1` to pin it in memory) are translated to the wire form Ollama accepts.
+- **Transient blips are retried; hangs fail fast.** The embedder client now retries a couple of times with backoff on transient errors (connection reset, model-loading `5xx`, empty result), but does *not* retry a timeout (a hung Ollama fails in one attempt instead of multiplying the wait) or a `4xx`.
+- **An embedder outage never drops a `sage_turn` observation.** If the embedder is genuinely down after retries, the memory is still committed (without a vector) rather than lost, and the turn now reports `store_mode: "no_vector"` + `semantic_degraded: true` so you know it isn't semantically recallable until a re-embed backfills the vector.
+
+SDK 11.2.1.
+
+## Older releases
+
+<details>
+<summary>v11.2.0 — min_confidence decayed-floor fix + app-v16 domainless-forget remediation</summary>
 
 **Two correctness fixes: `min_confidence` recall now filters the value it reports, and legacy "un-forgettable" memories can be deprecated again.** v11.2.0 introduces a new consensus fork **`app-v16`** that ships **dormant** — it changes no live-chain behavior until operators activate it via a governance vote. The recall fix is off-consensus and active on upgrade.
 
@@ -59,8 +72,7 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 - **Legacy "no recorded domain" memories can be deprecated again (opt-in fork).** Memories committed before `app-v8.4` never received an on-chain domain record, so `forget()`/`challenge()` rejected them — with a cryptic error — even for their owner. The new **`app-v16`** fork adds a governance-attested **domain repair** (`OpMemoryDomainRepair`, 2/3 supermajority) that backfills the missing domain — idempotent, existence-guarded, never overwriting — after which normal deprecation works. The deprecation gate now returns an actionable **409** (legacy, needs repair) / **404** (unknown id) / **403** (unauthorized) instead of a generic rejection, and new submits must carry a domain so the state can't recur. **`app-v16` activates only via a governance `{Name:"app-v16", TargetAppVersion:16}` upgrade** — the release binary changes no consensus behavior until you vote it in.
 
 SDK 11.2.0.
-
-## Older releases
+</details>
 
 <details>
 <summary>v11.1.0 — cross-node federation fix + health/observability polish</summary>

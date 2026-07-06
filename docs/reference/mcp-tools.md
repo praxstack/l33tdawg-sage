@@ -1,4 +1,4 @@
-Reconciled against internal/mcp at SAGE v11.2.0.
+Reconciled against internal/mcp at SAGE v11.2.1.
 
 # SAGE MCP Tools Reference
 
@@ -125,6 +125,10 @@ most important operational tool.
 - `stored`: `true` if observation was stored, `false` if skipped (duplicate or
   low-value).
 - `skip_reason`: populated when `stored` is false.
+- `store_mode`: set to `no_vector` when the observation was committed but the
+  embedder was unavailable, so it was stored WITHOUT a vector. In that case
+  `semantic_degraded` is `true` and `degraded_reason` explains it — the memory is
+  not semantically recallable until a re-embed backfills the vector.
 - `pipe_inbox`: pipeline items addressed to this agent (if any).
 - `pipe_inbox_count`, `pipe_results`, `pipe_results_count`: pipeline data.
 - `recall_error` / `store_error`: set if a phase failed.

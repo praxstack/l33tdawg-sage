@@ -1,4 +1,4 @@
-<!-- Reconciled through SAGE v11.2.0. Every variable below was located at the cited file:line via `os.Getenv` or the local env helper. When the code changes, re-verify and bump this header. -->
+<!-- Reconciled through SAGE v11.2.1. Every variable below was located at the cited file:line via `os.Getenv` or the local env helper. When the code changes, re-verify and bump this header. -->
 
 # SAGE Reference — Environment Variables
 
@@ -84,6 +84,7 @@ These override `config.yaml`'s embedding block. Provider values: `hash` (built-i
 | `SAGE_EMBEDDING_DIMENSION` | Embedding vector dimension (int > 0). | `768` | `cmd/sage-gui/config.go:179` |
 | `OLLAMA_URL` | **Legacy** alias for the base URL. `SAGE_EMBEDDING_BASE_URL` wins when both are set. | (none) | `cmd/sage-gui/config.go:166` |
 | `OLLAMA_MODEL` | **Legacy** alias for the model. `SAGE_EMBEDDING_MODEL` wins when both are set. | (none) | `cmd/sage-gui/config.go:169` |
+| `OLLAMA_KEEP_ALIVE` | How long Ollama keeps the embed model resident, sent as `keep_alive` on every embed request so it isn't unloaded between turns (the fix for intermittent embed failures). Accepts a duration (`24h`) or integer seconds (`-1` pins in memory, `0` unloads); an integer is sent to Ollama as a JSON number, an unparseable value falls back to the default. | `30m` | `internal/embedding/ollama.go:81` |
 | `SAGE_PROVIDER` | Provider label the MCP server reports for itself. | (empty) | `internal/mcp/server.go:95` |
 
 ---

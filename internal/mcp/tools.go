@@ -1002,10 +1002,17 @@ func (s *Server) toolTurn(ctx context.Context, params map[string]any) (any, erro
 	// Goes through consensus: submit → CheckTx → FinalizeBlock → Commit → auto-validator → committed.
 	// Skip duplicates — don't store if a very similar memory already exists in this domain.
 	if observation != "" && !isLowValueObservation(observation) && !s.similarMemoryExists(ctx, observation, domain) {
-		if err := s.storeMemory(ctx, observation, domain, "observation", 0.80); err != nil {
+		if storeDegraded, err := s.storeMemory(ctx, observation, domain, "observation", 0.80); err != nil {
 			result["store_error"] = err.Error()
 		} else {
 			result["stored"] = true
+			if storeDegraded {
+				// Committed WITHOUT a vector (embedder was down): surface it so the
+				// agent/user knows this observation isn't semantically recallable yet.
+				result["store_mode"] = "no_vector"
+				result["semantic_degraded"] = true
+				result["degraded_reason"] = "embedder unavailable at store time — re-embed to backfill the vector"
+			}
 		}
 	} else if observation != "" {
 		result["stored"] = false
@@ -1061,7 +1068,7 @@ func (s *Server) toolInception(ctx context.Context, _ map[string]any) (any, erro
 					"This is my Ed25519 public key hash — it identifies me across all sessions. "+
 					"All my memories are attributed to this agent_id.",
 				s.agentID, regResp.Name, s.provider, s.project)
-			_ = s.storeMemory(ctx, identityContent, "self", "fact", 0.99)
+			_, _ = s.storeMemory(ctx, identityContent, "self", "fact", 0.99)
 		}
 	}
 
@@ -1285,7 +1292,7 @@ func (s *Server) toolReflect(ctx context.Context, params map[string]any) (any, e
 	// Store the task summary as an observation (skip if similar exists)
 	summaryContent := fmt.Sprintf("[Task Reflection] %s", taskSummary)
 	if !s.similarMemoryExists(ctx, summaryContent, domain) {
-		if err := s.storeMemory(ctx, summaryContent, domain, "observation", 0.85); err == nil {
+		if _, err := s.storeMemory(ctx, summaryContent, domain, "observation", 0.85); err == nil {
 			stored++
 		}
 	} else {
@@ -1296,7 +1303,7 @@ func (s *Server) toolReflect(ctx context.Context, params map[string]any) (any, e
 	if dos != "" {
 		doContent := fmt.Sprintf("[DO] %s", dos)
 		if !s.similarMemoryExists(ctx, doContent, domain) {
-			if err := s.storeMemory(ctx, doContent, domain, "fact", 0.90); err == nil {
+			if _, err := s.storeMemory(ctx, doContent, domain, "fact", 0.90); err == nil {
 				stored++
 			}
 		} else {
@@ -1308,7 +1315,7 @@ func (s *Server) toolReflect(ctx context.Context, params map[string]any) (any, e
 	if donts != "" {
 		dontContent := fmt.Sprintf("[DON'T] %s", donts)
 		if !s.similarMemoryExists(ctx, dontContent, domain) {
-			if err := s.storeMemory(ctx, dontContent, domain, "observation", 0.90); err == nil {
+			if _, err := s.storeMemory(ctx, dontContent, domain, "observation", 0.90); err == nil {
 				stored++
 			}
 		} else {
@@ -1615,7 +1622,11 @@ func isLowValueObservation(obs string) bool {
 // If the pre-validate endpoint exists and rejects the memory, returns an error with
 // validator reasons. Falls through to normal submission if pre-validate returns 404
 // (backwards compatible with older servers).
-func (s *Server) storeMemory(ctx context.Context, content, domain, memType string, confidence float64) error {
+// storeMemory commits a memory. It returns degraded=true when the memory was stored
+// WITHOUT a vector because the embedder was unavailable — the caller should surface
+// that so the user knows the memory is not semantically recallable until a re-embed
+// backfills the vector.
+func (s *Server) storeMemory(ctx context.Context, content, domain, memType string, confidence float64) (degraded bool, err error) {
 	// Step 1: Pre-validate against app validators (if endpoint exists).
 	preValidateReq, _ := json.Marshal(map[string]any{
 		"content":    content,
@@ -1641,19 +1652,27 @@ func (s *Server) storeMemory(ctx context.Context, content, domain, memType strin
 				reasons = append(reasons, fmt.Sprintf("%s: %s", v.Validator, v.Reason))
 			}
 		}
-		return fmt.Errorf("memory rejected by validators: %s", strings.Join(reasons, "; "))
+		return false, fmt.Errorf("memory rejected by validators: %s", strings.Join(reasons, "; "))
 	}
 
-	// Step 2: Get embedding.
+	// Step 2: Get embedding (best-effort). The /v1/embed path already retries transient
+	// Ollama blips; if it STILL fails (embedder genuinely down/unreachable) we submit
+	// WITHOUT a vector rather than lose the observation — the memory commits and is
+	// re-embeddable, but it is NOT semantically recallable until a re-embed backfills
+	// the vector (and on a vault-encrypted node it isn't keyword-searchable either). We
+	// flag this as degraded so the caller can tell the user, rather than degrading
+	// semantic memory silently.
 	embedReq, _ := json.Marshal(map[string]string{"text": content})
 	var embedResp struct {
 		Embedding []float32 `json:"embedding"`
 	}
-	if err := s.doSignedJSON(ctx, "POST", "/v1/embed", embedReq, &embedResp); err != nil {
-		return fmt.Errorf("get embedding: %w", err)
+	if embErr := s.doSignedJSON(ctx, "POST", "/v1/embed", embedReq, &embedResp); embErr != nil {
+		fmt.Fprintf(os.Stderr, "SAGE MCP: embedder unavailable (%v) — storing memory WITHOUT a vector; it will not be semantically recallable until a re-embed backfills it (dashboard → Settings → Embeddings → Re-embed)\n", embErr)
+		embedResp.Embedding = nil
+		degraded = true
 	}
 
-	// Step 3: Submit memory.
+	// Step 3: Submit memory (embedding omitted when the embedder was unavailable).
 	submitReq, _ := json.Marshal(map[string]any{
 		"content":          content,
 		"memory_type":      memType,
@@ -1662,7 +1681,10 @@ func (s *Server) storeMemory(ctx context.Context, content, domain, memType strin
 		"confidence_score": confidence,
 		"embedding":        embedResp.Embedding,
 	})
-	return s.submitMemoryResilient(ctx, submitReq, nil)
+	if subErr := s.submitMemoryResilient(ctx, submitReq, nil); subErr != nil {
+		return false, subErr
+	}
+	return degraded, nil
 }
 
 // --- Param helpers ---
