@@ -1,8 +1,8 @@
-<!-- Reconciled through SAGE v11.0.3. -->
+<!-- Reconciled through SAGE v11.1.0. -->
 
 # Consensus, Confidence, and Decay
 
-Verified against code at SAGE v11.0.3. The PoE weight system below is fork-gated for replay safety: legacy equal-weight or stubbed branches are retained only so old blocks replay byte-identical. Current live chains use PoE-weighted quorum, verdict-correctness accuracy, corroboration, and domain-aware weighting.
+Verified against code at SAGE v11.1.0. The PoE weight system below is fork-gated for replay safety: legacy equal-weight or stubbed branches are retained only so old blocks replay byte-identical. Current live chains use PoE-weighted quorum, verdict-correctness accuracy, corroboration, and domain-aware weighting.
 
 ## Overview
 

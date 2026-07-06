@@ -244,7 +244,7 @@ func TestReconcileCACommonName(t *testing.T) {
 // (e.g. an ex-guest); it does NOT model a Flow-3 host, whose address book stays empty
 // (documented residual in Guard 1b — not testable because there is no disk trace).
 func TestRemint_DialedPeer_Skipped(t *testing.T) {
-	withVersion(t, "v11.0.3")
+	withVersion(t, "v11.1.0")
 	withNoOtherInstance(t)
 	home := t.TempDir()
 	t.Setenv("SAGE_HOME", home)
@@ -278,7 +278,7 @@ func TestHasNetworkedPeers(t *testing.T) {
 
 // TestRemint_LegacyPersonal_ReMintsAndPreservesMemories is the happy path.
 func TestRemint_LegacyPersonal_ReMintsAndPreservesMemories(t *testing.T) {
-	withVersion(t, "v11.0.3")
+	withVersion(t, "v11.1.0")
 	withNoOtherInstance(t)
 	home := t.TempDir()
 	t.Setenv("SAGE_HOME", home)
@@ -324,7 +324,7 @@ func TestRemint_LegacyPersonal_ReMintsAndPreservesMemories(t *testing.T) {
 // chain backup/reset can't complete, the re-mint is skipped and NOTHING is wiped —
 // it never returns an error that would abort boot.
 func TestRemint_ResetFailure_NonFatal(t *testing.T) {
-	withVersion(t, "v11.0.3")
+	withVersion(t, "v11.1.0")
 	withNoOtherInstance(t)
 	home := t.TempDir()
 	t.Setenv("SAGE_HOME", home)
@@ -350,7 +350,7 @@ func TestRemint_ResetFailure_NonFatal(t *testing.T) {
 
 // TestRemint_Idempotent: a second boot after re-mint is a no-op.
 func TestRemint_Idempotent(t *testing.T) {
-	withVersion(t, "v11.0.3")
+	withVersion(t, "v11.1.0")
 	withNoOtherInstance(t)
 	home := t.TempDir()
 	t.Setenv("SAGE_HOME", home)
@@ -373,7 +373,7 @@ func TestRemint_Idempotent(t *testing.T) {
 // TestRemint_Guards covers every case that must be left untouched.
 func TestRemint_Guards(t *testing.T) {
 	t.Run("quorum-mode-skipped", func(t *testing.T) {
-		withVersion(t, "v11.0.3")
+		withVersion(t, "v11.1.0")
 		withNoOtherInstance(t)
 		home := t.TempDir()
 		t.Setenv("SAGE_HOME", home)
@@ -388,7 +388,7 @@ func TestRemint_Guards(t *testing.T) {
 	})
 
 	t.Run("quorum-peers-configured-skipped", func(t *testing.T) {
-		withVersion(t, "v11.0.3")
+		withVersion(t, "v11.1.0")
 		withNoOtherInstance(t)
 		home := t.TempDir()
 		t.Setenv("SAGE_HOME", home)
@@ -403,7 +403,7 @@ func TestRemint_Guards(t *testing.T) {
 	})
 
 	t.Run("foreign-validator-guest-skipped", func(t *testing.T) {
-		withVersion(t, "v11.0.3")
+		withVersion(t, "v11.1.0")
 		withNoOtherInstance(t)
 		home := t.TempDir()
 		t.Setenv("SAGE_HOME", home)
@@ -418,7 +418,7 @@ func TestRemint_Guards(t *testing.T) {
 	})
 
 	t.Run("another-instance-running-skipped", func(t *testing.T) {
-		withVersion(t, "v11.0.3")
+		withVersion(t, "v11.1.0")
 		home := t.TempDir()
 		t.Setenv("SAGE_HOME", home)
 		dataDir := filepath.Join(home, "data")
@@ -436,7 +436,7 @@ func TestRemint_Guards(t *testing.T) {
 	})
 
 	t.Run("already-unique-id-skipped", func(t *testing.T) {
-		withVersion(t, "v11.0.3")
+		withVersion(t, "v11.1.0")
 		withNoOtherInstance(t)
 		home := t.TempDir()
 		t.Setenv("SAGE_HOME", home)
@@ -452,7 +452,7 @@ func TestRemint_Guards(t *testing.T) {
 	})
 
 	t.Run("legacy-quorum-literal-skipped", func(t *testing.T) {
-		withVersion(t, "v11.0.3")
+		withVersion(t, "v11.1.0")
 		withNoOtherInstance(t)
 		home := t.TempDir()
 		t.Setenv("SAGE_HOME", home)
@@ -467,7 +467,7 @@ func TestRemint_Guards(t *testing.T) {
 	})
 
 	t.Run("multi-validator-sage-personal-skipped", func(t *testing.T) {
-		withVersion(t, "v11.0.3")
+		withVersion(t, "v11.1.0")
 		withNoOtherInstance(t)
 		home := t.TempDir()
 		t.Setenv("SAGE_HOME", home)
@@ -482,7 +482,7 @@ func TestRemint_Guards(t *testing.T) {
 	})
 
 	t.Run("no-genesis-fresh-install-skipped", func(t *testing.T) {
-		withVersion(t, "v11.0.3")
+		withVersion(t, "v11.1.0")
 		withNoOtherInstance(t)
 		home := t.TempDir()
 		t.Setenv("SAGE_HOME", home)

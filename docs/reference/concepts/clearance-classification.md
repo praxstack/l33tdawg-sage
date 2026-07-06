@@ -1,8 +1,8 @@
-<!-- Reconciled through SAGE v11.0.3. -->
+<!-- Reconciled through SAGE v11.1.0. -->
 
 # Clearance and Classification
 
-Verified against code at SAGE v11.0.3.
+Verified against code at SAGE v11.1.0.
 
 ## Overview
 

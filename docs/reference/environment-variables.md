@@ -1,4 +1,4 @@
-<!-- Reconciled through SAGE v11.0.3. Every variable below was located at the cited file:line via `os.Getenv` or the local env helper. When the code changes, re-verify and bump this header. -->
+<!-- Reconciled through SAGE v11.1.0. Every variable below was located at the cited file:line via `os.Getenv` or the local env helper. When the code changes, re-verify and bump this header. -->
 
 # SAGE Reference — Environment Variables
 
@@ -43,7 +43,7 @@ notes which.
 
 ---
 
-## Memory auto-voter (v11.0.3)
+## Memory auto-voter (v11.1.0)
 
 The per-node voter turns submitted memories from `proposed` into `committed`. See
 [`concepts/voter-operations.md`](concepts/voter-operations.md). Env values accept

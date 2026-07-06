@@ -51,9 +51,9 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.0.3
+## What's New in v11.1.0
 
-**Federation actually works between separate nodes now, plus health/observability polish.** v11.0.3 changes **no consensus rule, AppHash, transaction, or key-encoding**; `app-v15` remains the active v11 consensus fork. The one upgrade-time behavior change is a one-time local **network-identity re-mint** on legacy nodes (details below) — your memories are backed up first and preserved.
+**Federation actually works between separate nodes now, plus health/observability polish.** v11.1.0 changes **no consensus rule, AppHash, transaction, or key-encoding**; `app-v15` remains the active v11 consensus fork. The one upgrade-time behavior change is a one-time local **network-identity re-mint** on legacy nodes (details below) — your memories are backed up first and preserved.
 
 - **Cross-node federation is fixed.** Every pre-v11 personal node was born with the *identical* network id `sage-personal`, so SAGE's self-federation guard treated any two nodes as the same network and refused every join. On its next boot a legacy node now re-mints a **globally-unique** network id, so two independent nodes can finally connect.
   - **What you'll see on upgrade (legacy nodes only):** a new network id; block height resets to 0 and the chain rebuilds itself (your memories in SQLite are backed up first and never wiped); the dashboard's self-signed HTTPS certificate is regenerated (**a one-time browser certificate warning** — accept it once); if you had already connected to another network, **re-join once**.
@@ -65,7 +65,7 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 - **Guaranteed auto-commit is operable.** `--require-voter` / `voter.required` makes a deployment that needs automatic `proposed → committed` flow fail-fast rather than silently run voterless; `sage_voter_running` + `sage_proposed_oldest_age_seconds` metrics and a `/ready` voter block turn a stuck backlog into a first-class alarm; a new `concepts/voter-operations.md` runbook covers per-mode ownership, key safety, quorum math, and triage.
 - **Safer upgrades + a security fix.** The pre-upgrade backup is verified by content (integrity + memory row-count parity) rather than file size, and an un-checkpointable write-ahead log aborts the migration instead of being discarded. Archive extraction for the managed Ollama runtime now validates symlink/hardlink targets against the extract root (CodeQL `go/unsafe-unzip-symlink`).
 
-SDK 11.0.3.
+SDK 11.1.0.
 
 ## Older releases
 

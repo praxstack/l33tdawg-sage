@@ -3,7 +3,7 @@
 > **Verified against:** `internal/voter/` (`voter.go`, `decision.go`, `key.go`),
 > `internal/abci/app.go` (`processMemorySubmit`, `processMemoryVote`,
 > `checkAndApplyQuorum`), `internal/validator/quorum.go`, `cmd/sage-gui/node.go`,
-> `cmd/amid/main.go`. Behavior described is v11.0.3+.
+> `cmd/amid/main.go`. Behavior described is v11.1.0+.
 
 A submitted memory is written `proposed` and only becomes `committed` when validator
 votes reach quorum. The **auto-voter** — one goroutine per node, signing with the
@@ -69,7 +69,7 @@ double-sign/equivocation hazard.
 - Never copy it to a second live process. Two processes signing with one key race on
   the monotonic nonce (app-v9 rejects `nonce <= last-committed`) and lose votes.
 - On restart the nonce floor re-seeds from chain state (wired in both `sage-gui` and,
-  as of v11.0.3, `amid`) so a restarted voter resumes above the committed nonce.
+  as of v11.1.0, `amid`) so a restarted voter resumes above the committed nonce.
 
 ## 5. Quorum math
 
