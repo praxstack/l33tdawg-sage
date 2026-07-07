@@ -6650,6 +6650,19 @@ func (app *SageApp) applyGovernanceProposal(proposal *governance.ProposalState, 
 		return nil, app.applyMemoryDomainRepair(proposal, height)
 	}
 
+	// OpDomainReassign has NO validator-set effect: the transfer is applied by the
+	// separate DomainReassign tx (processDomainReassign), not here. Return cleanly
+	// so it does not fall through to the validator-pubkey derivation below, whose
+	// hex.DecodeString would fail on the domain-name target and log a spurious
+	// "failed to apply governance proposal" ERR on every reassign. AppHash-neutral
+	// and ungated: the caller appends a validator update ONLY on (err==nil &&
+	// update!=nil), so both this clean (nil,nil) return and the prior (nil,error)
+	// path append nothing - identical valUpdates and pendingWrites, so historical
+	// replay stays byte-identical; the only change is the absence of the error log.
+	if proposal.Operation == governance.OpDomainReassign {
+		return nil, nil
+	}
+
 	pubKeyBytes := proposal.TargetPubKey
 	if len(pubKeyBytes) == 0 {
 		// Derive from target ID (which is hex-encoded pubkey for non-app validators)
