@@ -169,18 +169,82 @@ func findSageGUI() string {
 	return ""
 }
 
-// openBrowser opens a URL in the default browser.
+// openBrowser opens a URL in the default browser. On macOS it first tries to
+// focus an already-open SAGE tab so clicking the app icon repeatedly reuses the
+// existing tab instead of piling up duplicates; it falls back to a plain open
+// when no tab is found (or the browser can't be scripted).
 func openBrowser(url string) {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "windows":
 		cmd = exec.Command("cmd", "/c", "start", url) //nolint:noctx // fire-and-forget browser open
 	case "darwin":
+		if focusExistingTabDarwin() {
+			return
+		}
 		cmd = exec.Command("open", url) //nolint:noctx // fire-and-forget browser open
 	default: // linux, freebsd, etc.
 		cmd = exec.Command("xdg-open", url) //nolint:noctx // fire-and-forget browser open
 	}
 	_ = cmd.Start()
+}
+
+// focusExistingTabDarwin asks the common macOS browsers (via AppleScript) to
+// find a tab already pointed at the SAGE dashboard and bring it to the front.
+// It reports whether a tab was found and focused. Each browser is probed only
+// if it is already running (the `is running` property never launches it), and
+// every browser block is wrapped in a try so a missing app or a denied
+// Automation (Apple Events) permission degrades to the plain-open fallback
+// rather than erroring. Matching on host:port reuses either /ui/ or /ui/launch.
+func focusExistingTabDarwin() bool {
+	const script = `
+set matchStr to "localhost:8080"
+set chromiumApps to {"Google Chrome", "Google Chrome Canary", "Brave Browser", "Microsoft Edge", "Arc", "Vivaldi", "Chromium"}
+repeat with appRef in chromiumApps
+	set appName to appRef as string
+	try
+		if application appName is running then
+			tell application appName
+				repeat with w in windows
+					set i to 0
+					repeat with t in tabs of w
+						set i to i + 1
+						if (URL of t) contains matchStr then
+							set active tab index of w to i
+							set index of w to 1
+							activate
+							return "focused"
+						end if
+					end repeat
+				end repeat
+			end tell
+		end if
+	end try
+end repeat
+try
+	if application "Safari" is running then
+		tell application "Safari"
+			repeat with w in windows
+				repeat with t in tabs of w
+					if (URL of t) contains matchStr then
+						set current tab of w to t
+						activate
+						return "focused"
+					end if
+				end repeat
+			end repeat
+		end tell
+	end if
+end try
+return "none"
+`
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "osascript", "-e", script).Output()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(out), "focused")
 }
 
 // sageDir returns ~/.sage, creating it if needed.

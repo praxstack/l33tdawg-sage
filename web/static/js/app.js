@@ -2042,7 +2042,7 @@ function TasksPage({ sse }) {
                 </div>
             `}
             ${error && html`
-                <div style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.4);color:#ef4444;padding:12px 16px;border-radius:8px;margin-bottom:12px;display:flex;align-items:center;gap:12px;font-size:13px;">
+                <div style="background:var(--danger-tint);border:1px solid rgba(239,68,68,0.4);color:var(--danger);padding:12px 16px;border-radius:8px;margin-bottom:12px;display:flex;align-items:center;gap:12px;font-size:13px;">
                     <span style="flex:1;">Couldn't load tasks: ${error}</span>
                     <button class="btn" onClick=${loadTasks}>Retry</button>
                 </div>
@@ -2279,7 +2279,12 @@ function SearchPage() {
     }
 
     useEffect(() => {
-        loadMemories();
+        // Deep link: #/search?agent=<id> pre-filters to a single agent's memories
+        // (the "View memories" button on the Agents page links here).
+        const qs = window.location.hash.split('?')[1];
+        const initialAgent = qs ? (new URLSearchParams(qs).get('agent') || '') : '';
+        if (initialAgent) setAgentFilter(initialAgent);
+        loadMemories('', initialAgent);
         fetchAgents().then(data => setAgents(data.agents || [])).catch(() => {});
         fetchStats().then(data => { if (data.by_domain) setDomains(Object.keys(data.by_domain).sort()); }).catch(() => {});
         fetchTags().then(data => setAllTags(data.tags || [])).catch(() => {});
@@ -2412,7 +2417,7 @@ function SearchPage() {
             </div>
             <div class="memory-list">
                 ${error && html`
-                    <div style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.4);color:#ef4444;padding:12px 16px;border-radius:8px;margin-bottom:12px;display:flex;align-items:center;gap:12px;font-size:13px;">
+                    <div style="background:var(--danger-tint);border:1px solid rgba(239,68,68,0.4);color:var(--danger);padding:12px 16px;border-radius:8px;margin-bottom:12px;display:flex;align-items:center;gap:12px;font-size:13px;">
                         <span style="flex:1;">Couldn't load memories: ${error}</span>
                         <button class="btn" onClick=${() => loadMemories(query, agentFilter, domainFilter, tagFilter)}>Retry</button>
                     </div>
@@ -3262,7 +3267,7 @@ function MemoryMode() {
             `)}
         </div>
         ${saving && html`<div style="margin-top:8px;font-size:12px;color:var(--text-dim)">Saving and syncing hooks...</div>`}
-        ${saved && html`<div style="margin-top:8px;font-size:12px;color:#10b981">✓ Saved — mode synced to hooks. Takes effect on next session.</div>`}
+        ${saved && html`<div style="margin-top:8px;font-size:12px;color:var(--accent)">✓ Saved — mode synced to hooks. Takes effect on next session.</div>`}
     `;
 }
 
@@ -3308,7 +3313,7 @@ function RecallSettings() {
                 <div style="font-size:11px;color:var(--text-dim);margin-top:2px;line-height:1.5;">
                     How many memories each recall hands your agent. More = richer context, but every extra
                     memory spends tokens in the agent's window.
-                    ${rrOn === true && html`<span style="color:#10b981;"> Reranker is on: higher k is the sweet spot - SAGE over-samples and the cross-encoder re-scores, so the extra slots stay relevant instead of adding noise.</span>`}
+                    ${rrOn === true && html`<span style="color:var(--accent);"> Reranker is on: higher k is the sweet spot - SAGE over-samples and the cross-encoder re-scores, so the extra slots stay relevant instead of adding noise.</span>`}
                     ${rrOn === false && html`<span> Above ~10 the tail gets noisy without the reranker - turn it on in Memory engine above to make high k worthwhile.</span>`}
                 </div>
             </div>
@@ -3339,7 +3344,7 @@ function RecallSettings() {
             <button class="btn" onClick=${handleSave} disabled=${saving}>
                 ${saving ? 'Saving...' : 'Save'}
             </button>
-            ${saved && html`<span style="color:#10b981;font-size:12px">Saved</span>`}
+            ${saved && html`<span style="color:var(--accent);font-size:12px">Saved</span>`}
         </div>
     `;
 }
@@ -4061,7 +4066,7 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
             : `${formatSetupBytes(prog?.done || 0)} / ${formatSetupBytes(prog?.total || 0)} (${pct}%)`;
         return html`
             <div style="display:flex;align-items:flex-start;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);">
-                <span style="width:20px;text-align:center;color:${s === 'done' ? '#10b981' : active ? 'var(--primary)' : 'var(--text-muted)'};">
+                <span style="width:20px;text-align:center;color:${s === 'done' ? 'var(--accent)' : active ? 'var(--primary)' : 'var(--text-muted)'};">
                     ${s === 'done' ? '\u2713' : active ? '\u25B6' : '\u25CB'}
                 </span>
                 <div style="flex:1;min-width:0;">
@@ -4267,7 +4272,7 @@ function RerankerControl() {
             <div class="settings-row">
                 <span class="label"><span class="status-dot ${cfg.enabled ? 'active' : 'inactive'}"></span> Reranker</span>
                 <span class="value" style="display:flex;align-items:center;gap:8px;">
-                    <span style="color:${cfg.enabled ? '#10b981' : '#6b7280'};font-size:12px;">${cfg.enabled ? 'On' : 'Off'}</span>
+                    <span style="color:${cfg.enabled ? 'var(--accent)' : 'var(--text-muted)'};font-size:12px;">${cfg.enabled ? 'On' : 'Off'}</span>
                     <label class="toggle-switch" onClick=${(e) => e.stopPropagation()}>
                         <input type="checkbox" checked=${cfg.enabled} disabled=${busy}
                             onChange=${(e) => (managed && !e.target.checked) ? doStopManaged() : save(e.target.checked)} />
@@ -4297,11 +4302,11 @@ function RerankerControl() {
                 <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
                     <button class="btn" disabled=${busy} onClick=${test}>Test connection</button>
                     <button class="btn" disabled=${busy} onClick=${() => save(true)}>Save & enable</button>
-                    ${testResult ? html`<span style="font-size:12px;color:${testResult.ok ? '#10b981' : '#ef4444'};">${testResult.ok ? 'Reachable' : ('Failed: ' + String(testResult.error || '').slice(0, 100))}</span>` : ''}
+                    ${testResult ? html`<span style="font-size:12px;color:${testResult.ok ? 'var(--accent)' : 'var(--danger)'};">${testResult.ok ? 'Reachable' : ('Failed: ' + String(testResult.error || '').slice(0, 100))}</span>` : ''}
                     ${msg ? html`<span style="font-size:12px;color:var(--text-muted);">${msg}</span>` : ''}
                 </div>
                 ${detected && !cfg.enabled ? html`
-                    <div style="font-size:12px;color:#10b981;">Found a reranker running at ${detected} - the URL was filled in for you. Click Save & enable to start using it (the connection is verified on save).</div>
+                    <div style="font-size:12px;color:var(--accent);">Found a reranker running at ${detected} - the URL was filled in for you. Click Save & enable to start using it (the connection is verified on save).</div>
                 ` : ''}
                 <div style="font-size:11px;color:var(--text-muted);">Optional. Re-scores recall results for sharper relevance. Off by default; recall works fine without it.</div>
             </div>
@@ -4332,12 +4337,12 @@ function RestartNodeButton() {
         <div class="settings-row">
             <span class="label">Restart node</span>
             <span class="value">
-                <button class="btn" disabled=${busy} style=${arming ? 'border-color:#f59e0b;color:#f59e0b;' : ''} onClick=${doRestart}>
+                <button class="btn" disabled=${busy} style=${arming ? 'border-color:var(--warning);color:var(--warning);' : ''} onClick=${doRestart}>
                     ${busy ? 'Restarting...' : (arming ? 'Click again to confirm' : 'Restart')}
                 </button>
             </span>
         </div>
-        ${arming ? html`<div style="font-size:11px;color:#f59e0b;margin-top:4px;">Restarting re-locks the vault - you will need to unlock again. The node is briefly offline.</div>` : ''}
+        ${arming ? html`<div style="font-size:11px;color:var(--warning);margin-top:4px;">Restarting re-locks the vault - you will need to unlock again. The node is briefly offline.</div>` : ''}
     `;
 }
 
@@ -4464,7 +4469,7 @@ function RerankerSetupModal({ onClose, onDone }) {
         const pct = active && prog && prog.step === key && prog.total > 0 ? Math.round((prog.done / prog.total) * 100) : null;
         return html`
             <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);">
-                <span style="width:20px;text-align:center;color:${s === 'done' ? '#10b981' : active ? 'var(--primary)' : 'var(--text-muted)'};">
+                <span style="width:20px;text-align:center;color:${s === 'done' ? 'var(--accent)' : active ? 'var(--primary)' : 'var(--text-muted)'};">
                     ${s === 'done' ? '\u2713' : active ? '\u25B6' : '\u25CB'}
                 </span>
                 <div style="flex:1;">
@@ -4729,7 +4734,7 @@ function SettingsPage({ onRunSetup }) {
                             <div class="chain-details">
                                 <div class="settings-row"><span class="label">Chain ID</span><span class="value chain-id-value">${chain.chain_id || '--'}</span></div>
                                 <div class="settings-row"><span class="label">Node</span><span class="value">${chain.moniker || '--'}</span></div>
-                                <div class="settings-row"><span class="label">Syncing</span><span class="value" style="color: ${chain.catching_up ? '#ef4444' : '#10b981'}">${chain.catching_up ? 'Catching up...' : 'In sync'}</span></div>
+                                <div class="settings-row"><span class="label">Syncing</span><span class="value" style="color: ${chain.catching_up ? 'var(--danger)' : 'var(--accent)'}">${chain.catching_up ? 'Catching up...' : 'In sync'}</span></div>
                                 <div class="settings-row"><span class="label">Last Block</span><span class="value">${chain.block_time ? new Date(chain.block_time).toLocaleTimeString() : '--'}${chainIdle ? html` <span style="color:var(--text-muted)">(chain idle — not a stall)</span>` : ''}</span></div>
                             </div>
                         ` : html`<div class="chain-offline">${statusDot(false)} <span>Chain unavailable — CometBFT not running</span></div>`}
@@ -4739,8 +4744,8 @@ function SettingsPage({ onRunSetup }) {
                         <!-- System Status -->
                         <div class="settings-section">
                             <h3>System Status</h3>
-                            <div class="settings-row"><span class="label">${statusDot(true)} SAGE</span><span class="value" style="color:#10b981">Running</span></div>
-                            <div class="settings-row"><span class="label">${statusDot(embedderStatus.online)} ${embedderStatus.displayName}</span><span class="value" style="color: ${embedderStatus.online ? '#10b981' : '#6b7280'}" title="${embedderStatus.detail || ''}">${embedderStatus.online ? (embedderStatus.detail ? embedderStatus.detail : 'Connected') : 'Offline'}</span></div>
+                            <div class="settings-row"><span class="label">${statusDot(true)} SAGE</span><span class="value" style="color:var(--accent)">Running</span></div>
+                            <div class="settings-row"><span class="label">${statusDot(embedderStatus.online)} ${embedderStatus.displayName}</span><span class="value" style="color: ${embedderStatus.online ? 'var(--accent)' : 'var(--text-muted)'}" title="${embedderStatus.detail || ''}">${embedderStatus.online ? (embedderStatus.detail ? embedderStatus.detail : 'Connected') : 'Offline'}</span></div>
                             ${(embedderStatus.provider === 'hash' || (embStatus && (embStatus.need_reembed > 0 || embStatus.unreadable > 0 || embStatus.errored > 0))) && html`
                                 <div class="settings-row" style="align-items:center;">
                                     <span class="label" style="color:var(--text-dim);font-size:12px;">${embedderStatus.provider === 'hash'
@@ -4753,10 +4758,10 @@ function SettingsPage({ onRunSetup }) {
                                     <button class="btn btn-primary" style="padding:6px 14px;font-size:12px;" onClick=${() => setShowEmbedSetup(true)}>${embedderStatus.provider === 'hash' ? 'Turn on smart memory →' : embStatus.need_reembed > 0 ? 'Finish setup →' : embStatus.unreadable > 0 ? 'Review →' : 'Retry →'}</button>
                                 </div>
                             `}
-                            <div class="settings-row"><span class="label">${statusDot(!!(health?.embedder?.reranker?.enabled))} Reranker</span><span class="value" style="color: ${health?.embedder?.reranker?.enabled ? '#10b981' : '#6b7280'}">${health?.embedder?.reranker?.enabled ? (health.embedder.reranker.model || 'On') : 'Off'}</span></div>
+                            <div class="settings-row"><span class="label">${statusDot(!!(health?.embedder?.reranker?.enabled))} Reranker</span><span class="value" style="color: ${health?.embedder?.reranker?.enabled ? 'var(--accent)' : 'var(--text-muted)'}">${health?.embedder?.reranker?.enabled ? (health.embedder.reranker.model || 'On') : 'Off'}</span></div>
                             <div class="settings-row"><span class="label">${statusDot(encrypted)} Synaptic Ledger Encryption</span>${encrypted
-                                ? html`<span class="value" style="color:#10b981">AES-256-GCM</span>`
-                                : html`<span style="display:flex;align-items:center;gap:8px;"><span class="value" style="color:#6b7280">Off</span><button class="btn btn-primary" style="padding:4px 12px;font-size:12px;" title="Encrypt all memories at rest with a passphrase (Security tab)" onClick=${() => setSettingsTab('security')}>Enable →</button></span>`}</div>
+                                ? html`<span class="value" style="color:var(--accent)">AES-256-GCM</span>`
+                                : html`<span style="display:flex;align-items:center;gap:8px;"><span class="value" style="color:var(--text-muted)">Off</span><button class="btn btn-primary" style="padding:4px 12px;font-size:12px;" title="Encrypt all memories at rest with a passphrase (Security tab)" onClick=${() => setSettingsTab('security')}>Enable →</button></span>`}</div>
                             <div class="settings-row"><span class="label">Version</span><span class="value">${ver}</span></div>
                             <div class="settings-row"><span class="label">Uptime</span><span class="value">${uptime}</span></div>
                             <div class="settings-row"><span class="label">API Endpoint</span><span class="value">${window.location.origin}</span></div>
@@ -4845,7 +4850,7 @@ function SettingsPage({ onRunSetup }) {
                         <p style="color:var(--text-muted);font-size:0.85rem;margin-bottom:16px;">Endpoints other tools and Agents use to reach this node.</p>
                         ${html`<${ChatGPTCopyField} label="REST API address" value=${window.location.origin} />`}
                         ${restAddr ? html`<${ChatGPTCopyField} label="REST listen address" value=${restAddr} />` : ''}
-                        ${restNetworkExposed ? html`<div style="color:#f59e0b;font-size:11px;margin:2px 0 12px;">This address is reachable on your network, not just this machine.</div>` : ''}
+                        ${restNetworkExposed ? html`<div style="color:var(--warning);font-size:11px;margin:2px 0 12px;">This address is reachable on your network, not just this machine.</div>` : ''}
                         <div style="margin-top:16px;">
                             <div style="font-size:13px;font-weight:600;margin-bottom:6px;">MCP configuration</div>
                             <div style="color:var(--text-muted);font-size:0.85rem;margin-bottom:10px;">Paste this into your AI client's MCP settings so it can use this node as its memory. SAGE's MCP runs as a local command (stdio), so there is nothing to open on your firewall.</div>
@@ -4862,7 +4867,7 @@ function SettingsPage({ onRunSetup }) {
                 <div class="settings-tab-content">
                     <div class="settings-section">
                         <h3>Memory engine <${HelpTip} text="The two models that power recall: the embedding model that turns memories into vectors for semantic search (managed by SAGE), and the optional reranker that re-scores recall results for sharper relevance (one-click managed setup)." /></h3>
-                        <div class="settings-row"><span class="label">${statusDot(embedderStatus.online)} Embedding model</span><span class="value" style="color: ${embedderStatus.online ? '#10b981' : '#6b7280'}" title="${embedderStatus.detail || ''}">${embedderStatus.displayName || (embedderStatus.online ? 'Connected' : 'Offline')}${embedderStatus.detail ? ' · ' + embedderStatus.detail : ''}</span></div>
+                        <div class="settings-row"><span class="label">${statusDot(embedderStatus.online)} Embedding model</span><span class="value" style="color: ${embedderStatus.online ? 'var(--accent)' : 'var(--text-muted)'}" title="${embedderStatus.detail || ''}">${embedderStatus.displayName || (embedderStatus.online ? 'Connected' : 'Offline')}${embedderStatus.detail ? ' · ' + embedderStatus.detail : ''}</span></div>
                         ${(embedderStatus.provider === 'hash' || (embStatus && (embStatus.need_reembed > 0 || embStatus.unreadable > 0 || embStatus.errored > 0))) ? html`
                             <div class="settings-row" style="align-items:center;">
                                 <span class="label" style="color:var(--text-dim);font-size:12px;">${embedderStatus.provider === 'hash'
@@ -5412,7 +5417,7 @@ function TimelineBar({ selectedRanges, onSelectRange }) {
                              style="left: ${(i / Math.max(1, buckets.length)) * 100}%;
                                     width: ${100 / Math.max(1, buckets.length)}%;
                                     height: ${Math.max(pct, 4)}%;
-                                    ${sel ? 'background: #22d3ee; opacity: 1;' : ''}"
+                                    ${sel ? 'background: var(--primary-bright); opacity: 1;' : ''}"
                              onClick=${() => toggleBucket(b)}>
                             <div class="timeline-tooltip">
                                 <span class="timeline-tooltip-count">${b.count}</span> memor${b.count === 1 ? 'y' : 'ies'}
@@ -6958,7 +6963,7 @@ function NetworkPage({ sse }) {
                     <h3>Connect an AI tool <${HelpTip} text="Wire an AI tool to your SAGE brain. Pick where the tool runs and which tool it is - SAGE writes the config for you. No terminal needed." /></h3>
                 </div>
                 <div class="ext-clients-grid">
-                    <div class="ext-client-card" role="button" tabIndex="0"
+                    <div class="ext-client-card" role="button" tabIndex="0" style="grid-column:1 / -1;"
                         onClick=${() => setShowConnectTool(true)}
                         onKeyDown=${e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setShowConnectTool(true); } }}>
                         <div class="ext-client-icon">🔌</div>
@@ -6968,16 +6973,7 @@ function NetworkPage({ sse }) {
                         </div>
                         <div class="ext-client-cta">Get started →</div>
                     </div>
-                    <div class="ext-client-card" role="button" tabIndex="0"
-                        onClick=${() => setShowJoinGuest(true)}
-                        onKeyDown=${e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setShowJoinGuest(true); } }}>
-                        <div class="ext-client-icon">🔗</div>
-                        <div class="ext-client-info">
-                            <div class="ext-client-title">Join a network</div>
-                            <div class="ext-client-desc">Make this computer part of another SAGE on your network - it keeps its own node but shares that network's memory.</div>
-                        </div>
-                        <div class="ext-client-cta">Paste a code →</div>
-                    </div>
+                    ${/* "Join a network" was moved to the Federation page — that's the single home for joining a network. The LAN paste-code guest flow (NetworkJoinGuestPanel) stays wired below for relocation there. */ ''}
                 </div>
             </div>
 
@@ -7158,6 +7154,7 @@ function NetworkPage({ sse }) {
                                                 <button class="btn btn-primary" onClick=${() => handleOverviewSave(agent.agent_id)}>Save</button>
                                                 <button class="btn" onClick=${() => setEditing(false)}>Cancel</button>
                                             ` : html`
+                                                <button class="btn" onClick=${() => { window.location.hash = '/search?agent=' + encodeURIComponent(agent.agent_id); }} title="See this agent's memories in Search">View memories</button>
                                                 <button class="btn" onClick=${() => setEditing(true)}>Edit</button>
                                                 <button class="btn" onClick=${async () => {
                                                     const ok = await downloadBundle(agent.agent_id);
@@ -8994,13 +8991,13 @@ function OnboardingWizard({ onClose, onNavigate, onOpenGuide }) {
                     `}
                     ${step === 1 && html`
                         ${semantic ? html`
-                            <div style="display:flex;align-items:center;gap:10px;background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.35);border-radius:8px;padding:12px 14px;">
-                                <span style="color:#10b981;font-size:18px;">✓</span>
+                            <div style="display:flex;align-items:center;gap:10px;background:var(--success-tint);border:1px solid rgba(16,185,129,0.35);border-radius:8px;padding:12px 14px;">
+                                <span style="color:var(--accent);font-size:18px;">✓</span>
                                 <div style="font-size:13px;">Semantic memory is <strong>on</strong> - your agents recall by meaning (Ollama + nomic-embed-text).</div>
                             </div>
                             ${rerankOn ? html`
-                                <div style="display:flex;align-items:center;gap:10px;margin-top:10px;background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.35);border-radius:8px;padding:12px 14px;">
-                                    <span style="color:#10b981;font-size:18px;">✓</span>
+                                <div style="display:flex;align-items:center;gap:10px;margin-top:10px;background:var(--success-tint);border:1px solid rgba(16,185,129,0.35);border-radius:8px;padding:12px 14px;">
+                                    <span style="color:var(--accent);font-size:18px;">✓</span>
                                     <div style="font-size:13px;">The <strong>reranker</strong> is on too - recall results get re-scored for sharper relevance.</div>
                                 </div>
                             ` : html`
@@ -9012,7 +9009,7 @@ function OnboardingWizard({ onClose, onNavigate, onOpenGuide }) {
                         ` : html`
                             <p style="margin-top:0;">Out of the box SAGE recalls by <strong>keywords</strong>. Turning on the semantic embedder (a free local model via Ollama) lets your agents find memories by <strong>meaning</strong> - the single biggest recall upgrade.</p>
                             ${ollamaUp
-                                ? html`<p style="color:#10b981;font-size:13px;">Ollama is already running on this machine - setup takes about a minute.</p>`
+                                ? html`<p style="color:var(--accent);font-size:13px;">Ollama is already running on this machine - setup takes about a minute.</p>`
                                 : html`<p style="color:var(--text-dim);font-size:13px;">SAGE downloads and verifies the local Ollama runtime, starts it, pulls the model, and continues only after readiness checks pass. You can skip for now and turn it on any time from Settings.</p>`}
                             <button class="btn btn-primary" onClick=${() => setShowEmbedSetup(true)}>Set up semantic memory</button>
                         `}
@@ -9025,7 +9022,7 @@ function OnboardingWizard({ onClose, onNavigate, onOpenGuide }) {
                     `}
                     ${step === 2 && html`
                         <p style="margin-top:0;">Wire an AI tool to this node and it gets persistent memory: it reloads what it knows when it boots, and remembers what it learns as it works.</p>
-                        ${agents.length > 0 && html`<p style="color:#10b981;font-size:13px;">✓ ${agents.length} agent identit${agents.length === 1 ? 'y' : 'ies'} registered on this node.</p>`}
+                        ${agents.length > 0 && html`<p style="color:var(--accent);font-size:13px;">✓ ${agents.length} agent identit${agents.length === 1 ? 'y' : 'ies'} registered on this node.</p>`}
                         <button class="btn btn-primary" onClick=${() => setShowConnect(true)}>Connect an AI tool</button>
                         <div style="display:flex;gap:8px;justify-content:space-between;margin-top:20px;">
                             <button class="btn" onClick=${() => setStep(1)}>Back</button>
@@ -9198,7 +9195,7 @@ function PipelineView({ onStats }) {
             </div>
 
             ${error && html`
-                <div style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.4);color:#ef4444;padding:12px 16px;border-radius:8px;margin-bottom:16px;display:flex;align-items:center;gap:12px;font-size:13px;">
+                <div style="background:var(--danger-tint);border:1px solid rgba(239,68,68,0.4);color:var(--danger);padding:12px 16px;border-radius:8px;margin-bottom:16px;display:flex;align-items:center;gap:12px;font-size:13px;">
                     <span style="flex:1;">Couldn't load messages: ${error}</span>
                     <button class="btn" onClick=${() => loadData()}>Retry</button>
                 </div>
@@ -9674,6 +9671,16 @@ function App() {
     const [sseConnected, setSseConnected] = useState(false);
     const [showHelp, setShowHelp] = useState(false);
     const [showOnboarding, setShowOnboarding] = useState(false);
+    // Header badge version: prefer the running node's build version (from health)
+    // over the hardcoded product constant, trimmed to base semver, so it never
+    // goes stale the way the pinned SAGE_VERSION did.
+    const [sageVersion, setSageVersion] = useState(SAGE_VERSION);
+    useEffect(() => {
+        fetchHealth().then(h => {
+            const m = (h && h.version || '').match(/\d+\.\d+\.\d+/);
+            if (m) setSageVersion('v' + m[0]);
+        }).catch(() => {});
+    }, []);
     const [helpSection, setHelpSection] = useState(null);
     const openHelp = (section) => { setHelpSection(section || null); setShowHelp(true); };
     window.__sageOpenHelp = openHelp;
@@ -9687,6 +9694,18 @@ function App() {
     const changeTextSize = (size) => {
         setTextSize(size);
         try { localStorage.setItem('sage-text-size', size); } catch (e) {}
+    };
+    const [theme, setTheme] = useState(() => {
+        try { return localStorage.getItem('sage-theme') === 'light' ? 'light' : 'dark'; } catch (e) { return 'dark'; }
+    });
+    const changeTheme = (t) => {
+        setTheme(t);
+        try { localStorage.setItem('sage-theme', t); } catch (e) {}
+        // index.html stamps data-theme pre-paint; keep <html> in sync on toggle.
+        try {
+            if (t === 'light') document.documentElement.setAttribute('data-theme', 'light');
+            else document.documentElement.removeAttribute('data-theme');
+        } catch (e) {}
     };
 
     // Expose lock function for SynapticLedger (called after enabling encryption)
@@ -9818,7 +9837,7 @@ function App() {
 
         // Hash routing
         function onHash() {
-            const hash = window.location.hash.slice(1) || '/';
+            const hash = (window.location.hash.slice(1) || '/').split('?')[0]; // strip ?query (e.g. /search?agent=…) for page matching
             if (hash === '/overview') setPage('overview');
             else if (hash === '/search') setPage('search');
             else if (hash === '/tasks') setPage('tasks');
@@ -9905,7 +9924,7 @@ function App() {
         </div>
         <div class="main-content zoom-${textSize}">
             <div class="top-bar">
-                <h1 aria-label=${`CEREBRUM - ${PAGE_LABELS[page] || 'Your SAGE Brain'}`}>CEREBRUM <span class="sage-version" title="SAGE release">${SAGE_VERSION}</span> <span class="topbar-sep" aria-hidden="true">/</span> <span class="topbar-page">${PAGE_LABELS[page] || 'Your SAGE Brain'}</span></h1>
+                <h1 aria-label=${`CEREBRUM - ${PAGE_LABELS[page] || 'Your SAGE Brain'}`}>CEREBRUM <span class="sage-version" title="SAGE release">${sageVersion}</span> <span class="topbar-sep" aria-hidden="true">/</span> <span class="topbar-page">${PAGE_LABELS[page] || 'Your SAGE Brain'}</span></h1>
                 <div class="spacer"></div>
                 ${isEncrypted && html`
                     <button class="lock-btn" title="Lock CEREBRUM" onClick=${async () => {
@@ -9923,6 +9942,11 @@ function App() {
                     <button class="text-size-btn sz-m ${textSize === 'medium' ? 'active' : ''}" onClick=${() => changeTextSize('medium')}>A</button>
                     <button class="text-size-btn sz-l ${textSize === 'large' ? 'active' : ''}" onClick=${() => changeTextSize('large')}>A</button>
                 </div>
+                <button class="theme-toggle" title=${theme === 'light' ? 'Switch to dark theme' : 'Switch to light theme'} aria-label=${theme === 'light' ? 'Switch to dark theme' : 'Switch to light theme'} onClick=${() => changeTheme(theme === 'light' ? 'dark' : 'light')}>
+                    ${theme === 'light'
+                        ? html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>`
+                        : html`<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><line x1="12" y1="2" x2="12" y2="4"/><line x1="12" y1="20" x2="12" y2="22"/><line x1="4.93" y1="4.93" x2="6.34" y2="6.34"/><line x1="17.66" y1="17.66" x2="19.07" y2="19.07"/><line x1="2" y1="12" x2="4" y2="12"/><line x1="20" y1="12" x2="22" y2="12"/><line x1="4.93" y1="19.07" x2="6.34" y2="17.66"/><line x1="17.66" y1="6.34" x2="19.07" y2="4.93"/></svg>`}
+                </button>
                 <div class="connection-badge">
                     <div class="connection-dot ${sseConnected ? '' : 'disconnected'}"></div>
                     ${sseConnected ? 'Live' : 'Connecting...'}

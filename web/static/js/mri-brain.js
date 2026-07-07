@@ -113,12 +113,27 @@ function makeFocusRingTexture() {
   return tex;
 }
 
+// Theme-aware MRI canvas colors. The brain wireframe uses additive blending so it
+// glows on black at very low opacity; additive washes to white on a light background,
+// so light mode switches to normal blending with a near-black wire color AND a much
+// higher effective opacity (mriHullOpacity) so the dense wireframe actually reads.
+function mriIsLight(){ try { return document.documentElement.getAttribute('data-theme') === 'light'; } catch(e){ return false; } }
+function mriBgColor(){ return mriIsLight() ? '#eef2f7' : '#040406'; }
+function mriWireColor(){ return mriIsLight() ? 0x24406e : 0x4aa3ff; }
+function mriWireBlend(){ return mriIsLight() ? THREE.NormalBlending : THREE.AdditiveBlending; }
+// Light mode writes depth so the FRONT shell occludes the back layers — no
+// doubled-up "gray veil" on the edge-on shell — which lets us use a higher
+// opacity for genuinely dark, crisp lines. Dark mode keeps depthWrite off so the
+// additive wireframe layers freely into its glow.
+function mriDepthWrite(){ return mriIsLight(); }
+function mriHullOpacity(o){ return mriIsLight() ? Math.min(0.4, 0.24 + o * 0.16) : o; }
+
 const STYLE = `
-.mrib{position:absolute;inset:0;overflow:hidden;background:radial-gradient(1200px 800px at 70% 18%,#0a1426 0%,#05070d 60%);
+.mrib{position:absolute;inset:0;overflow:hidden;background:radial-gradient(1200px 800px at 70% 18%,#08090c 0%,#040406 60%);
   font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#cfe3ff}
 .mrib-graph{position:absolute;inset:0}
 .mrib .panel{position:absolute;background:rgba(10,16,28,.78);border:1px solid #15233b;border-radius:12px;backdrop-filter:blur(8px);box-shadow:0 8px 40px #0008;z-index:5}
-.mrib .legend{top:16px;right:16px;width:270px;padding:13px 15px;max-height:84%;overflow:auto}
+.mrib .legend{top:16px;right:16px;width:270px;padding:13px 15px;max-height:90%;overflow:auto;resize:both;min-width:220px;max-width:640px;min-height:150px}
 .mrib .legend.collapsed .lg-detail{display:none}
 .mrib .legend.collapsed{max-height:70%}
 .mrib .lg-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
@@ -183,6 +198,45 @@ const STYLE = `
 .mrib .explore .ex-cc{color:#7f93b5;margin-left:auto}
 .mrib .explore .ex-empty{color:#3a4a66;padding:10px;text-align:center;font-size:12px}
 .mrib .explore .ex-empty-big{padding:40px;color:#5d7395}
+
+/* Light theme: the 3D canvas is transparent (#05070d00), so lightening the .mrib
+   container background lets the light page show through the brain; the chrome
+   (panels/legend/HUD/explore) is re-tinted for light. The brain wireframe + node
+   colors are left as-is. */
+:root[data-theme="light"] .mrib{background:radial-gradient(1200px 800px at 70% 18%,#ffffff 0%,#e9eef4 62%);color:#334155}
+:root[data-theme="light"] .mrib .panel{background:rgba(255,255,255,.9);border-color:#dbe3ec;box-shadow:0 8px 32px rgba(15,23,42,.12)}
+:root[data-theme="light"] .mrib .legend h4,
+:root[data-theme="light"] .mrib .lg-toggle,
+:root[data-theme="light"] .mrib .scan .s,
+:root[data-theme="light"] .mrib .hud .btn,
+:root[data-theme="light"] .mrib .explore .ex-title,
+:root[data-theme="light"] .mrib .explore .ex-back{color:#0e7490;border-color:#cbd5e1}
+:root[data-theme="light"] .mrib .lg-toggle:hover,
+:root[data-theme="light"] .mrib .hud .btn:hover,
+:root[data-theme="light"] .mrib .explore .ex-back:hover,
+:root[data-theme="light"] .mrib .explore .ex-font button:hover:not(:disabled){background:#e9eef4;color:#0e7490}
+:root[data-theme="light"] .mrib .legend .cls,
+:root[data-theme="light"] .mrib .legend .row .t span,
+:root[data-theme="light"] .mrib .lobes .more,
+:root[data-theme="light"] .mrib .hud .l,
+:root[data-theme="light"] .mrib .hud .sld,
+:root[data-theme="light"] .mrib .explore .ex-col-n,
+:root[data-theme="light"] .mrib .explore .ex-m,
+:root[data-theme="light"] .mrib .tip .m{color:#64748b}
+:root[data-theme="light"] .mrib .legend .row .t b,
+:root[data-theme="light"] .mrib .hud .n,
+:root[data-theme="light"] .mrib .scan b,
+:root[data-theme="light"] .mrib .explore .ex-src,
+:root[data-theme="light"] .mrib .explore .ex-c,
+:root[data-theme="light"] .mrib .tip .h{color:#1e293b}
+:root[data-theme="light"] .mrib .legend h4,
+:root[data-theme="light"] .mrib .legend .cls{border-color:#e2e8f0}
+:root[data-theme="light"] .mrib .tip{background:rgba(255,255,255,.97);border-color:#dbe3ec}
+:root[data-theme="light"] .mrib .explore .ex-col{background:rgba(255,255,255,.6);border-color:#e2e8f0}
+:root[data-theme="light"] .mrib .explore .ex-card{background:rgba(240,244,249,.7)}
+:root[data-theme="light"] .mrib .explore .ex-card:hover{background:#e9eef4;border-color:#cbd5e1}
+:root[data-theme="light"] .mrib .flag{color:#94a3b8}
+:root[data-theme="light"] .mrib .hud .sld input{accent-color:#0891b2}
 `;
 
 function injectStyleOnce() {
@@ -229,7 +283,7 @@ export function mountMriBrain(container, opts = {}) {
     <div class="boot">◉ ACQUIRING HIPPOCAMPAL FIELD…</div>
     ${showScan ? '<div class="panel scan"><b>CEREBRUM · MRI</b><div class="s">◉ SCANNING</div></div>' : ''}
     <div class="panel legend">
-      <div class="lg-head"><h4>The reading</h4><span class="lg-toggle"></span></div>
+      <div class="lg-head"><h4>Domain tags</h4><span class="lg-toggle"></span></div>
       <div class="lg-detail">
         <div class="cls">A complementary-learning-systems view: SAGE is the <b>hippocampus</b>
           (episodic capture); corroboration + decay is the <b>sleep/consolidation</b> cycle.</div>
@@ -279,6 +333,42 @@ export function mountMriBrain(container, opts = {}) {
     applyLegendMode();
   };
 
+  // Draggable "Domain tags" panel: grab its header to reposition it anywhere in
+  // the view (clamped to the container). Clicking the collapse toggle still works.
+  function makeDraggable(panel, handle){
+    if (!panel || !handle) return;
+    handle.style.cursor = 'move';
+    handle.style.userSelect = 'none'; // don't select the header text while dragging
+    let drag = false, sx = 0, sy = 0, ol = 0, ot = 0;
+    // Document-level move/up (robust vs pointer-capture) + a loose clamp that only
+    // keeps a grabbable strip on-screen, so a panel taller/wider than the view can
+    // still be dragged down/around instead of being pinned to the top-right.
+    const onMove = e => {
+      if (!drag) return;
+      const cw = root.clientWidth, ch = root.clientHeight;
+      let nl = ol + (e.clientX - sx), nt = ot + (e.clientY - sy);
+      nl = Math.max(80 - panel.offsetWidth, Math.min(cw - 80, nl));
+      nt = Math.max(48 - panel.offsetHeight, Math.min(ch - 48, nt));
+      panel.style.left = nl + 'px'; panel.style.top = nt + 'px';
+      e.preventDefault();
+    };
+    const onUp = () => {
+      drag = false;
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+    };
+    handle.addEventListener('pointerdown', e => {
+      if (e.target.closest('.lg-toggle')) return; // let the collapse toggle click through
+      drag = true; ol = panel.offsetLeft; ot = panel.offsetTop;
+      panel.style.right = 'auto'; panel.style.left = ol + 'px'; panel.style.top = ot + 'px';
+      sx = e.clientX; sy = e.clientY;
+      document.addEventListener('pointermove', onMove);
+      document.addEventListener('pointerup', onUp);
+      e.preventDefault(); e.stopPropagation();
+    });
+  }
+  { const _lg = $('.legend'), _h = _lg && _lg.querySelector('.lg-head'); makeDraggable(_lg, _h); }
+
   // Click-to-explore ("train of thought") focus state. focusSet null = full brain.
   let focusId = null, focusSet = null;
 
@@ -317,11 +407,12 @@ export function mountMriBrain(container, opts = {}) {
   // layout is a pure formula, stable across reloads, with zero per-tick cost.
   // Node placement ellipsoid, sized to sit INSIDE the procedural brain hull. The hull
   // (mesh scale 185, proportions x0.86/y0.80/z1.20) has smooth half-extents ~159/148/222,
-  // but the cortical folding cuts sulci ~17 deep and a ~37-deep sagittal fissure at the
-  // top midline, so the REAL inner surface is tighter. EX/EY/EZ * maxDepth(0.80) land at
-  // ~136/126/182 - comfortably inside even the folded/dipped surface so dots don't poke
-  // through, while EY still lifts the fresh outer shell toward the crown.
-  const EX=170, EY=158, EZ=228, DAY=86400000, AGE_WINDOW=90*DAY;
+  // but cortical folding + the flattened underside make the REAL inner surface tighter,
+  // and the old EY(158) was TALLER than the hull's y-extent (148) so the age-driven
+  // downward sink pushed the oldest dots clean through the base. EX/EY/EZ are now scaled
+  // to ~90% of the hull proportions, and the max depth + sink are reduced, so
+  // EX/EY/EZ * maxDepth(0.74) ≈ 111/93/152 sits comfortably inside even the folds.
+  const EX=150, EY=126, EZ=205, DAY=86400000, AGE_WINDOW=90*DAY;
   const hsh=(s,seed)=>{ s=s||''; let h=(seed>>>0)||1; for(let i=0;i<s.length;i++) h=Math.imul(h^s.charCodeAt(i),16777619); return ((h>>>0)%10000)/10000; };
   function placeNodes(nodes){
     const ds=[...new Set(nodes.map(n=>n.domain))], nd=Math.max(1,ds.length), di={};
@@ -342,12 +433,12 @@ export function mountMriBrain(container, opts = {}) {
       // radius grows with RECENCY: newest fill the outer shell (spread out, easy to
       // click); oldest converge toward the inner stem/core. Capped at 0.80 so dots stay
       // inside the folded cortical surface.
-      const depth=Math.max(0.12, Math.min(0.80, 0.16 + Math.pow(recency, 0.6)*0.66));
+      const depth=Math.max(0.12, Math.min(0.74, 0.15 + Math.pow(recency, 0.6)*0.60));
       const ce=Math.cos(el);
       n.fx=n.x=EX*depth*ce*Math.cos(az);
       // oldest sink DOWN toward the brainstem; newest keep the full vertical spread of
       // the outer shell.
-      n.fy=n.y=EY*depth*Math.sin(el) - age*EY*0.18;
+      n.fy=n.y=EY*depth*Math.sin(el) - age*EY*0.05;
       n.fz=n.z=EZ*depth*ce*Math.sin(az);
     });
   }
@@ -363,8 +454,9 @@ export function mountMriBrain(container, opts = {}) {
 
   function setHullOpacity(o){
     curOpacity = o;
-    if (brainMat) { brainMat.opacity = o; if (surfMat) surfMat.opacity = o * 0.5; if (hullMat) hullMat.opacity = 0; }
-    else if (hullMat) { hullMat.opacity = o; }
+    const eo = mriHullOpacity(o);
+    if (brainMat) { brainMat.opacity = eo; if (surfMat) surfMat.opacity = eo * 0.5; if (hullMat) hullMat.opacity = 0; }
+    else if (hullMat) { hullMat.opacity = eo; }
   }
 
   function ensureFocusMarker(){
@@ -689,7 +781,7 @@ export function mountMriBrain(container, opts = {}) {
     $('.boot').style.display = 'none';
     placeNodes(data.nodes);
     Graph = ForceGraph3D({ controlType:'orbit' })($('.mrib-graph'))
-      .backgroundColor('#05070d00')
+      .backgroundColor(mriBgColor())
       .graphData(data).nodeId('id').nodeLabel(()=>'' )
       .nodeVal(nodeVal).nodeColor(nodeColorRGBA).nodeRelSize(2.4).nodeResolution(10).nodeOpacity(0.9)
       .linkColor(l=>(LINK_TYPES[l.link_type]||LINK_TYPES.related).color)
@@ -722,7 +814,7 @@ export function mountMriBrain(container, opts = {}) {
       const _maxRB = (_gl && _gl.getParameter(_gl.MAX_RENDERBUFFER_SIZE)) || 8192;
       const _rW = root.clientWidth||1280, _rH = root.clientHeight||720;
       if ((window.devicePixelRatio||1) * Math.max(_rW, _rH) <= _maxRB) {
-        bloom = new UnrealBloomPass(new THREE.Vector2(_rW, _rH), 0.55, 0.5, 0.32);
+        bloom = new UnrealBloomPass(new THREE.Vector2(_rW, _rH), mriIsLight()?0:0.55, 0.5, 0.32);
         Graph.postProcessingComposer().addPass(bloom);
       } else {
         console.warn('[mri] bloom disabled: MAX_RENDERBUFFER_SIZE', _maxRB, 'too small for',
@@ -785,8 +877,18 @@ export function mountMriBrain(container, opts = {}) {
       // glow (amplified by the bloom pass), so the dense fold structure reads as
       // a luminous neural tangle rather than a flat mesh.
       const hull=new THREE.Mesh(makeBrainGeometry(),
-        new THREE.MeshBasicMaterial({color:0x4aa3ff,wireframe:true,transparent:true,opacity:curOpacity,depthWrite:false,blending:THREE.AdditiveBlending}));
+        new THREE.MeshBasicMaterial({color:mriWireColor(),wireframe:true,transparent:true,opacity:mriHullOpacity(curOpacity),depthWrite:mriDepthWrite(),blending:mriWireBlend()}));
       hull.scale.setScalar(185); sc.add(hull); hullMat=hull.material;
+      // Re-tint the brain + canvas live when the app theme toggles: additive-glow
+      // blue on the dark canvas, normal-blended darker blue on the light canvas.
+      const themeObs=new MutationObserver(()=>{ try{
+        if(Graph) Graph.backgroundColor(mriBgColor());
+        [hullMat,brainMat].forEach(m=>{ if(m){ m.color.set(mriWireColor()); m.blending=mriWireBlend(); m.depthWrite=mriDepthWrite(); m.needsUpdate=true; } });
+        setHullOpacity(curOpacity); // re-apply opacity — normal vs additive blend need very different values
+        if(bloom) bloom.strength = mriIsLight() ? 0 : 0.55; // glow is a dark-canvas effect; kill it on light
+      }catch(e){ /* noop */ } });
+      themeObs.observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
+      subs.push(()=>themeObs.disconnect());
       // Optional real anatomical mesh override at /ui/assets/brain.obj. No mesh
       // ships with SAGE, so this normally 404s and we keep the procedural hull.
       // NOTE: the static server SPA-falls-back to index.html (HTTP 200) for a
