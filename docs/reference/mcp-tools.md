@@ -1,8 +1,8 @@
-Reconciled against internal/mcp at SAGE v11.2.1.
+Reconciled against internal/mcp at SAGE v11.3.0.
 
 # SAGE MCP Tools Reference
 
-SAGE exposes 20 MCP tools over JSON-RPC 2.0. Stdio tools sign REST calls with
+SAGE exposes 22 MCP tools over JSON-RPC 2.0. Stdio tools sign REST calls with
 the local Ed25519 identity; SSE and Streamable-HTTP use the MCP bearer-token/OAuth
 flow. Only consensus-committed memories are returned to callers.
 
@@ -491,6 +491,44 @@ failed and RBAC domain access is broken.
 
 ---
 
+### sage_rename
+
+**Purpose:** Rename this agent - set the **mutable** display name (and optionally
+the bio) that shows in the CEREBRUM dashboard and to other agents on the network.
+Use it to replace the default provider/project name (e.g. `claude-code/sage`) with
+a meaningful, human-readable identity. Self-only: an agent can only rename itself.
+Your permanent registration name and your `agent_id` never change.
+
+**Source:** `tools.go:194-209` (definition), `tools.go:1521-1569` (`toolRename` handler)
+
+**Parameters:**
+
+| Name       | Type   | Required | Description |
+|------------|--------|----------|-------------|
+| `name`     | string | yes      | New display name (what shows up in CEREBRUM and to other agents). |
+| `boot_bio` | string | no       | Short bio/description. **Omit to keep the current bio; provide to replace it.** |
+
+**Bio-preservation (fails closed):** The underlying `AgentUpdate` tx overwrites
+`boot_bio` unconditionally, so a name-only rename would otherwise wipe an existing
+bio. When `boot_bio` is omitted, the handler reads the current bio (via
+`GET /v1/agent/{agent_id}`) and re-submits it unchanged. If it cannot resolve its
+own agent ID or read the current bio, it **aborts** rather than silently committing
+an empty bio to consensus (`tools.go:1527-1546`). When `boot_bio` is passed, it
+replaces the bio.
+
+**Returns:**
+- `agent_id`, `name`, `status`, `tx_hash`, and a human-readable `message`.
+
+**REST:** `PUT /v1/agent/update` (→ `TxTypeAgentUpdate`); plus
+`GET /v1/agent/{agent_id}` when preserving the existing bio.
+
+**When to call:** Rarely - when you want a meaningful on-network identity instead
+of the auto-assigned provider/project name. Unlike `sage_register` (which sets the
+immutable registration name at first connect), `sage_rename` only changes the
+mutable display name/bio and can be called again at any time.
+
+---
+
 ### sage_pipe
 
 **Purpose:** Send work to another agent via the SAGE pipeline. The target sees
@@ -690,11 +728,15 @@ needing to call these explicitly.
 `sage_register` — called automatically inside `sage_inception` (`tools.go:909-
 939`). Agents never need to call it manually.
 
+`sage_rename` - an on-demand identity tool, not part of the boot sequence. It
+changes only the mutable display name/bio (self-only `AgentUpdate`); the immutable
+registration name from `sage_register` is untouched.
+
 ---
 
 ## Summary
 
-**20 tools documented:**
+**22 tools documented:**
 
 | Category     | Tools |
 |--------------|-------|
@@ -702,6 +744,6 @@ needing to call these explicitly.
 | Core memory  | `sage_remember`, `sage_recall`, `sage_forget`, `sage_corroborate`, `sage_link` |
 | Browse       | `sage_list`, `sage_timeline`, `sage_status` |
 | Tasks        | `sage_task`, `sage_backlog` |
-| Identity     | `sage_register` |
+| Identity     | `sage_register`, `sage_rename` |
 | Pipeline     | `sage_pipe`, `sage_inbox`, `sage_pipe_result` |
 | Governance   | `sage_gov_propose`, `sage_gov_vote`, `sage_gov_status` |

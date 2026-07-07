@@ -1,4 +1,4 @@
-<!-- Reconciled through SAGE v11.2.1. Cite file:line when behavior is non-obvious. -->
+<!-- Reconciled through SAGE v11.3.0. Cite file:line when behavior is non-obvious. -->
 
 # SAGE REST API Reference
 
@@ -579,6 +579,8 @@ Grant domain access. Caller must own the domain or be admin. Broadcasts `TxTypeA
 
 **Response** (HTTP 201): `{"status": "granted", "tx_hash": "..."}`
 
+**CEREBRUM access matrix (v11.3):** Saving the per-agent Domain Access matrix in the dashboard (`PATCH /v1/dashboard/network/agents/{id}`) now issues REAL `AccessGrant`/`AccessRevoke` txs through this same consensus path - diffed against the actual on-chain grant state (`GetAccessGrant`), so it is idempotent and self-healing - and each tx is signed AS the domain owner (whom the consensus gate authorizes). Domains whose owner key is not on this node are reported as skipped, not silently dropped. Previously the matrix wrote only a cosmetic policy blob the access checks never read; the consensus grant/revoke handlers themselves are unchanged (no admin-bypass added). See `web/reassign_handler.go:116-226` and `concepts/rbac-orgs-federation.md`.
+
 ---
 
 ### `POST /v1/access/revoke`
@@ -656,6 +658,8 @@ Execute a domain ownership transfer that was authorized by an accepted governanc
 `purged_grants` is parsed from the FinalizeBlock log. Previous owner's full grant chain-of-trust is wiped on transfer.
 
 **Error behavior:** Unlike other endpoints, FinalizeBlock rejection messages are surfaced verbatim (not sanitized) so operators can diagnose `proposal not found`, `body mismatch`, `already consumed`, etc. (`domain_reassign_handler.go:162-195`)
+
+**CEREBRUM orchestration (v11.3):** The dashboard drives this whole agent-to-agent transfer from the Search page via `POST /v1/dashboard/network/reassign-domain-ownership`, commit-confirmed in strict order: `gov_propose(domain_reassign)` -> the sole validator's accept vote drives the proposal to `Executed` in-band -> this `DomainReassign` flips the owner and purges the domain's grants -> an `AccessGrant` gives the new owner level 3 (deferred to the owner's own node if their key is not local). It requires a single-validator node; a multi-validator chain returns HTTP 409 because the other validators must vote on the proposal. This is off-consensus orchestration only - each underlying step is the same on-chain tx documented here, and memory authorship (`submitting_agent`) is never rewritten (`web/reassign_handler.go:285-318`).
 
 ---
 

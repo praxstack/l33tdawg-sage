@@ -1,6 +1,6 @@
 # SAGE Roadmap
 
-**Status (2026-07):** **v11.1.0 is the current release.** This document looks forward from v11 to the v11.5 slate. Everything past v11 is planned, not promised, and carries no date.
+**Status (2026-07):** **v11.3.0 is the current release.** This document looks forward from v11 to the v11.5 slate. Everything past v11 is planned, not promised, and carries no date.
 
 **Hard constraint driving the whole plan:** no chain reset, no operator-typed commands. Existing chains must upgrade in place across all future releases.
 
@@ -55,6 +55,8 @@ Bring back a first-class deprecation verb with teeth: deprecation gated by conse
 ### RBAC clarity + cross-scope memory transfer
 
 Make the access model legible (who can read, write, and modify what, and why) and add a governed way to **transfer memories across scopes** (hand a memory from one agent, org, or domain to another) without losing attribution or bypassing clearance.
+
+**Shipped in v11.3.0 - the access-legibility half.** The CEREBRUM per-agent Domain Access matrix now issues real on-chain access grants and revokes on Save (previously it saved a cosmetic blob the consensus checks never read), so what the matrix shows is what the chain enforces. Domain ownership can also be transferred to another agent from the dashboard through a governance-gated flow that moves ownership and read/write access - never authorship, which stays immutably attributed to whoever wrote each memory. The cross-scope memory transfer half (handing a memory between agents, orgs, or domains without losing attribution) remains planned.
 
 ### libp2p NAT traversal + author-operated connectivity service
 

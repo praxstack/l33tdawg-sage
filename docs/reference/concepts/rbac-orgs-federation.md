@@ -1,8 +1,8 @@
-<!-- Reconciled through SAGE v11.2.1. -->
+<!-- Reconciled through SAGE v11.3.0. -->
 
 # RBAC, Organizations, and Federation
 
-Verified against code at SAGE v11.2.1.
+Verified against code at SAGE v11.3.0.
 
 ## Overview
 
@@ -119,6 +119,14 @@ The REST handler uses `broadcast_tx_commit`, so a `FinalizeBlock` rejection is s
 ### Revocation
 
 `POST /v1/access/revoke` → `TxTypeAccessRevoke` → `badgerStore.RevokeGrant`. Sets `RevokedAt` in PostgreSQL.
+
+### CEREBRUM Dashboard: Real Grants + Agent-to-Agent Ownership Transfer (v11.3)
+
+Two dashboard surfaces now write to the on-chain RBAC state above instead of merely displaying it. Both reuse the existing txs - no new transaction type or fork.
+
+- **The access matrix issues real grants.** Saving an agent's per-domain read/write matrix (`PATCH /v1/dashboard/network/agents/{id}`) reconciles the desired levels against the ACTUAL on-chain grant state (`GetAccessGrant`) and issues real `TxTypeAccessGrant` / `TxTypeAccessRevoke` txs for each divergence, each signed AS the domain owner (the signer the consensus gate authorizes). The reconcile is idempotent and self-healing; a domain whose owner key is not on this node is reported as skipped, not silently dropped. Earlier versions wrote only the advisory `DomainAccess` blob and not the enforced grant keys (`grant:<domain>:<agentID>`) that `HasAccessMultiOrg`'s direct-grant path actually checks - so cross-agent grants set from the matrix did not take effect. The consensus grant/revoke handlers themselves are unchanged; no admin-bypass was added (`web/reassign_handler.go:116-226`, `web/network_handler.go:426`).
+
+- **Domain ownership transfers agent-to-agent via governance.** `POST /v1/dashboard/network/reassign-domain-ownership` orchestrates, commit-confirmed: `gov_propose(domain_reassign)` -> the sole validator's accept vote drives it to `Executed` -> `TxTypeDomainReassign` flips the owner and purges the domain's grants -> `TxTypeAccessGrant` gives the new owner level 3 (deferred to the owner's own node if their key is not local). This transfers OWNERSHIP and read/write ACCESS only; it does NOT rewrite memory authorship - every memory stays authored by its original `submitting_agent`. Single-validator node only; a multi-validator chain is rejected because the other validators must vote on the proposal (`web/reassign_handler.go:285-318`).
 
 ---
 

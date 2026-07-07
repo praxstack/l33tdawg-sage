@@ -51,7 +51,22 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.2.1
+## What's New in v11.3.0
+
+**Transferring a domain to another agent, and setting who can read and write it, are now real on-chain RBAC operations from CEREBRUM - and the access matrix finally enforces what it shows.** v11.3.0 changes **no consensus rule, AppHash, transaction type, key-encoding, or fork**: `app-v15` stays the active v11 consensus fork and `app-v16` stays shipped-dormant, unchanged from v11.2.x. The RBAC domain-ownership transfer is built entirely from **existing** on-chain transactions - `DomainReassign` (tx-30), `AccessGrant` (tx-6), and `AccessRevoke` (tx-7), gated by an existing `gov_propose` (`operation=domain_reassign`) - so there is no new transaction and no new fork. There is exactly **one consensus-path code change** (`applyGovernanceProposal` now returns early for `OpDomainReassign` instead of falling through to validator-pubkey derivation, which logged a spurious error on every reassign), and it is proven **AppHash-neutral**: the caller appends a validator update only when the result is non-nil, so both the old error path and the new clean return append nothing - identical validator updates and state writes, so historical replay stays byte-identical, with only the error log gone. Memory **authorship (`submitting_agent`) is never rewritten** by any v11.3 path.
+
+- **RBAC domain-ownership transfer, on-chain from CEREBRUM.** A new Search-page action "Transfer domain ownership" lets you pick a source agent, pick one of its domains, and hand it to a target agent. The orchestration is all commit-confirmed: a governance proposal (`domain_reassign`) is accepted by the sole validator, `DomainReassign` flips the owner and purges the domain's stale grants, and `AccessGrant` gives the new owner level-3 access. Each step's result is surfaced honestly; if the new owner's key is not on this node, the grant is deferred to the owner's own node (reported, not silently dropped). This transfers **ownership plus read/write access, not authorship** - every memory stays authored by whoever wrote it (`submitting_agent` is immutable and auditable), and the new owner gains access through ownership rather than by rewriting history. The old label-based "Transfer by Tag" paths, which rewrote authorship off-chain, are retired.
+- **The access matrix now enforces what it shows.** The per-agent read/write Domain Access matrix previously wrote only a cosmetic JSON blob that the consensus access checks never read, while the tooltip claimed "enforced on every request." On Save it now issues real on-chain `AccessGrant` / `AccessRevoke` transactions (signed as the domain owner), diffed against the actual on-chain grant state so it is idempotent and self-healing. Per-domain results are reported honestly (including "you do not hold this domain owner's key" skips), and the misleading copy is corrected. No admin-bypass was added to the consensus grant/revoke handlers.
+- **CEREBRUM light theme plus MRI redesign.** A full light-mode theme lands for the dashboard (persisted, with a sun/moon toggle), including a light-mode render of the 3D MRI memory brain. The MRI layout now places memories by recency - recent at the surface, older deeper - with a draggable, width-auto-fitting "Domain tags" side panel.
+- **Search date filters plus `sage_rename`.** The Search page gains a created-at date-range filter and a "Last hour" preset. A new `sage_rename` MCP tool renames an agent's display name and boot bio on-chain (via `AgentUpdate`), failing closed to preserve the existing bio - an agent rename, not a memory or domain rename.
+- **The version badge reads live.** The CEREBRUM version badge (header and Overview node card) now reads the live node version from `/health` instead of a hard-coded constant, with the fallback constant kept in sync with the release.
+
+SDK 11.3.0.
+
+## Older releases
+
+<details>
+<summary>v11.2.1 - sage_turn resilient to transient Ollama embed flakiness</summary>
 
 **A reliability patch: `sage_turn` (and all embedding-backed recall/store) no longer fails on transient Ollama hiccups.** Agents reported intermittent embed errors — the local embedder (`nomic-embed-text`) blipping or disconnecting "from time to time." The root cause was the embedder client: a single, unretried request with no `keep_alive`, so Ollama's default 5-minute idle unload meant the next embed paid a cold model reload that could time out or fail. `sage_turn` embeds twice (recall + store), so the flakiness hit both legs. All fixes are off-consensus — no chain, fork, or API-contract change.
 
@@ -60,8 +75,7 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 - **An embedder outage never drops a `sage_turn` observation.** If the embedder is genuinely down after retries, the memory is still committed (without a vector) rather than lost, and the turn now reports `store_mode: "no_vector"` + `semantic_degraded: true` so you know it isn't semantically recallable until a re-embed backfills the vector.
 
 SDK 11.2.1.
-
-## Older releases
+</details>
 
 <details>
 <summary>v11.2.0 — min_confidence decayed-floor fix + app-v16 domainless-forget remediation</summary>
