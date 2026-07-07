@@ -133,7 +133,7 @@ const STYLE = `
   font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#cfe3ff}
 .mrib-graph{position:absolute;inset:0}
 .mrib .panel{position:absolute;background:rgba(10,16,28,.78);border:1px solid #15233b;border-radius:12px;backdrop-filter:blur(8px);box-shadow:0 8px 40px #0008;z-index:5}
-.mrib .legend{top:16px;right:16px;width:270px;padding:13px 15px;max-height:90%;overflow:auto;resize:both;min-width:220px;max-width:640px;min-height:150px}
+.mrib .legend{top:16px;right:16px;width:max-content;padding:13px 15px;max-height:90%;overflow:auto;resize:vertical;min-width:240px;max-width:600px;min-height:150px}
 .mrib .legend.collapsed .lg-detail{display:none}
 .mrib .legend.collapsed{max-height:70%}
 .mrib .lg-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
@@ -142,7 +142,7 @@ const STYLE = `
 .mrib .lobes .more{color:#5d7395;font-size:11px;margin-top:7px}
 .mrib .legend h4{margin:0 0 4px;font-size:11px;letter-spacing:1.5px;color:#39d0ff;text-transform:uppercase}
 .mrib .legend .cls{color:#5d7395;font-size:11px;margin:0 0 11px;border-bottom:1px solid #15233b;padding-bottom:9px}
-.mrib .legend .row{display:flex;align-items:center;gap:9px;margin:6px 0}
+.mrib .legend .row{display:flex;align-items:center;gap:9px;margin:6px 0;white-space:nowrap}
 .mrib .legend .row .k{width:16px;text-align:center}
 .mrib .legend .row .t b{color:#dceaff;font-weight:600}
 .mrib .legend .row .t span{color:#5d7395}
