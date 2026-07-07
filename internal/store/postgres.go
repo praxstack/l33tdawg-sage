@@ -1386,17 +1386,6 @@ func (s *PostgresStore) UpdateDomainTag(ctx context.Context, memoryID string, do
 	return nil
 }
 
-// UpdateMemoryAgent updates the submitting agent of a memory.
-func (s *PostgresStore) UpdateMemoryAgent(ctx context.Context, memoryID string, agentID string) error {
-	_, err := s.db.Exec(ctx,
-		`UPDATE memories SET submitting_agent = $2 WHERE memory_id = $1`,
-		memoryID, agentID)
-	if err != nil {
-		return fmt.Errorf("update memory agent: %w", err)
-	}
-	return nil
-}
-
 // UpdateTaskStatus updates the task_status of a task memory.
 func (s *PostgresStore) SetTaskAssignee(_ context.Context, _, _ string) error {
 	return fmt.Errorf("SetTaskAssignee not implemented for PostgresStore (SQLite-only feature)")
@@ -1900,48 +1889,6 @@ func (s *PostgresStore) ListAgentDomains(ctx context.Context, agentID string) ([
 		domains = append(domains, domain)
 	}
 	return domains, rows.Err()
-}
-
-func (s *PostgresStore) ReassignMemoriesByTag(ctx context.Context, _, targetAgentID, _ string) (int64, error) {
-	// No tagged memories exist in Postgres (tags are SQLite-only), so this
-	// validates the target like SQLite and reassigns nothing.
-	var status string
-	if err := s.db.QueryRow(ctx, `SELECT status FROM agents WHERE agent_id=$1`, targetAgentID).Scan(&status); err != nil {
-		return 0, fmt.Errorf("target agent not found: %s", targetAgentID)
-	}
-	if status == "removed" {
-		return 0, fmt.Errorf("cannot reassign to removed agent %s", targetAgentID)
-	}
-	return 0, nil
-}
-
-func (s *PostgresStore) ReassignMemoriesByDomain(ctx context.Context, sourceAgentID, targetAgentID, domain string) (int64, error) {
-	var count int64
-	err := s.RunInTx(ctx, func(tx OffchainStore) error {
-		ps := tx.(*PostgresStore)
-
-		var status string
-		if scanErr := ps.db.QueryRow(ctx, `SELECT status FROM agents WHERE agent_id=$1`, targetAgentID).Scan(&status); scanErr != nil {
-			return fmt.Errorf("target agent not found: %s", targetAgentID)
-		}
-		if status == "removed" {
-			return fmt.Errorf("cannot reassign to removed agent %s", targetAgentID)
-		}
-		if scanErr := ps.db.QueryRow(ctx, `SELECT COUNT(*) FROM memories WHERE submitting_agent=$1 AND domain_tag=$2`, sourceAgentID, domain).Scan(&count); scanErr != nil {
-			return fmt.Errorf("count domain memories: %w", scanErr)
-		}
-		if count == 0 {
-			return nil
-		}
-		if _, execErr := ps.db.Exec(ctx, `UPDATE memories SET submitting_agent=$1 WHERE submitting_agent=$2 AND domain_tag=$3`, targetAgentID, sourceAgentID, domain); execErr != nil {
-			return fmt.Errorf("reassign domain memories: %w", execErr)
-		}
-		return nil
-	})
-	if err != nil {
-		return 0, err
-	}
-	return count, nil
 }
 
 func (s *PostgresStore) AcquireRedeployLock(_ context.Context, _, _ string, _ time.Duration) error {

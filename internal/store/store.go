@@ -221,7 +221,6 @@ type MemoryStore interface {
 	GetTimeline(ctx context.Context, from, to time.Time, domain string, bucket string) ([]TimelineBucket, error)
 	DeleteMemory(ctx context.Context, memoryID string) error
 	UpdateDomainTag(ctx context.Context, memoryID string, domain string) error
-	UpdateMemoryAgent(ctx context.Context, memoryID string, agentID string) error
 	UpdateTaskStatus(ctx context.Context, memoryID string, taskStatus memory.TaskStatus) error
 	LinkMemories(ctx context.Context, sourceID, targetID, linkType string) error
 	GetLinkedMemories(ctx context.Context, memoryID string) ([]memory.MemoryLink, error)
@@ -472,10 +471,6 @@ type AgentStore interface {
 	// ListAgentDomains returns the distinct domain_tag values across the
 	// agent's memories, ordered by participation frequency (most-active first).
 	ListAgentDomains(ctx context.Context, agentID string) ([]string, error)
-	// ReassignMemoriesByTag moves memories with a specific tag from source to target agent
-	ReassignMemoriesByTag(ctx context.Context, sourceAgentID, targetAgentID, tag string) (int64, error)
-	// ReassignMemoriesByDomain moves memories in a specific domain from source to target agent
-	ReassignMemoriesByDomain(ctx context.Context, sourceAgentID, targetAgentID, domain string) (int64, error)
 	// Redeployment
 	AcquireRedeployLock(ctx context.Context, lockedBy, operation string, ttl time.Duration) error
 	ReleaseRedeployLock(ctx context.Context) error

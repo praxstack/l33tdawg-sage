@@ -149,11 +149,10 @@ export async function updateMemory(id, data) {
     return res.json();
 }
 
-export async function bulkUpdateMemories(ids, { domain, addTags, agent } = {}) {
+export async function bulkUpdateMemories(ids, { domain, addTags } = {}) {
     const body = { ids };
     if (domain) body.domain = domain;
     if (addTags) body.add_tags = addTags;
-    if (agent) body.agent = agent;
     const res = await fetch(`${API_BASE}/v1/dashboard/memory/bulk`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -400,26 +399,31 @@ export async function setMemoryTags(id, tags) {
     return res.json();
 }
 
-export async function fetchAgentTags(agentId) {
-    const res = await fetch(`${API_BASE}/v1/dashboard/network/agents/${agentId}/tags`);
+// ─── Domain ownership (RBAC) transfer API (v11.3.0) ───
+// A domain_tag is the RBAC unit. Transferring it moves ownership + read/write
+// access of the WHOLE domain (every memory in it) to the target agent.
+// Authorship (submitting_agent) is NOT rewritten; only on-chain RBAC ownership
+// and access move.
+
+// List a source agent's domains with whether the agent currently owns each
+// -> { domains: [{ domain, is_owner }] }.
+export async function fetchAgentDomains(agentId) {
+    const res = await fetch(`${API_BASE}/v1/dashboard/network/agents/${agentId}/domains`);
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || res.statusText); }
     return res.json();
 }
 
-export async function transferTag(sourceAgentId, targetAgentId, tag) {
-    const res = await fetch(`${API_BASE}/v1/dashboard/network/transfer-tag`, {
+// Reassign a whole domain's RBAC ownership from source -> target. Returns the
+// orchestration result honestly: { status, steps, purged_grants, grant_deferred,
+// message }. status is 'ok' | 'partial' | 'error'; grant_deferred is true when
+// the read/write grant to the new owner could not be signed locally.
+export async function reassignDomainOwnership({ source_agent_id, target_agent_id, domain }) {
+    const res = await fetch(`${API_BASE}/v1/dashboard/network/reassign-domain-ownership`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ source_agent_id: sourceAgentId, target_agent_id: targetAgentId, tag }),
+        body: JSON.stringify({ source_agent_id, target_agent_id, domain }),
     });
-    return res.json();
-}
-
-export async function transferDomain(sourceAgentId, targetAgentId, domain) {
-    const res = await fetch(`${API_BASE}/v1/dashboard/network/transfer-domain`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ source_agent_id: sourceAgentId, target_agent_id: targetAgentId, domain }),
-    });
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || res.statusText); }
     return res.json();
 }
 

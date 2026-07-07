@@ -241,10 +241,6 @@ func (m *mockMemoryStore) UpdateDomainTag(_ context.Context, memoryID string, do
 	return nil
 }
 
-func (m *mockMemoryStore) UpdateMemoryAgent(_ context.Context, _ string, _ string) error {
-	return nil
-}
-
 func (m *mockMemoryStore) GetTagsBatch(_ context.Context, _ []string) (map[string][]string, error) {
 	return map[string][]string{}, nil
 }
@@ -1143,12 +1139,6 @@ func (m *mockAgentStore) ListAgentDomains(_ context.Context, agentID string) ([]
 		return domains, nil
 	}
 	return nil, nil
-}
-func (m *mockAgentStore) ReassignMemoriesByTag(_ context.Context, _, _, _ string) (int64, error) {
-	return 0, nil
-}
-func (m *mockAgentStore) ReassignMemoriesByDomain(_ context.Context, _, _, _ string) (int64, error) {
-	return 0, nil
 }
 func (m *mockAgentStore) GetAgentByName(_ context.Context, name string) (*store.AgentEntry, error) {
 	for _, a := range m.agents {

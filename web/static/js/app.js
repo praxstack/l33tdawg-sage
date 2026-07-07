@@ -1,7 +1,7 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
 import { fetchStats, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, fetchValidators, fetchMcpConfig, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchReranker, saveReranker, testReranker, detectReranker, fetchOnboarding, saveOnboarding,
-rerankerSetupStatus, rerankerSetupDownload, rerankerSetupStart, rerankerSetupStop, rerankerSetupInstallEngine, fetchTasks, updateTaskStatus, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken, connectProvider, connectRemoteUrl,
+rerankerSetupStatus, rerankerSetupDownload, rerankerSetupStart, rerankerSetupStop, rerankerSetupInstallEngine, fetchTasks, updateTaskStatus, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentDomains, reassignDomainOwnership, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken, connectProvider, connectRemoteUrl,
 embeddingsStatus, checkOllamaEmbed, installOllamaRuntime, startOllamaRuntime, pullEmbedModel, reembedMemories, reembedProgress, enableSemanticEmbeddings,
 deprecateUnreadable, getRecoveryKey, recoverOrphansPreview, recoverOrphans,
 joinHostInterfaces, enableNetworkMode, joinHostStart, joinHostStatus, joinHostApprove, joinHostAbort,
@@ -272,9 +272,6 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
     const [agentFilter, setAgentFilter] = useState(''); // '' = all agents
     const [agentList, setAgentList] = useState([]);
     const [focusedDomain, setFocusedDomain] = useState(null); // for UI display
-    // Domain transfer state
-    const [domainTransfer, setDomainTransfer] = useState(null); // { domain, sourceAgentId }
-    const [domainTransferring, setDomainTransferring] = useState(false);
     // Selection state for bulk operations (only active in focus mode)
     const [selectedMemories, setSelectedMemories] = useState(new Set());
     const [bulkAction, setBulkAction] = useState(null); // 'domain' | 'tag' | 'agent' | null
@@ -973,19 +970,6 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
         });
     }
 
-    const handleDomainTransfer = async (targetAgentId) => {
-        if (!domainTransfer) return;
-        setDomainTransferring(true);
-        try {
-            const res = await transferDomain(domainTransfer.sourceAgentId, targetAgentId, domainTransfer.domain);
-            if (res.error) { showToast(res.error, 'error'); setDomainTransferring(false); return; }
-            showToast(res.message || `${res.memories_moved} memories transferred`, 'success');
-            setDomainTransfer(null);
-            loadData();
-        } catch (e) { showToast('Transfer failed: ' + e.message, 'error'); }
-        setDomainTransferring(false);
-    };
-
     const handleBulkAction = async () => {
         if (selectedMemories.size === 0 || !bulkAction) return;
         const ids = [...selectedMemories];
@@ -1011,21 +995,6 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
                 }
             }
         } catch (e) { showToast('Bulk operation failed: ' + e.message, 'error'); }
-        setBulkBusy(false);
-    };
-
-    const handleBulkReassign = async (targetAgentId) => {
-        if (selectedMemories.size === 0) return;
-        setBulkBusy(true);
-        try {
-            const ids = [...selectedMemories];
-            const res = await bulkUpdateMemories(ids, { agent: targetAgentId });
-            if (res.error) { showToast(res.error, 'error'); } else {
-                showToast(`${res.updated} memories reassigned`, 'success');
-                setSelectedMemories(new Set()); selectedRef.current = new Set();
-                setBulkAction(null); loadData();
-            }
-        } catch (e) { showToast('Reassign failed: ' + e.message, 'error'); }
         setBulkBusy(false);
     };
 
@@ -1132,9 +1101,6 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
                         <span class="focus-selection-count">${selectedMemories.size} selected</span>
                         <button class="focus-action-btn" onClick=${() => setBulkAction('domain')}>Move Domain</button>
                         <button class="focus-action-btn" onClick=${() => setBulkAction('tag')}>Add Tag</button>
-                        ${registeredAgentsRef.current.length > 1 ? html`
-                            <button class="focus-action-btn" onClick=${() => setBulkAction('agent')}>Reassign</button>
-                        ` : ''}
                         <button class="focus-action-btn deselect" onClick=${() => {
                             setSelectedMemories(new Set());
                             selectedRef.current = new Set();
@@ -1250,33 +1216,6 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
                 </div>
             `}
 
-            ${domainTransfer && html`
-                <div class="wizard-overlay" onClick=${e => { if (e.target === e.currentTarget) setDomainTransfer(null); }}>
-                    <div class="wizard-modal" style="max-width:480px;">
-                        <div class="wizard-header">
-                            <h2>Transfer Domain Memories</h2>
-                            <button class="detail-close" onClick=${() => setDomainTransfer(null)}>×</button>
-                        </div>
-                        <div class="wizard-body" style="padding:20px;">
-                            <p style="color:var(--text-dim);margin-bottom:16px;">
-                                Transfer all <span style="color:${getDomainColor(domainTransfer.domain)};font-weight:600;">${domainTransfer.domain}</span> memories
-                                from <strong>${domainTransfer.sourceAgentName}</strong> to:
-                            </p>
-                            <div style="display:flex;flex-direction:column;gap:8px;">
-                                ${registeredAgentsRef.current.filter(a => a.status !== 'removed' && a.agent_id !== domainTransfer.sourceAgentId).map(a => html`
-                                    <button class="merge-target-btn" onClick=${() => handleDomainTransfer(a.agent_id)} disabled=${domainTransferring}>
-                                        <span>${a.avatar || '\u{1F916}'}</span>
-                                        <span>${a.name}</span>
-                                        <span class="agent-role-badge ${a.role}" style="margin-left:auto;">${a.role}</span>
-                                    </button>
-                                `)}
-                            </div>
-                            ${domainTransferring && html`<p style="color:var(--primary);font-size:12px;margin-top:12px;">Submitting to blockchain consensus...</p>`}
-                        </div>
-                    </div>
-                </div>
-            `}
-
             ${bulkAction && (bulkAction === 'domain' || bulkAction === 'tag') && html`
                 <div class="wizard-overlay" onClick=${e => { if (e.target === e.currentTarget) { setBulkAction(null); setBulkInput(''); } }}>
                     <div class="wizard-modal" style="max-width:420px;">
@@ -1314,31 +1253,6 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
                 </div>
             `}
 
-            ${bulkAction === 'agent' && html`
-                <div class="wizard-overlay" onClick=${e => { if (e.target === e.currentTarget) setBulkAction(null); }}>
-                    <div class="wizard-modal" style="max-width:480px;">
-                        <div class="wizard-header">
-                            <h2>Reassign Memories</h2>
-                            <button class="detail-close" onClick=${() => setBulkAction(null)}>×</button>
-                        </div>
-                        <div class="wizard-body" style="padding:20px;">
-                            <p style="color:var(--text-dim);margin-bottom:16px;">
-                                Reassign <strong>${selectedMemories.size}</strong> selected ${selectedMemories.size === 1 ? 'memory' : 'memories'} to:
-                            </p>
-                            <div style="display:flex;flex-direction:column;gap:8px;">
-                                ${registeredAgentsRef.current.filter(a => a.status !== 'removed').map(a => html`
-                                    <button class="merge-target-btn" onClick=${() => handleBulkReassign(a.agent_id)} disabled=${bulkBusy}>
-                                        <span>${a.avatar || '\u{1F916}'}</span>
-                                        <span>${a.name}</span>
-                                        <span class="agent-role-badge ${a.role}" style="margin-left:auto;">${a.role}</span>
-                                    </button>
-                                `)}
-                            </div>
-                            ${bulkBusy && html`<p style="color:var(--primary);font-size:12px;margin-top:12px;">Processing...</p>`}
-                        </div>
-                    </div>
-                </div>
-            `}
         </div>
     `;
 }
@@ -2183,6 +2097,10 @@ function SearchPage() {
     const [bulkDomain, setBulkDomain] = useState('');
     const [bulkTag, setBulkTag] = useState('');
     const [bulkBusy, setBulkBusy] = useState(false);
+    // Whole-domain RBAC ownership transfer (v11.3.0). Source is the active
+    // agentFilter; domXfer holds the two-step modal state (pick domain -> pick target).
+    const [domXfer, setDomXfer] = useState(null); // { sourceAgentId, sourceName, domains: [], step: 'domains'|'target', selectedDomain }
+    const [xferring, setXferring] = useState(false);
     const [expandedId, setExpandedId] = useState(null); // which card is expanded inline
     const [datePreset, setDatePreset] = useState(''); // '' | '24h' | '7d' | '30d' | 'custom'
     const [customFrom, setCustomFrom] = useState(''); // YYYY-MM-DD
@@ -2366,6 +2284,49 @@ function SearchPage() {
         loadMemories(query, agentFilter, domainFilter, tagFilter, v);
     }
 
+    // Load the source agent's domains and open the whole-domain transfer modal.
+    // Source is the current agentFilter (the button is disabled when it is '').
+    async function loadSourceDomains(agentId) {
+        if (!agentId) return;
+        const src = agents.find(a => a.agent_id === agentId);
+        const sourceName = src ? (src.name || agentId.slice(0, 16)) : agentId.slice(0, 16);
+        try {
+            const data = await fetchAgentDomains(agentId);
+            setDomXfer({
+                sourceAgentId: agentId,
+                sourceName,
+                domains: data.domains || [],
+                step: 'domains',
+                selectedDomain: null,
+            });
+        } catch (e) { showToast('Failed to load agent domains: ' + (e.message || e), 'error'); }
+    }
+
+    // Transfer the whole selected domain's RBAC ownership to the target agent.
+    // Surfaces the server's honest status/grant_deferred/message rather than
+    // pretending success.
+    async function handleDomainOwnershipTransfer(targetId) {
+        if (!domXfer?.selectedDomain) return;
+        setXferring(true);
+        try {
+            const res = await reassignDomainOwnership({
+                source_agent_id: domXfer.sourceAgentId,
+                target_agent_id: targetId,
+                domain: domXfer.selectedDomain.domain,
+            });
+            setDomXfer(null);
+            await loadMemories(query, agentFilter, domainFilter, tagFilter);
+            const status = res.status || 'ok';
+            let msg = res.message || `Domain "${domXfer.selectedDomain.domain}" ownership transferred.`;
+            if (res.grant_deferred) {
+                msg += ' The read/write grant to the new owner was deferred (their signing key is not held on this node) - issue it from the Agents access matrix once that agent is available.';
+            }
+            const level = status === 'error' ? 'error' : ((status === 'partial' || res.grant_deferred) ? 'warning' : 'success');
+            showToast(msg, level, 9000);
+        } catch (e) { showToast('Transfer failed: ' + (e.message || e), 'error'); }
+        setXferring(false);
+    }
+
     return html`
         <div class="search-page">
             <input class="search-page-input" type="text" placeholder="Search memories..."
@@ -2394,6 +2355,12 @@ function SearchPage() {
                         <option value="">All agents</option>
                         ${agents.map(a => html`<option value=${a.agent_id}>${a.name} (${a.agent_id.slice(0, 8)}...)</option>`)}
                     </select>
+                    <button class="btn" style="align-self:center;"
+                        disabled=${!agentFilter}
+                        title=${agentFilter ? "Transfer an entire domain's RBAC ownership from the selected agent to another agent" : 'Pick a source agent first'}
+                        onClick=${() => loadSourceDomains(agentFilter)}>
+                        Transfer domain ownership
+                    </button>
                 `}
                 <select class="filter-select" value=${datePreset} onChange=${handleDatePreset} title="Filter by when the memory was created">
                     <option value="">Any time</option>
@@ -2500,6 +2467,72 @@ function SearchPage() {
                             onAction=${() => { window.location.hash = '#/import'; }} />`}
                 `}
             </div>
+            ${domXfer && html`
+                <div class="wizard-overlay" onClick=${e => { if (e.target === e.currentTarget) setDomXfer(null); }}>
+                    <div class="wizard-modal" style="max-width:560px;">
+                        <div class="wizard-header">
+                            <h2>${domXfer.step === 'domains' ? 'Transfer domain ownership' : 'Select the new owner'}</h2>
+                            <button class="detail-close" onClick=${() => setDomXfer(null)}>×</button>
+                        </div>
+                        <div class="wizard-body" style="padding:20px;">
+                            ${domXfer.step === 'domains' ? html`
+                                <p style="color:var(--text-dim);margin-bottom:8px;">
+                                    Pick a domain to hand from <strong>${domXfer.sourceName}</strong> to another agent.
+                                </p>
+                                <p style="color:var(--text-muted);font-size:12px;line-height:1.5;margin-bottom:16px;">
+                                    This moves the <strong>entire domain</strong> - every memory in it, including any not shown in the current results - not just labels. Authorship (the submitting agent recorded on each memory) is left unchanged; only on-chain RBAC ownership and read/write access move to the new owner. The source agent loses access to the domain.
+                                </p>
+                                ${domXfer.domains.length === 0 ? html`
+                                    <p style="color:var(--text-muted);font-size:13px;font-style:italic;">This agent has no domains to transfer.</p>
+                                ` : html`
+                                    <div style="display:flex;flex-direction:column;gap:6px;max-height:340px;overflow-y:auto;">
+                                        ${domXfer.domains.map(d => html`
+                                            <button class="merge-target-btn" onClick=${() => setDomXfer(prev => ({ ...prev, step: 'target', selectedDomain: d }))}>
+                                                <span style="display:flex;align-items:center;gap:8px;">
+                                                    <span class="domain-badge" style="margin:0;background:${getDomainColor(d.domain)}20;color:${getDomainColor(d.domain)};">${d.domain}</span>
+                                                    ${d.is_owner === false ? html`<span style="color:var(--text-muted);font-size:11px;">(not current owner)</span>` : ''}
+                                                </span>
+                                            </button>
+                                        `)}
+                                    </div>
+                                `}
+                            ` : html`
+                                <div style="margin-bottom:16px;">
+                                    <button class="btn" onClick=${() => setDomXfer(prev => ({ ...prev, step: 'domains', selectedDomain: null }))}
+                                        style="font-size:12px;padding:4px 12px;margin-bottom:12px;">
+                                        ← Back to domains
+                                    </button>
+                                    <p style="color:var(--text-dim);">
+                                        Transfer ownership of
+                                        <span class="domain-badge" style="display:inline-flex;margin:0 4px;background:${getDomainColor(domXfer.selectedDomain.domain)}20;color:${getDomainColor(domXfer.selectedDomain.domain)};">${domXfer.selectedDomain.domain}</span>
+                                        from <strong>${domXfer.sourceName}</strong> to:
+                                    </p>
+                                    <p style="color:var(--text-muted);font-size:12px;line-height:1.5;margin-top:8px;">
+                                        Transfers the ENTIRE domain (every memory in it, including ones not shown here). Authorship is unchanged; only RBAC ownership and read/write access move to the target, and <strong style="color:var(--text-dim);">${domXfer.sourceName}</strong> loses access to this domain afterwards.
+                                    </p>
+                                </div>
+                                ${(() => {
+                                    const targets = agents.filter(a => a.status !== 'removed' && a.agent_id !== domXfer.sourceAgentId);
+                                    return targets.length === 0 ? html`
+                                        <p style="color:var(--text-muted);font-size:13px;font-style:italic;">No other agents are available to receive this domain. Register another agent first.</p>
+                                    ` : html`
+                                        <div style="display:flex;flex-direction:column;gap:8px;">
+                                            ${targets.map(a => html`
+                                                <button class="merge-target-btn" onClick=${() => handleDomainOwnershipTransfer(a.agent_id)} disabled=${xferring}>
+                                                    <span>${a.avatar || '\u{1F916}'}</span>
+                                                    <span>${a.name}</span>
+                                                    ${a.role ? html`<span class="agent-role-badge ${a.role}" style="margin-left:auto;">${a.role}</span>` : ''}
+                                                </button>
+                                            `)}
+                                        </div>
+                                    `;
+                                })()}
+                                ${xferring && html`<p style="color:var(--primary);font-size:12px;margin-top:12px;">Transferring domain ownership on-chain…</p>`}
+                            `}
+                        </div>
+                    </div>
+                </div>
+            `}
         </div>
     `;
 }
@@ -5885,7 +5918,7 @@ function HelpOverlay({ onClose, initialSection }) {
                     </div>
                     <div class="guide-detail-item">
                         <div class="guide-detail-label">Enforcement</div>
-                        <div class="guide-detail-desc">Domain access is enforced server-side on every memory submission. If an agent tries to write to a domain it doesn't have write access to, the request is rejected with a 403 error. This is cryptographically verified — agents sign every request with their Ed25519 key.</div>
+                        <div class="guide-detail-desc">Saving the domain access matrix issues real on-chain access grants (and revokes) for each domain, each signed by that domain's owner. Access is enforced by those grants: a write to a domain the agent holds no grant for is rejected server-side. Every request is signed with the agent's Ed25519 key, so the identity behind each grant is verifiable. Grants the domain owner's key isn't available to sign are surfaced on Save rather than applied silently.</div>
                     </div>
                 </div>
             `,
@@ -6486,9 +6519,6 @@ function NetworkPage({ sse }) {
     const [unregistered, setUnregistered] = useState([]);
     const [mergeTarget, setMergeTarget] = useState(null); // {source, target}
     const [merging, setMerging] = useState(false);
-    // Tag transfer state
-    const [tagTransfer, setTagTransfer] = useState(null); // { agentId, agentName, tags: [], step: 'tags'|'target', selectedTag: null }
-    const [transferring, setTransferring] = useState(false);
 
     // External-client wizard state (v6.7.3). remoteWizardTarget tailors the
     // shared RemoteAccessWizard's final step: 'chatgpt' → OAuth connector fields,
@@ -6670,8 +6700,25 @@ function NetworkPage({ sse }) {
         try {
             const res = await updateAgent(agentId, { clearance: editClearance, domain_access: JSON.stringify(arr), visible_agents: editVisibleAgents });
             if (res.error) { showToast(res.error, 'error'); return; }
-            if (res.on_chain_warning) {
-                showToast('Access saved locally but on-chain RBAC grant failed - will auto-heal on next agent boot. (' + res.on_chain_warning + ')', 'warning', 8000);
+            // Surface the real per-domain on-chain grant/revoke results. Grants are
+            // issued (and revokes applied) on Save, signed by each domain's owner key;
+            // any that failed (e.g. this node does not hold the owner's key, or the
+            // signer is not the owner) are reported honestly rather than hidden behind
+            // an "auto-heal" promise.
+            const grantResults = Array.isArray(res.grant_results) ? res.grant_results : [];
+            const failed = grantResults.filter(g => g && g.ok === false);
+            if (failed.length > 0) {
+                const detail = failed.map(g => {
+                    const verb = g.action === 'revoke' ? 'revoke' : 'grant';
+                    return `${g.domain} (${verb} failed${g.error ? ': ' + g.error : ''})`;
+                }).join(', ');
+                showToast(`Access saved, but ${failed.length} on-chain ${failed.length === 1 ? 'change' : 'changes'} did not apply: ${detail}. This node must hold the domain owner's signing key to grant or revoke access on it.`, 'warning', 10000);
+            } else if (res.on_chain_warning) {
+                showToast('Access saved, but an on-chain sync issue was reported: ' + res.on_chain_warning, 'warning', 8000);
+            } else if (grantResults.length > 0) {
+                showToast(`Access saved. On-chain access updated for ${grantResults.length} ${grantResults.length === 1 ? 'domain' : 'domains'}.`, 'success');
+            } else {
+                showToast('Access saved.', 'success');
             }
             loadAgents();
             setAccessDirty(false);
@@ -6728,33 +6775,6 @@ function NetworkPage({ sse }) {
         } catch (e) { showToast('Failed to merge: ' + e.message, 'error'); }
         setMerging(false);
     }, [loadAgents, loadUnregistered]);
-
-    const loadAgentTags = useCallback(async (agent) => {
-        try {
-            const data = await fetchAgentTags(agent.agent_id);
-            setTagTransfer({
-                agentId: agent.agent_id,
-                agentName: agent.name || agent.agent_id.slice(0, 16),
-                tags: data.tags || [],
-                step: 'tags',
-                selectedTag: null
-            });
-        } catch (e) { showToast('Failed to load agent tags', 'error'); }
-    }, []);
-
-    const handleTagTransfer = useCallback(async (targetId) => {
-        if (!tagTransfer?.selectedTag) return;
-        setTransferring(true);
-        try {
-            const res = await transferTag(tagTransfer.agentId, targetId, tagTransfer.selectedTag.tag);
-            if (res.error) { showToast(res.error, 'error'); setTransferring(false); return; }
-            showToast(res.message || `${res.memories_moved} memories transferred`, 'success');
-            setTagTransfer(null);
-            loadAgents();
-            loadUnregistered();
-        } catch (e) { showToast('Transfer failed: ' + e.message, 'error'); }
-        setTransferring(false);
-    }, [tagTransfer, loadAgents, loadUnregistered]);
 
     // Governance handlers
     const handleGovVote = useCallback(async (proposalId, decision) => {
@@ -7104,7 +7124,7 @@ function NetworkPage({ sse }) {
 
                                     ${expandedTab === 'access' && html`
                                         <div>
-                                            <div class="access-section-title">Role <${HelpTip} text="Admins have full access to all domains and can manage the network. Members read/write in allowed domains only. Observers are read-only. Role is fixed when the agent is registered on-chain and cannot be changed here." /></div>
+                                            <div class="access-section-title">Role <${HelpTip} text="Admins have full access to all domains and can manage the network. Members read and write only in the domains they hold an on-chain access grant for. Observers are read-only. Role is fixed when the agent is registered on-chain and cannot be changed here." /></div>
                                             <div class="role-selector" onClick=${e => e.stopPropagation()}>
                                                 <div class="role-card selected ${agent.role}">
                                                     <div class="role-card-name">${(ROLE_META[agent.role] || {}).name || agent.role || 'Member'}</div>
@@ -7115,7 +7135,7 @@ function NetworkPage({ sse }) {
                                                 Role is set at registration and cannot be changed here.
                                             </div>
 
-                                            <div class="access-section-title">Domain Access <${HelpTip} text="Control which knowledge domains this agent can read from and write to. Enabling write automatically enables read. Enforced server-side on every request." /></div>
+                                            <div class="access-section-title">Domain Access <${HelpTip} text="Control which knowledge domains this agent can read from and write to. Enabling write automatically enables read. On Save, SAGE issues on-chain access grants (write = read+write, read-only = read) or revokes for each domain, signed by that domain's owner - enforcement is by those grants. Any grant the owner's key isn't available to sign is reported instead of applied silently." /></div>
                                             <${DomainAccessMatrix}
                                                 domains=${allDomains}
                                                 domainAccess=${editDomainAccess}
@@ -7162,7 +7182,6 @@ function NetworkPage({ sse }) {
                                                     const ok = await downloadBundle(agent.agent_id);
                                                     if (!ok) showToast('No bundle available for this agent. Bundles are only created when agents are added via the wizard.', 'warning');
                                                 }}>Download Bundle</button>
-                                                <button class="btn" onClick=${(e) => { e.stopPropagation(); loadAgentTags(agent); }} style="gap:6px;display:inline-flex;align-items:center;">Transfer by Tag</button>
                                                 <button class="btn" onClick=${() => setShowRotateConfirm(agent)}>Rotate Key</button>
                                                 ${isLastAdmin
                                                     ? html`<button class="btn btn-danger btn-disabled" disabled=${true} title="Cannot remove the last admin — network needs at least one admin">Remove</button>`
@@ -7232,60 +7251,6 @@ function NetworkPage({ sse }) {
                                     `)}
                                 </div>`}
                             ${merging && html`<p style="color:var(--primary);font-size:12px;margin-top:12px;">Reassigning memories on-chain…</p>`}
-                        </div>
-                    </div>
-                </div>
-            `}
-            ${tagTransfer && html`
-                <div class="wizard-overlay" onClick=${e => { if (e.target === e.currentTarget) setTagTransfer(null); }}>
-                    <div class="wizard-modal" style="max-width:520px;">
-                        <div class="wizard-header">
-                            <h2>${tagTransfer.step === 'tags' ? 'Transfer Memories by Tag' : 'Select Target Agent'}</h2>
-                            <button class="detail-close" onClick=${() => setTagTransfer(null)}>×</button>
-                        </div>
-                        <div class="wizard-body" style="padding:20px;">
-                            ${tagTransfer.step === 'tags' ? html`
-                                <p style="color:var(--text-dim);margin-bottom:16px;">
-                                    Select a tag from <strong>${tagTransfer.agentName}</strong> to transfer those memories to another agent.
-                                </p>
-                                ${tagTransfer.tags.length === 0 ? html`
-                                    <p style="color:var(--text-muted);font-size:13px;font-style:italic;">No tagged memories found for this agent.</p>
-                                ` : html`
-                                    <div style="display:flex;flex-direction:column;gap:6px;max-height:320px;overflow-y:auto;">
-                                        ${tagTransfer.tags.map(t => html`
-                                            <button class="merge-target-btn" onClick=${() => setTagTransfer(prev => ({ ...prev, step: 'target', selectedTag: t }))}
-                                                style="justify-content:space-between;">
-                                                <span style="display:flex;align-items:center;gap:8px;">
-                                                    <span class="tag-chip" style="margin:0;">${t.tag}</span>
-                                                </span>
-                                                <span style="color:var(--text-muted);font-size:12px;">${t.count} memor${t.count === 1 ? 'y' : 'ies'}</span>
-                                            </button>
-                                        `)}
-                                    </div>
-                                `}
-                            ` : html`
-                                <div style="margin-bottom:16px;">
-                                    <button class="btn" onClick=${() => setTagTransfer(prev => ({ ...prev, step: 'tags', selectedTag: null }))}
-                                        style="font-size:12px;padding:4px 12px;margin-bottom:12px;">
-                                        \u2190 Back to tags
-                                    </button>
-                                    <p style="color:var(--text-dim);">
-                                        Transfer <strong>${tagTransfer.selectedTag.count}</strong> memor${tagTransfer.selectedTag.count === 1 ? 'y' : 'ies'}
-                                        tagged <span class="tag-chip" style="display:inline-flex;margin:0 4px;">${tagTransfer.selectedTag.tag}</span>
-                                        from <strong>${tagTransfer.agentName}</strong> to:
-                                    </p>
-                                </div>
-                                <div style="display:flex;flex-direction:column;gap:8px;">
-                                    ${agents.filter(a => a.status !== 'removed' && a.agent_id !== tagTransfer.agentId).map(a => html`
-                                        <button class="merge-target-btn" onClick=${() => handleTagTransfer(a.agent_id)} disabled=${transferring}>
-                                            <span>${a.avatar || '\u{1F916}'}</span>
-                                            <span>${a.name}</span>
-                                            <span class="agent-role-badge ${a.role}" style="margin-left:auto;">${a.role}</span>
-                                        </button>
-                                    `)}
-                                </div>
-                                ${transferring && html`<p style="color:var(--primary);font-size:12px;margin-top:12px;">Transferring memories...</p>`}
-                            `}
                         </div>
                     </div>
                 </div>

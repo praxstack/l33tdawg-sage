@@ -124,6 +124,19 @@ type DashboardHandler struct {
 	CometBFTRPC string
 	SigningKey  ed25519.PrivateKey
 
+	// AdminSigningKey is the operator/admin key (~/.sage/agent.key), the
+	// on-chain genesis admin. SigningKey above is the CometBFT validator key,
+	// which is NOT a registered admin, so the admin-gated RBAC txs (GovPropose,
+	// DomainReassign) are signed with this key instead. nil disables the
+	// domain-reassign endpoint. Memory submits keep using SigningKey so
+	// authorship (submitting_agent) stays immutable.
+	AdminSigningKey ed25519.PrivateKey
+	// ResolveAgentKeyFn maps an on-chain agent id to the local Ed25519 key that
+	// produces it (over the keys this node holds), or (nil,false) for a remote
+	// agent. Used to sign owner-scoped AccessGrant/AccessRevoke AS the domain
+	// owner. nil => owner-scoped grants are always deferred.
+	ResolveAgentKeyFn func(agentID string) (ed25519.PrivateKey, bool)
+
 	// BadgerStore — when set, on-chain RBAC is enforced on dashboard endpoints
 	// when requests include X-Agent-ID headers (i.e. MCP agent requests).
 	BadgerStore *store.BadgerStore
@@ -1580,7 +1593,6 @@ func (h *DashboardHandler) handleBulkUpdateMemories(w http.ResponseWriter, r *ht
 		IDs     []string `json:"ids"`
 		Domain  string   `json:"domain,omitempty"`
 		AddTags []string `json:"add_tags,omitempty"`
-		Agent   string   `json:"agent,omitempty"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -1595,8 +1607,8 @@ func (h *DashboardHandler) handleBulkUpdateMemories(w http.ResponseWriter, r *ht
 		writeError(w, http.StatusBadRequest, "max 500 memories per bulk operation")
 		return
 	}
-	if body.Domain == "" && len(body.AddTags) == 0 && body.Agent == "" {
-		writeError(w, http.StatusBadRequest, "domain, add_tags, or agent is required")
+	if body.Domain == "" && len(body.AddTags) == 0 {
+		writeError(w, http.StatusBadRequest, "domain or add_tags is required")
 		return
 	}
 
@@ -1607,14 +1619,6 @@ func (h *DashboardHandler) handleBulkUpdateMemories(w http.ResponseWriter, r *ht
 	for _, id := range body.IDs {
 		if body.Domain != "" {
 			if err := h.store.UpdateDomainTag(ctx, id, body.Domain); err != nil {
-				if firstErr == nil {
-					firstErr = err
-				}
-				continue
-			}
-		}
-		if body.Agent != "" {
-			if err := h.store.UpdateMemoryAgent(ctx, id, body.Agent); err != nil {
 				if firstErr == nil {
 					firstErr = err
 				}

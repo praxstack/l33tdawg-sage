@@ -689,6 +689,16 @@ func runServe() (rerr error) {
 	if sk := loadNodeSigningKey(cometCfg.PrivValidatorKeyFile(), logger); sk != nil {
 		dashboard.SigningKey = sk
 	}
+	// v11.3 RBAC reassign + access-control: the validator key above is not a
+	// registered admin, so admin-gated txs (GovPropose, DomainReassign) are
+	// signed with the operator/admin key (~/.sage/agent.key), and owner-scoped
+	// AccessGrant/AccessRevoke are signed as the resolved domain owner. Neither
+	// touches consensus; memory submits still sign with the validator key so
+	// authorship (submitting_agent) stays immutable.
+	if adminKey := adminSigningKey(); adminKey != nil {
+		dashboard.AdminSigningKey = adminKey
+	}
+	dashboard.ResolveAgentKeyFn = localAgentKeyResolver()
 
 	// Create redeployment orchestrator and wire it to the dashboard
 	redeployer := orchestrator.NewRedeployer(sqliteStore, nodeCtrl, logger)

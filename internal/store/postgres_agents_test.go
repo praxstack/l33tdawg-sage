@@ -352,28 +352,6 @@ func TestPostgresListAgentDomains(t *testing.T) {
 	require.Equal(t, []string{"crypto", "vuln_intel"}, domains)
 }
 
-func TestPostgresReassignMemoriesByDomain(t *testing.T) {
-	s := agentTestStore(t)
-	ctx := context.Background()
-	src := seedAgent(t, s, nil)
-	dst := seedAgent(t, s, nil)
-	seedMemory(t, s, src.AgentID, "crypto")
-	seedMemory(t, s, src.AgentID, "crypto")
-	seedMemory(t, s, src.AgentID, "web")
-
-	count, err := s.ReassignMemoriesByDomain(ctx, src.AgentID, dst.AgentID, "crypto")
-	require.NoError(t, err)
-	assert.Equal(t, int64(2), count)
-
-	srcGot, _ := s.GetAgent(ctx, src.AgentID)
-	dstGot, _ := s.GetAgent(ctx, dst.AgentID)
-	assert.Equal(t, 1, srcGot.MemoryCount, "non-crypto memory stays with source")
-	assert.Equal(t, 2, dstGot.MemoryCount)
-
-	srcDomains, _ := s.ListAgentDomains(ctx, src.AgentID)
-	assert.Equal(t, []string{"web"}, srcDomains)
-}
-
 // TestPostgresTagOpsAreNoOps documents that tags are a SQLite/personal-mode
 // feature: the Postgres tag methods must not error.
 func TestPostgresTagOpsAreNoOps(t *testing.T) {
@@ -384,15 +362,6 @@ func TestPostgresTagOpsAreNoOps(t *testing.T) {
 	tags, err := s.ListAgentTags(ctx, dst.AgentID)
 	require.NoError(t, err)
 	assert.Empty(t, tags)
-
-	count, err := s.ReassignMemoriesByTag(ctx, "some-source", dst.AgentID, "any-tag")
-	require.NoError(t, err)
-	assert.Equal(t, int64(0), count)
-
-	// Still validates the target like SQLite does.
-	require.NoError(t, s.RemoveAgent(ctx, dst.AgentID))
-	_, err = s.ReassignMemoriesByTag(ctx, "some-source", dst.AgentID, "any-tag")
-	require.Error(t, err)
 }
 
 // TestPostgresEnsureAgentSchemaLegacyMigration creates the pre-v8 5-column
