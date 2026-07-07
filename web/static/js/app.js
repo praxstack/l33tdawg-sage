@@ -16,7 +16,11 @@ const html = window.html;
 
 // Product version shown in the CEREBRUM header. Bump at release; the precise
 // build string (git describe) stays available on the backend.
-const SAGE_VERSION = 'v11.0.2';
+// Fallback shown only when /health carries no stamped version (e.g. a plain
+// `go build` dev binary where main.version is "dev"). Keep in sync with the
+// release being built; stamped release builds override this via the live
+// /health read below.
+const SAGE_VERSION = 'v11.3.0';
 
 // MriView — the 3D MRI memory-brain, rendered natively (the dashboard's
 // X-Frame-Options/CSP forbid iframing, so we mount the shared renderer
